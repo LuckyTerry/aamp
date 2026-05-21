@@ -10,7 +10,7 @@ import {
 } from './config.js'
 import { FeishuBridgeRuntime } from './runtime.js'
 
-type CommandName = 'init' | 'run' | 'status' | 'unknown'
+type CommandName = 'init' | 'start' | 'run' | 'status' | 'help' | 'unknown'
 
 interface ParsedArgs {
   command: CommandName
@@ -19,13 +19,19 @@ interface ParsedArgs {
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const [rawCommand, ...rest] = argv
-  const command = (rawCommand ?? 'unknown') as CommandName
+  const [rawCommand, ...tail] = argv
+  const hasCommand = rawCommand !== undefined && !rawCommand.startsWith('-')
+  const command = (hasCommand ? rawCommand : 'start') as CommandName
+  const rest = hasCommand ? tail : argv
   const values: Record<string, string[]> = {}
   const booleans = new Set<string>()
 
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index]
+    if (token === '-h') {
+      booleans.add('help')
+      continue
+    }
     if (!token.startsWith('--')) continue
     const eq = token.indexOf('=')
     if (eq > 2) {
@@ -56,8 +62,11 @@ function printUsage(): void {
 
 Usage:
   aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL] [--app-id ID] [--app-secret SECRET] [--slug NAME] [--domain DOMAIN]
-  aamp-feishu-bridge run [--config-dir DIR]
+  aamp-feishu-bridge start [--config-dir DIR]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
+
+Aliases:
+  run    Alias for start
 `)
 }
 
@@ -131,15 +140,23 @@ async function runBridge(args: ParsedArgs): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2))
+  if (args.booleans.has('help')) {
+    printUsage()
+    return
+  }
   switch (args.command) {
     case 'init':
       await runInit(args)
       return
+    case 'start':
     case 'run':
       await runBridge(args)
       return
     case 'status':
       await runStatus(args)
+      return
+    case 'help':
+      printUsage()
       return
     default:
       printUsage()

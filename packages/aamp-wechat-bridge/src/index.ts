@@ -29,7 +29,8 @@ function printUsage(): void {
     'Commands:',
     '  init      Create or update local bridge config and AAMP mailbox credentials',
     '  login     Start QR login and persist the WeChat bot token locally',
-    '  run       Start the local WeChat bridge daemon',
+    '  start     Start the local WeChat bridge daemon',
+    '  run       Alias for start',
     '  status    Show local config, login state, and target agent information',
     '',
     'Options:',
@@ -38,12 +39,12 @@ function printUsage(): void {
     'Examples:',
     '  aamp-wechat-bridge init',
     '  aamp-wechat-bridge login',
-    '  aamp-wechat-bridge run',
+    '  aamp-wechat-bridge start',
   ].join('\n'))
 }
 
 function parseCliArgs(rawArgs: string[]): ParsedCliArgs {
-  let command = 'run'
+  let command = 'start'
   let commandAssigned = false
   let configDir: string | undefined
   const options: Record<string, string | boolean> = {}
@@ -53,6 +54,11 @@ function parseCliArgs(rawArgs: string[]): ParsedCliArgs {
     if (!commandAssigned && !token.startsWith('-')) {
       command = token
       commandAssigned = true
+      continue
+    }
+
+    if (token === '-h') {
+      options.help = true
       continue
     }
 
@@ -250,6 +256,10 @@ async function handleStatus(configDir?: string): Promise<void> {
 
 async function main(): Promise<void> {
   const parsed = parseCliArgs(argv.slice(2))
+  if (parsed.options.help) {
+    printUsage()
+    return
+  }
   switch (parsed.command) {
     case 'help':
     case '--help':
@@ -262,6 +272,7 @@ async function main(): Promise<void> {
     case 'login':
       await handleLogin(parsed.configDir)
       return
+    case 'start':
     case 'run':
       await handleRun(parsed.configDir)
       return

@@ -19,8 +19,10 @@ npx aamp-feishu-bridge init
 Run the daemon:
 
 ```bash
-npx aamp-feishu-bridge run
+npx aamp-feishu-bridge start
 ```
+
+`run` remains accepted as a backward-compatible alias for `start`.
 
 Inspect current config and runtime state:
 

@@ -196,7 +196,7 @@ The installer will provision an AAMP mailbox for your OpenClaw agent, write the 
 
 ```bash
 npx aamp-feishu-bridge init
-npx aamp-feishu-bridge run
+npx aamp-feishu-bridge start
 ```
 
 This bridge keeps the Feishu app credentials on the user's own machine, provisions a mailbox identity for the bridge itself, and forwards Feishu direct messages or `@Bot` group messages to a target AAMP agent.
@@ -208,7 +208,7 @@ Each message turn is sent as a fresh `task.dispatch`, while sticky chat continui
 ```bash
 npx aamp-wechat-bridge init
 npx aamp-wechat-bridge login
-npx aamp-wechat-bridge run
+npx aamp-wechat-bridge start
 ```
 
 This bridge keeps WeChat bot credentials on the user's own machine, authenticates through terminal QR scan, and forwards direct-message chat turns to a target AAMP agent. Like the Feishu bridge, every chat turn is a new `task.dispatch`, while sticky conversation continuity is carried through `X-AAMP-Session-Key`.

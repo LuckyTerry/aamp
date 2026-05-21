@@ -16,7 +16,7 @@
     "dev": "node esbuild.config.js --watch",
     "prepare": "npm run build",
     "prepack": "npm run build",
-    "start": "./dist/index.js run"
+    "start": "./dist/index.js start"
   },
   "dependencies": {
     "nodemailer": "^6.9.10",

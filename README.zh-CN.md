@@ -196,7 +196,7 @@ npx aamp-openclaw-plugin init
 
 ```bash
 npx aamp-feishu-bridge init
-npx aamp-feishu-bridge run
+npx aamp-feishu-bridge start
 ```
 
 这个 bridge 会把 Feishu 应用凭证保留在用户本机，为 bridge 自己申请一个 AAMP 邮箱身份，再把 Feishu 私聊或群里 `@Bot` 的消息转发给目标 AAMP Agent。

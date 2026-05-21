@@ -1,6 +1,6 @@
 # Agent Asynchronous Messaging Protocol (AAMP) Core Specification
 
-Specification - 15 April 2026
+Specification - 21 May 2026
 
 Core control-plane semantics for interoperable asynchronous task exchange over Internet mail, with an optional streaming observation extension.
 
@@ -150,7 +150,7 @@ The human-readable output or rejection explanation SHOULD appear in the body. St
 
 ## 7. Discovery Document
 
-An AAMP service endpoint MUST publish a discovery document at `/.well-known/aamp`. The document MUST be JSON and MUST identify the protocol name, version, and canonical API base for implementation-specific helper actions.
+An AAMP service endpoint MUST publish a discovery document at `/.well-known/aamp`. The document MUST be JSON and MUST identify the protocol name, version, advertised intents, and the canonical helper API base used by SDK-targeted implementations. SDK-compatible services SHOULD also advertise helper action names and runtime endpoints.
 
 ```json
 {
@@ -162,7 +162,11 @@ An AAMP service endpoint MUST publish a discovery document at `/.well-known/aamp
     "task.ack",
     "task.help_needed",
     "task.result",
-    "task.stream.opened"
+    "task.stream.opened",
+    "pair.request",
+    "pair.respond",
+    "card.query",
+    "card.response"
   ],
   "capabilities": {
     "stream": {
@@ -175,7 +179,31 @@ An AAMP service endpoint MUST publish a discovery document at `/.well-known/aamp
     }
   },
   "api": {
-    "url": "/api/aamp"
+    "url": "/api/aamp",
+    "actions": [
+      "aamp.mailbox.check",
+      "aamp.mailbox.register",
+      "aamp.mailbox.credentials",
+      "aamp.mailbox.send",
+      "aamp.mailbox.inbox",
+      "aamp.mailbox.thread",
+      "aamp.push.register",
+      "aamp.push.unregister",
+      "aamp.stream.create",
+      "aamp.stream.append",
+      "aamp.stream.close",
+      "aamp.stream.get",
+      "aamp.directory.upsert",
+      "aamp.directory.list",
+      "aamp.directory.search"
+    ]
+  },
+  "endpoints": {
+    "discovery": "/.well-known/aamp",
+    "api": "/api/aamp",
+    "jmapSession": "/.well-known/jmap",
+    "jmapApi": "/jmap/",
+    "jmapWebSocket": "/jmap/ws"
   }
 }
 ```
@@ -190,7 +218,7 @@ A service that claims compatibility with the present SDK ecosystem SHOULD implem
 
 #### 7.1.1 Discovery Requirements for SDK Compatibility
 
-An SDK-compatible service MUST return `api.url` from `/.well-known/aamp`. If stream support is offered, it MUST also return a `capabilities.stream` object with `transport = "sse"` and either the default stream action names or explicit overrides.
+An SDK-compatible service MUST return `api.url` from `/.well-known/aamp`. It SHOULD also return `api.actions` so independent implementers can discover the concrete helper surface. If stream support is offered, it MUST also return a `capabilities.stream` object with `transport = "sse"` and either the default stream action names or explicit overrides.
 
 #### 7.1.2 Mailbox-Scoped Authentication
 
@@ -204,16 +232,68 @@ Authorization: Basic <mailboxToken>
 
 | Action | Method | Authentication | Minimum Contract |
 | --- | --- | --- | --- |
+| `aamp.mailbox.check` | GET | None | Accept `email`; return `{ aamp: boolean, domain?: string }`. |
 | `aamp.mailbox.register` | POST | None | Accept a JSON body with `slug` and optional `description`. Return a registration code suitable for a subsequent credential exchange. |
 | `aamp.mailbox.credentials` | GET | None | Accept a query parameter `code`. Return `email`, `mailbox.token`, and `smtp.password`. |
 | `aamp.mailbox.send` | POST | Basic mailbox token | Accept `to`, `subject`, `text`, optional `aampHeaders`, and optional base64-encoded attachments. Return a response containing `messageId`. |
+| `aamp.mailbox.inbox` | GET | Basic mailbox token | Return mailbox task summaries for the authenticated mailbox. |
 | `aamp.mailbox.thread` | GET | Basic mailbox token | Accept `taskId` and optional `includeStreamOpened`. Return `{ taskId, events[] }`. |
 | `aamp.stream.create` | POST | Basic mailbox token | Accept `taskId` and `peerEmail`. Return stream state including `streamId`. |
 | `aamp.stream.append` | POST | Basic mailbox token | Accept `streamId`, `type`, and `payload`. Return the appended event. |
 | `aamp.stream.close` | POST | Basic mailbox token | Accept `streamId` and optional payload. Return the final stream state. |
 | `aamp.stream.get` | GET | Basic mailbox token | Accept `streamId` or `taskId`. Return the current stream state or 404. |
+| `aamp.directory.upsert` | POST | Basic mailbox token | Accept `summary` and/or `cardText`; return `{ ok, profile }`. |
+| `aamp.directory.list` | GET | Basic mailbox token | Accept optional `scope`, `includeSelf`, and `limit`; return `{ scope, agents }`. |
+| `aamp.directory.search` | GET | Basic mailbox token | Accept `q` plus optional `scope`, `includeSelf`, and `limit`; return `{ scope, query, agents }`. |
+| `aamp.push.register` / `aamp.push.unregister` | POST | Basic mailbox token | If advertised, accept `deviceToken` and optional `environment`; return `{ ok: true }`. |
 
-#### 7.1.4 Extended SDK Surface
+#### 7.1.4 Canonical Helper Invocation
+
+SDK-compatible helper actions are invoked against the discovered `api.url` by placing the action name in the `action` query parameter. The action name is not encoded as a REST path segment and is not required in the JSON body. POST bodies contain only the action arguments. GET arguments are query parameters alongside `action`. Relative `api.url` values are resolved against the discovery origin.
+
+```http
+POST /api/aamp?action=aamp.mailbox.register
+Content-Type: application/json
+
+{ "slug": "demo-agent", "description": "Demo AAMP agent" }
+
+GET /api/aamp?action=aamp.mailbox.credentials&code=<registrationCode>
+
+POST /api/aamp?action=aamp.mailbox.send
+Authorization: Basic <mailboxToken>
+Content-Type: application/json
+
+{
+  "to": "worker@example.com",
+  "subject": "Review task",
+  "text": "Please review this change.",
+  "aampHeaders": {
+    "X-AAMP-Version": "1.1",
+    "X-AAMP-Intent": "task.dispatch",
+    "X-AAMP-TaskId": "task_123"
+  },
+  "attachments": [
+    { "filename": "context.txt", "contentType": "text/plain", "content": "<base64>" }
+  ]
+}
+```
+
+#### 7.1.5 SDK Response Contracts
+
+| Surface | Response Contract |
+| --- | --- |
+| `aamp.mailbox.register` | Return HTTP 201 or 200 with `{ id, email, description, registrationCode, expiresInSeconds, credentialsAction: "aamp.mailbox.credentials" }`. `registrationCode` is the required field name consumed by SDK registration. |
+| `aamp.mailbox.credentials` | Return `{ email, mailbox: { token }, smtp: { password } }`. The mailbox token is sent later as `Authorization: Basic <token>`. |
+| `aamp.mailbox.send` | Request attachments use `{ filename, contentType, content }` where `content` is base64. Return `{ ok: true, from, to, messageId }`. |
+| `aamp.mailbox.thread` | Return `{ taskId, events }`. Each event should include `intent`, `from`, `to`, `createdAt`, and may include `status`, `title`, `bodyText`, `output`, `errorMsg`, `question`, `blockedReason`, `attachments`, and `messageId`. |
+| `aamp.stream.create` | Return `TaskStreamState`: `{ streamId, taskId, ownerEmail, peerEmail, status, createdAt, openedAt?, closedAt?, latestEvent? }`, where `status` is `created`, `opened`, or `closed`. |
+| `aamp.stream.append` | Return a `StreamEvent`: `{ id, streamId, taskId, seq, timestamp, type, payload }`. `seq` is monotonically increasing within the stream. |
+| `aamp.stream.close` | Append a final `done` event when practical and return the final `TaskStreamState` with `status: "closed"`. |
+| `aamp.stream.get` | Return the current `TaskStreamState` by `streamId` or latest stream for `taskId`, or 404 when absent. |
+| SSE subscribe URL | Resolve `capabilities.stream.subscribeUrlTemplate`, replace `{streamId}`, require Basic auth, support `Last-Event-ID` or `lastEventId`, and emit SSE frames with `id: <event.id>`, `event: <event.type>`, and `data:` containing the full `StreamEvent` JSON. |
+| Directory actions | `upsert` returns `{ ok: true, profile: { email, summary, cardText } }`; `list` returns `{ scope, agents: [{ email, summary }] }`; `search` returns `{ scope, query, agents: [{ email, summary, score }] }`. |
+
+#### 7.1.6 Extended SDK Surface
 
 The current SDK also exposes directory methods. Full feature-level compatibility SHOULD additionally implement `aamp.directory.upsert`, `aamp.directory.list`, and `aamp.directory.search`. Management-facing deployments may also implement `aamp.mailbox.check` and `aamp.mailbox.inbox`.
 
@@ -226,20 +306,20 @@ SDK helper compatibility alone is insufficient to reproduce the behavior of a de
 A full runtime-compatible service SHOULD advertise the following endpoints from `/.well-known/aamp` and MUST serve them at stable URLs on the discovered origin:
 
 - `/.well-known/jmap` for authenticated JMAP session discovery.
-- `/jmap/` for JMAP method calls.
+- `/jmap/` for JMAP method calls. Servers SHOULD also accept `/jmap` without the trailing slash for compatibility, but SDK clients call the slash form.
 - `/jmap/ws` for JMAP-over-WebSocket push.
 - `/jmap/download/{accountId}/{blobId}/{name}` when the JMAP session does not provide `downloadUrl`.
 - SMTP submission, or a standards-equivalent authenticated submission path, for the provisioned mailbox identity.
 
 #### 7.2.2 JMAP Session and Method Requirements
 
-The service MUST accept `Authorization: Basic <mailboxToken>` on `GET /.well-known/jmap` and return a valid JMAP session object containing at least `accounts`, `primaryAccounts`, `username`, `apiUrl`, and `state`. A usable `downloadUrl` is RECOMMENDED.
+The service MUST accept `Authorization: Basic <mailboxToken>` on `GET /.well-known/jmap` and return a valid JMAP session object containing at least `accounts`, `primaryAccounts`, `username`, `apiUrl`, and `state`. `apiUrl` SHOULD resolve to `/jmap/`; implementations MAY additionally accept `/jmap` as an alias. A usable `downloadUrl` is RECOMMENDED.
 
 The service MUST support the following JMAP mail methods on `POST /jmap/`:
 
 | Method | Minimum Requirement |
 | --- | --- |
-| `Email/get` | Support empty `ids` to obtain state and support fetching messages with headers, body values, and attachment metadata. |
+| `Email/get` | Support empty `ids` to obtain state. For fetched messages, include `id`, `blobId`, `threadId`, `mailboxIds`, `keywords`, `size`, `receivedAt`, `messageId`, `from`, `to`, `subject`, `headers`, `textBody`, `bodyValues`, and `attachments`. `messageId` MUST be an array of Message-ID strings. `headers` MUST be an array of `{ name, value }` entries containing all `X-AAMP-*` headers. The first `textBody[].partId` MUST have a matching `bodyValues[partId].value`, because SDK receivers read body text through that relation. |
 | `Email/changes` | Support incremental sync by `sinceState` or return the standard error indicating that state-based changes cannot be calculated. |
 | `Email/query` | Support recent-message queries sorted by `receivedAt` descending. |
 | `Mailbox/get` | Expose mailbox roles so the client can locate a Sent mailbox. |

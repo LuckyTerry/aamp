@@ -26,8 +26,10 @@ Login with WeChat QR scan:
 Run the daemon:
 
 ```bash
-./dist/index.js run
+./dist/index.js start
 ```
+
+`run` remains accepted as a backward-compatible alias for `start`.
 
 Inspect current config and login state:
 
