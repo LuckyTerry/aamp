@@ -16,7 +16,7 @@ Initialize the bridge:
 npx aamp-acp-bridge init
 ```
 
-The init wizard scans installed ACP-capable agents, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
+The init wizard scans installed ACP-capable agents, including Hermes, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
 
 - Pair with a five-minute terminal QR code plus the matching `aamp://connect?...` URL.
 - Manually enter `senderPolicies`.
@@ -107,3 +107,17 @@ Legacy `senderWhitelist` configs still load and are normalized into `senderPolic
 When editing the `senderPoliciesFile` directly, `pairedAt` is optional; the bridge accepts manually added records with just `sender` and optional `dispatchContextRules`.
 `credentialsFile` is optional. If omitted, the bridge uses `~/.aamp/acp-bridge/credentials/<agent>.json`.
 `taskDispatchConcurrency` is optional and defaults to `10`.
+
+### Hermes
+
+Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP command:
+
+```json
+{
+  "name": "hermes",
+  "acpCommand": "hermes acp",
+  "slug": "hermes-bridge"
+}
+```
+
+`init --agent hermes` writes this command automatically when Hermes is installed.

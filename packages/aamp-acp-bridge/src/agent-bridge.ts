@@ -2,6 +2,7 @@ import {
   AampClient,
   type TaskDispatch,
   type AampAttachment,
+  type ReceivedAttachment,
   type StructuredResultField,
   type TaskCancel,
   type AampThreadEvent,
@@ -15,8 +16,9 @@ import {
 } from './acpx-client.js'
 import { buildPrompt, parseResponse, type ResultAttachmentRef } from './prompt-builder.js'
 import type { AgentConfig } from './config.js'
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import { basename, dirname } from 'node:path'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 import { resolveCredentialsFile } from './storage.js'
 import {
   addSenderPolicy,
@@ -28,6 +30,10 @@ import {
   validatePairingCode,
   type SenderPolicy,
 } from './pairing.js'
+
+const TEXT_DELTA_FLUSH_MS = 5_000
+const TEXT_DELTA_FLUSH_CHARS = 120
+const TEXT_DELTA_BOUNDARY_CHARS = 32
 
 export interface AgentIdentity {
   email: string
@@ -170,13 +176,11 @@ function formatPlanUpdate(entries: AcpPlanEntry[]): string {
 function renderTextChunk(chunk: AcpTextChunk, state: StreamTextRenderState): string {
   if (!chunk.text) return ''
 
-  const sameMessage = Boolean(
-    state.currentChannel === chunk.channel
-    && (
-      !chunk.messageId
-      || !state.currentMessageId
-      || chunk.messageId === state.currentMessageId
-    ),
+  const sameChannel = state.currentChannel === chunk.channel
+  const sameMessage = sameChannel && (
+    chunk.messageId && state.currentMessageId
+      ? chunk.messageId === state.currentMessageId
+      : !chunk.messageId && !state.currentMessageId
   )
 
   if (sameMessage) {
@@ -192,8 +196,7 @@ function renderTextChunk(chunk: AcpTextChunk, state: StreamTextRenderState): str
     return `${prefix}[thinking] ${chunk.text}`
   }
 
-  const label = state.hasContent && prefix ? '[assistant] ' : ''
-  return `${prefix}${label}${chunk.text}`
+  return `${prefix}${chunk.text}`
 }
 
 function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
@@ -240,6 +243,32 @@ function sanitizeAttachmentFilename(value: string | undefined, path: string): st
 function sanitizeContentType(value: string | undefined): string {
   const normalized = value?.replace(/[\r\n]/g, '').trim()
   return normalized || 'application/octet-stream'
+}
+
+function endsAtTextBoundary(value: string): boolean {
+  return /(?:\n|[。！？!?．.]\s*)$/.test(value)
+}
+
+function sanitizeIncomingAttachmentFilename(value: string | undefined, index: number): string {
+  const fallback = `attachment-${index + 1}`
+  const base = basename(value?.replace(/[\r\n]/g, ' ').trim() || fallback)
+    .replace(/[^\w .()@+-]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return base || fallback
+}
+
+function sanitizePathToken(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 64) || 'task'
+}
+
+function describeIncomingAttachment(attachment: ReceivedAttachment): string {
+  const parts = [
+    attachment.filename,
+    attachment.contentType,
+    Number.isFinite(attachment.size) ? `${attachment.size} bytes` : '',
+  ].filter(Boolean)
+  return parts.join(', ')
 }
 
 function mergeAttachmentRefs(files: string[], attachmentRefs?: ResultAttachmentRef[]): ResultAttachmentRef[] {
@@ -587,6 +616,12 @@ export class AgentBridge {
     let streamClosed = false
     const streamTextState: StreamTextRenderState = { hasContent: false }
     let currentPhase: AcpTextChunk['channel'] | null = null
+    let pendingTextDelta: {
+      text: string
+      channel?: unknown
+      messageId?: unknown
+      timer?: ReturnType<typeof setTimeout>
+    } | null = null
 
     const queueStreamAppend = (
       type: 'text.delta' | 'progress' | 'status',
@@ -617,7 +652,74 @@ export class AgentBridge {
       pendingStreamWrites.add(write)
     }
 
+    const clearPendingTextDeltaTimer = () => {
+      if (pendingTextDelta?.timer) {
+        clearTimeout(pendingTextDelta.timer)
+        pendingTextDelta.timer = undefined
+      }
+    }
+
+    const flushPendingTextDelta = () => {
+      if (!pendingTextDelta?.text) {
+        clearPendingTextDeltaTimer()
+        pendingTextDelta = null
+        return
+      }
+
+      const payload: Record<string, unknown> = {
+        text: pendingTextDelta.text,
+        ...(typeof pendingTextDelta.channel === 'string' ? { channel: pendingTextDelta.channel } : {}),
+        ...(typeof pendingTextDelta.messageId === 'string' ? { messageId: pendingTextDelta.messageId } : {}),
+      }
+      clearPendingTextDeltaTimer()
+      pendingTextDelta = null
+      queueStreamAppend('text.delta', payload)
+    }
+
+    const schedulePendingTextDeltaFlush = () => {
+      if (!pendingTextDelta || pendingTextDelta.timer) return
+      pendingTextDelta.timer = setTimeout(() => {
+        flushPendingTextDelta()
+      }, TEXT_DELTA_FLUSH_MS)
+    }
+
+    const queueTextDelta = (payload: Record<string, unknown>) => {
+      const text = typeof payload.text === 'string' ? payload.text : ''
+      if (!text) return
+
+      const channel = payload.channel
+      const messageId = payload.messageId
+      const canMerge = pendingTextDelta
+        && pendingTextDelta.channel === channel
+        && pendingTextDelta.messageId === messageId
+
+      if (!canMerge) {
+        flushPendingTextDelta()
+        pendingTextDelta = {
+          text: '',
+          channel,
+          messageId,
+        }
+      }
+
+      pendingTextDelta!.text += text
+      const pendingText = pendingTextDelta!.text
+      if (
+        pendingText.length >= TEXT_DELTA_FLUSH_CHARS
+        || (
+          pendingText.length >= TEXT_DELTA_BOUNDARY_CHARS
+          && endsAtTextBoundary(pendingText)
+        )
+      ) {
+        flushPendingTextDelta()
+        return
+      }
+
+      schedulePendingTextDeltaFlush()
+    }
+
     const flushStreamWrites = async () => {
+      flushPendingTextDelta()
       while (pendingStreamWrites.size > 0) {
         await Promise.allSettled([...pendingStreamWrites])
       }
@@ -628,6 +730,8 @@ export class AgentBridge {
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
+      flushPendingTextDelta()
+      await flushStreamWrites()
       try {
         await this.client.appendStreamEvent({
           streamId: activeStream.streamId,
@@ -655,6 +759,7 @@ export class AgentBridge {
 
     const queuePhaseStatus = (channel: AcpTextChunk['channel']) => {
       if (currentPhase === channel) return
+      flushPendingTextDelta()
       currentPhase = channel
       queueStreamAppend('status', {
         state: 'running',
@@ -675,7 +780,21 @@ export class AgentBridge {
       })
       await appendStreamEvent('status', { state: 'running', label: 'ACP task started' })
 
-      const prompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
+      const attachmentPromptLines = await this.materializeIncomingAttachments(hydratedTask)
+      const promptTask = attachmentPromptLines.length > 0
+        ? {
+            ...hydratedTask,
+            bodyText: [
+              hydratedTask.bodyText,
+              '',
+              'Downloaded attachments:',
+              ...attachmentPromptLines,
+              '',
+              'Use these local file paths when the user asks about attached images or files.',
+            ].filter((line) => line != null).join('\n'),
+          }
+        : hydratedTask
+      const prompt = buildPrompt(promptTask, hydratedTask.threadContextText, this.name)
       await this.acpx.ensureSession(this.agentConfig.acpCommand, taskSessionName)
       await appendStreamEvent('progress', { value: 0.2, label: 'Prompt sent to ACP agent' })
       const result = await this.acpx.prompt(this.agentConfig.acpCommand, taskSessionName, prompt, {
@@ -683,24 +802,26 @@ export class AgentBridge {
           queuePhaseStatus(chunk.channel)
           const rendered = renderTextChunk(chunk, streamTextState)
           if (!rendered) return
-          queueStreamAppend('text.delta', {
+          queueTextDelta({
             text: rendered,
             channel: chunk.channel,
             ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
           })
         },
         onToolUpdate: (update) => {
+          flushPendingTextDelta()
           queueStreamAppend('progress', {
             label: buildToolProgressLabel(update),
             ...(update.title ? { title: update.title } : {}),
             ...(update.status ? { status: update.status } : {}),
             ...(update.kind ? { kind: update.kind } : {}),
             ...(update.toolCallId ? { toolCallId: update.toolCallId } : {}),
+            ...(update.locations?.length ? { locations: update.locations } : {}),
           })
         },
         onPlanUpdate: (entries) => {
           queuePhaseStatus('thought')
-          queueStreamAppend('text.delta', {
+          queueTextDelta({
             text: `${streamTextState.hasContent ? '\n\n' : ''}${formatPlanUpdate(entries)}`,
             channel: 'thought',
           })
@@ -728,7 +849,7 @@ export class AgentBridge {
         // Agent needs help
         if (!result.streamedAssistantText && parsed.question) {
           queuePhaseStatus('assistant')
-          queueStreamAppend('text.delta', {
+          queueTextDelta({
             text: renderTextChunk(
               { channel: 'assistant', text: parsed.question },
               streamTextState,
@@ -776,7 +897,7 @@ export class AgentBridge {
         // Task completed
         if (parsed.output && !result.streamedAssistantText) {
           queuePhaseStatus('assistant')
-          queueStreamAppend('text.delta', {
+          queueTextDelta({
             text: renderTextChunk(
               { channel: 'assistant', text: parsed.output },
               streamTextState,
@@ -823,6 +944,33 @@ export class AgentBridge {
   private handleCancel(task: TaskCancel): void {
     this.cancelledTaskIds.add(task.taskId)
     console.warn(`[${this.name}] <- task.cancel  ${task.taskId}  from=${task.from}`)
+  }
+
+  private async materializeIncomingAttachments(task: TaskDispatch): Promise<string[]> {
+    const attachments = task.attachments ?? []
+    if (!attachments.length || !this.client) return []
+
+    const attachmentDir = mkdtempSync(join(tmpdir(), `aamp-acp-${sanitizePathToken(task.taskId)}-`))
+    const usedNames = new Set<string>()
+    const lines: string[] = []
+
+    for (const [index, attachment] of attachments.entries()) {
+      const baseName = sanitizeIncomingAttachmentFilename(attachment.filename, index)
+      const filename = usedNames.has(baseName) ? `${index + 1}-${baseName}` : baseName
+      usedNames.add(filename)
+      const filePath = join(attachmentDir, filename)
+
+      try {
+        const content = await this.client.downloadBlob(attachment.blobId, attachment.filename)
+        writeFileSync(filePath, content)
+        lines.push(`- ${describeIncomingAttachment(attachment)}: ${filePath}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        lines.push(`- ${describeIncomingAttachment(attachment)}: download failed: ${message}`)
+      }
+    }
+
+    return lines
   }
 
   private async sendPairResponse(request: PairRequest, success: boolean, reason?: string): Promise<boolean> {

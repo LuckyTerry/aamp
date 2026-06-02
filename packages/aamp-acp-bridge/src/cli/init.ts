@@ -16,6 +16,7 @@ import {
 const KNOWN_AGENTS = [
   'claude', 'codex', 'gemini', 'goose', 'openclaw',
   'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
+  'hermes',
 ]
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
@@ -453,6 +454,10 @@ function detectAgent(name: string): string | null {
   }
 }
 
+function defaultAcpCommand(name: string): string {
+  return name === 'hermes' ? 'hermes acp' : name
+}
+
 function renderQrFallback(value: string): void {
   console.log('  Could not render a terminal QR code. Paste this pairing URL instead:')
   console.log(`  ${value}`)
@@ -565,6 +570,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
 
   for (const name of selected) {
     const slug = `${name}-bridge`
+    const acpCommand = defaultAcpCommand(name)
     const credFile = getDefaultCredentialsPath(name)
     const pairingFile = defaultPairingFile(name)
     const senderPoliciesFile = defaultSenderPoliciesFile(name)
@@ -591,7 +597,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
       }
       agents.push({
         name,
-        acpCommand: name,
+        acpCommand,
         slug,
         credentialsFile: credFile,
         pairingFile,
@@ -623,7 +629,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
       }
       agents.push({
         name,
-        acpCommand: name,
+        acpCommand,
         slug,
         credentialsFile: credFile,
         pairingFile,

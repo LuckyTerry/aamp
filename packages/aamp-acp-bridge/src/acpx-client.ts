@@ -261,7 +261,14 @@ export class AcpxClient {
     this.cwd = cwd ?? process.cwd()
   }
 
+  private isRawAgentCommand(agent: string): boolean {
+    return /\s/.test(agent.trim())
+  }
+
   private buildAcpxArgs(agent: string, args: string[], globalArgs: string[] = []): string[] {
+    if (this.isRawAgentCommand(agent)) {
+      return ['--approve-all', '--cwd', this.cwd, ...globalArgs, '--agent', agent, ...args]
+    }
     return ['--approve-all', '--cwd', this.cwd, ...globalArgs, agent, ...args]
   }
 
@@ -341,6 +348,8 @@ export class AcpxClient {
     const assistantMessages = new Map<string, string>()
     const assistantMessageOrder: string[] = []
     let lastAssistantMessageKey: string | undefined
+    let lastThoughtMessageKey: string | undefined
+    let thoughtMessageCount = 0
     let previousEventType: string | undefined
 
     return new Promise<AcpResult>((resolve, reject) => {
@@ -374,8 +383,8 @@ export class AcpxClient {
         if (event.type === 'agent_message_chunk') {
           const textChunk = extractContentText(event.content)
           if (textChunk) {
-            const messageId = asString(event.messageId)
-            const messageKey = messageId
+            const explicitMessageId = asString(event.messageId)
+            const messageKey = explicitMessageId
               ?? (previousEventType === 'agent_message_chunk' && lastAssistantMessageKey
                 ? lastAssistantMessageKey
                 : `anonymous:${assistantMessageOrder.length}`)
@@ -391,7 +400,7 @@ export class AcpxClient {
             handlers?.onTextChunk?.({
               channel: 'assistant',
               text: textChunk,
-              ...(messageId ? { messageId } : {}),
+              messageId: messageKey,
             })
           }
           previousEventType = event.type
@@ -401,10 +410,15 @@ export class AcpxClient {
         if (event.type === 'agent_thought_chunk') {
           const textChunk = extractContentText(event.content)
           if (textChunk) {
+            const messageId = asString(event.messageId)
+              ?? (previousEventType === 'agent_thought_chunk' && lastThoughtMessageKey
+                ? lastThoughtMessageKey
+                : `anonymous-thought:${thoughtMessageCount++}`)
+            lastThoughtMessageKey = messageId
             handlers?.onTextChunk?.({
               channel: 'thought',
               text: textChunk,
-              messageId: asString(event.messageId),
+              messageId,
             })
           }
           previousEventType = event.type
