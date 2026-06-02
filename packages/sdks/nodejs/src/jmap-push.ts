@@ -600,30 +600,17 @@ export class JmapPushClient extends TinyEmitter<JmapPushEvents> {
       this.scheduleReconnect()
     })
 
-    this.ws.on('open', async () => {
-      this.connecting = false
-      this.connected = true
-      this.stopPolling()
-      this.startPingHeartbeat()
-
-      // On first connect (emailState is null), initialize state so we only
-      // process emails arriving AFTER this point.
-      // On reconnect, emailState is already set — Email/changes will catch up.
-      const accountId = this.session?.primaryAccounts['urn:ietf:params:jmap:mail']
-      if (accountId && this.emailState === null) {
-        await this.initEmailState(accountId)
-      }
-
-      // Subscribe to Email state changes AFTER state is initialized
-      this.ws!.send(
-        JSON.stringify({
-          '@type': 'WebSocketPushEnable',
-          dataTypes: ['Email'],
-          pushState: null,
-        }),
-      )
-
-      this.emit('connected')
+    this.ws.on('open', () => {
+      void this.handleWebSocketOpen().catch((err) => {
+        const reason = `websocket open initialization failed: ${(err as Error).message}`
+        this.connecting = false
+        this.connected = false
+        this.stopPingHeartbeat()
+        this.startPolling(reason)
+        this.emit('error', new Error(`JMAP ${reason}`))
+        this.ws?.close()
+        this.scheduleReconnect()
+      })
     })
 
     this.ws.on('pong', () => {
@@ -686,6 +673,32 @@ export class JmapPushClient extends TinyEmitter<JmapPushEvents> {
       clearInterval(this.pingTimer)
       this.pingTimer = null
     }
+  }
+
+  private async handleWebSocketOpen(): Promise<void> {
+    this.connecting = false
+    this.connected = true
+    this.stopPolling()
+    this.startPingHeartbeat()
+
+    // On first connect (emailState is null), initialize state so we only
+    // process emails arriving AFTER this point.
+    // On reconnect, emailState is already set — Email/changes will catch up.
+    const accountId = this.session?.primaryAccounts['urn:ietf:params:jmap:mail']
+    if (accountId && this.emailState === null) {
+      await this.initEmailState(accountId)
+    }
+
+    // Subscribe to Email state changes AFTER state is initialized
+    this.ws?.send(
+      JSON.stringify({
+        '@type': 'WebSocketPushEnable',
+        dataTypes: ['Email'],
+        pushState: null,
+      }),
+    )
+
+    this.emit('connected')
   }
 
   private startSafetySync(): void {

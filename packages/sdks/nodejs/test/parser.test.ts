@@ -21,7 +21,7 @@ describe('parseAampHeaders', () => {
   describe('task.dispatch', () => {
     it('parses a valid task.dispatch email', () => {
       const result = parseAampHeaders({
-        from: 'meego-bot@aamp.example.com',
+        from: 'coordinator@aamp.example.com',
         to: 'codereviewer@aamp.example.com',
         messageId: '<msg-123@aamp.example.com>',
         subject: '[AAMP Task] Review PR #456',
@@ -39,14 +39,14 @@ describe('parseAampHeaders', () => {
       expect(result.taskId).toBe('task-uuid-1234')
       expect(result.title).toBe('Review PR #456')
       expect(result.expiresAt).toBe('2026-04-07T12:00:00.000Z')
-      expect(result.from).toBe('meego-bot@aamp.example.com')
+      expect(result.from).toBe('coordinator@aamp.example.com')
       expect(result.to).toBe('codereviewer@aamp.example.com')
       expect(result.messageId).toBe('<msg-123@aamp.example.com>')
     })
 
     it('handles headers with angle brackets in from/to', () => {
       const result = parseAampHeaders({
-        from: '<meego-bot@aamp.example.com>',
+        from: '<coordinator@aamp.example.com>',
         to: '<agent@aamp.example.com>',
         messageId: '<msg@host>',
         subject: '[AAMP Task] Do something',
@@ -57,13 +57,13 @@ describe('parseAampHeaders', () => {
         },
       })
 
-      expect(result!.from).toBe('meego-bot@aamp.example.com')
+      expect(result!.from).toBe('coordinator@aamp.example.com')
       expect(result!.to).toBe('agent@aamp.example.com')
     })
 
     it('handles case-insensitive headers', () => {
       const result = parseAampHeaders({
-        from: 'meego-bot@aamp.example.com',
+        from: 'coordinator@aamp.example.com',
         to: 'agent@aamp.example.com',
         messageId: 'msg',
         subject: '[AAMP Task] Test',
@@ -80,7 +80,7 @@ describe('parseAampHeaders', () => {
 
     it('strips [AAMP Task] prefix from subject for title', () => {
       const result = parseAampHeaders({
-        from: 'meego-bot@aamp.example.com',
+        from: 'coordinator@aamp.example.com',
         to: 'agent@aamp.example.com',
         messageId: 'msg',
         subject: '[AAMP Task] My Task Title',
@@ -115,7 +115,7 @@ describe('parseAampHeaders', () => {
     it('parses a completed task.result', () => {
       const result = parseAampHeaders({
         from: 'agent@aamp.example.com',
-        to: 'meego-bot@aamp.example.com',
+        to: 'coordinator@aamp.example.com',
         messageId: '<result-msg>',
         subject: '[AAMP Result] Task task-1 — completed',
         headers: {
@@ -139,7 +139,7 @@ describe('parseAampHeaders', () => {
     it('parses a rejected task.result with error message', () => {
       const result = parseAampHeaders({
         from: 'agent@aamp.example.com',
-        to: 'meego-bot@aamp.example.com',
+        to: 'coordinator@aamp.example.com',
         messageId: '<result-msg>',
         subject: '[AAMP Result] Task task-2 — rejected',
         headers: {
@@ -158,7 +158,7 @@ describe('parseAampHeaders', () => {
     it('defaults status to completed if not present', () => {
       const result = parseAampHeaders({
         from: 'agent@aamp.example.com',
-        to: 'meego-bot@aamp.example.com',
+        to: 'coordinator@aamp.example.com',
         messageId: '<result-msg>',
         subject: 'Result',
         headers: {
@@ -177,7 +177,7 @@ describe('parseAampHeaders', () => {
     it('parses a task.help_needed request', () => {
       const result = parseAampHeaders({
         from: 'agent@aamp.example.com',
-        to: 'meego-bot@aamp.example.com',
+        to: 'coordinator@aamp.example.com',
         messageId: '<help-msg>',
         subject: '[AAMP Help] Task task-1 needs assistance',
         headers: {
@@ -344,7 +344,7 @@ describe('round-trip: build headers then parse them', () => {
     })
 
     const parsed = parseAampHeaders({
-      from: 'meego-bot@aamp.example.com',
+      from: 'coordinator@aamp.example.com',
       to: 'agent@aamp.example.com',
       messageId: 'msg-rt-1',
       subject: '[AAMP Task] Round trip task',
@@ -361,7 +361,7 @@ describe('round-trip: build headers then parse them', () => {
 
     const parsed = parseAampHeaders({
       from: 'agent@aamp.example.com',
-      to: 'meego-bot@aamp.example.com',
+      to: 'coordinator@aamp.example.com',
       messageId: 'msg-rt-2',
       subject: '[AAMP Result] ...',
       headers: built as Record<string, string>,
@@ -384,7 +384,7 @@ describe('round-trip: build headers then parse them', () => {
 
     const parsed = parseAampHeaders({
       from: 'agent@aamp.example.com',
-      to: 'meego-bot@aamp.example.com',
+      to: 'coordinator@aamp.example.com',
       messageId: 'msg-rt-3',
       subject: '[AAMP Help] ...',
       headers: built as Record<string, string>,
