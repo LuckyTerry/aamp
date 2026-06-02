@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
+import type { Readable } from 'node:stream'
 import {
   AampClient,
   type AampAttachment,
@@ -9,12 +10,12 @@ import {
   type TaskHelp,
   type TaskResult,
   type TaskStreamOpened,
+  type ReceivedAttachment,
 } from 'aamp-sdk'
 import {
   LoggerLevel,
   type BotIdentity,
   type CardActionEvent,
-  type CardStreamController,
   createLarkChannel,
   type LarkChannel,
   type NormalizedMessage,
@@ -28,8 +29,11 @@ import {
 import type {
   BridgeConfig,
   BridgeConversationState,
+  BridgeStreamCursor,
+  BridgeStreamEntry,
   BridgeState,
   BridgeTaskState,
+  BridgeToolTraceItem,
 } from './types.js'
 
 interface BridgeRuntimeOptions {
@@ -45,6 +49,7 @@ interface SenderRawEvent {
 
 interface FeishuCardSession {
   messageId?: string
+  cardId?: string
   closed: boolean
   currentCard: Record<string, unknown>
   ready: Promise<void>
@@ -64,8 +69,46 @@ interface PreparedAttachments {
   notes: string[]
 }
 
+interface RepliedMessageContext {
+  messageId: string
+  senderId?: string
+  createTime?: number
+  rawContentType: string
+  content: string
+  resources: ResourceDescriptor[]
+  notes: string[]
+}
+
+interface DownloadedResource {
+  content: Buffer
+  contentType?: string
+}
+
+interface ResultAttachmentSendOutcome {
+  sent: string[]
+  failed: string[]
+}
+
+interface MarkdownElementContent {
+  elementId: string
+  content: string
+}
+
 const RECEIVED_REACTION_CANDIDATES = ['Get']
 const TYPING_REACTION_CANDIDATES = ['Typing']
+const CARD_UPDATE_SIZE_HEURISTIC_BYTES = 24_000
+const CARD_STREAM_PRINT_FREQUENCY_MS = {
+  default: 30,
+  android: 30,
+  ios: 35,
+  pc: 30,
+}
+const CARD_STREAM_PRINT_STEP = {
+  default: 8,
+  android: 8,
+  ios: 8,
+  pc: 8,
+}
 
 export class FeishuBridgeRuntime {
   private readonly aamp: AampClient
@@ -293,8 +336,11 @@ export class FeishuBridgeRuntime {
     if (message.chatType === 'p2p') {
       return `p2p:${message.senderId}`
     }
-    const root = message.threadId || message.rootId || message.replyToMessageId || message.messageId
-    return `group:${message.chatId}:${root}`
+    return `group:${message.chatId}`
+  }
+
+  private shouldReplyInThread(message: NormalizedMessage): boolean {
+    return message.chatType === 'group' && Boolean(message.threadId)
   }
 
   private buildTaskTitle(message: NormalizedMessage): string {
@@ -308,6 +354,7 @@ export class FeishuBridgeRuntime {
     input: {
       chatId: string
       chatType: BridgeTaskState['chatType']
+      replyInThread?: boolean
       senderId: string
       senderName?: string
       userMessageId: string
@@ -324,6 +371,7 @@ export class FeishuBridgeRuntime {
       threadKey,
       chatId: input.chatId,
       chatType: input.chatType,
+      replyInThread: input.replyInThread,
       senderId: input.senderId,
       senderName: input.senderName,
       userMessageId: input.userMessageId,
@@ -344,13 +392,26 @@ export class FeishuBridgeRuntime {
     parentTaskId?: string,
   ): Promise<void> {
     const title = this.buildTaskTitle(message)
-    const attachmentBundle = await this.prepareAttachments(message.resources)
-    const bodyText = this.buildDispatchBody(message, attachmentBundle.notes)
+    const attachmentBundle = await this.prepareAttachments(message)
+    const repliedMessage = await this.resolveRepliedMessageContext(message)
+    const repliedAttachmentBundle = repliedMessage
+      ? await this.prepareAttachments(repliedMessage, {
+          filenamePrefix: 'replied-',
+          notesPrefix: 'Replied message ',
+        })
+      : { attachments: [], notes: [] }
+    const bodyText = this.buildDispatchBody(
+      message,
+      attachmentBundle.notes,
+      repliedMessage,
+      repliedAttachmentBundle.notes,
+    )
     const dispatchContext = this.buildDispatchContext(message)
 
     const task = this.createTaskState({
       chatId: message.chatId,
       chatType: message.chatType,
+      replyInThread: this.shouldReplyInThread(message),
       senderId: message.senderId,
       senderName: message.senderName,
       userMessageId: message.messageId,
@@ -361,7 +422,10 @@ export class FeishuBridgeRuntime {
     await this.dispatchTask(task, {
       bodyText,
       dispatchContext,
-      attachments: attachmentBundle.attachments,
+      attachments: [
+        ...attachmentBundle.attachments,
+        ...repliedAttachmentBundle.attachments,
+      ],
       parentTaskId,
       reactOnReceive: true,
     })
@@ -381,7 +445,7 @@ export class FeishuBridgeRuntime {
     }
 
     const title = `Feishu help reply from ${message.senderName || message.senderId}`
-    const attachmentBundle = await this.prepareAttachments(message.resources)
+    const attachmentBundle = await this.prepareAttachments(message)
     const bodyText = this.buildHelpResponseBody(helpTask, responseText, attachmentBundle.notes)
     const dispatchContext = {
       ...this.buildDispatchContext(message),
@@ -392,6 +456,7 @@ export class FeishuBridgeRuntime {
     const task = this.createTaskState({
       chatId: message.chatId,
       chatType: message.chatType,
+      replyInThread: this.shouldReplyInThread(message),
       senderId: message.senderId,
       senderName: message.senderName,
       userMessageId: message.messageId,
@@ -426,6 +491,7 @@ export class FeishuBridgeRuntime {
     const task = this.createTaskState({
       chatId: helpTask.chatId,
       chatType: helpTask.chatType,
+      replyInThread: helpTask.replyInThread,
       senderId: event.operator.openId,
       senderName: event.operator.name || helpTask.senderName,
       userMessageId: `card-action:${event.messageId}:${randomUUID()}`,
@@ -535,12 +601,38 @@ export class FeishuBridgeRuntime {
     }
   }
 
-  private buildDispatchBody(message: NormalizedMessage, notes: string[] = []): string {
+  private buildDispatchBody(
+    message: NormalizedMessage,
+    notes: string[] = [],
+    repliedMessage?: RepliedMessageContext,
+    repliedNotes: string[] = [],
+  ): string {
     const resourceLines = message.resources.map((resource) => `- ${resource.type}: ${resource.fileName || resource.fileKey}`)
+    const repliedResourceLines = repliedMessage?.resources.map((resource) => `- ${resource.type}: ${resource.fileName || resource.fileKey}`) ?? []
+    const repliedCreatedAt = repliedMessage?.createTime
+      ? new Date(repliedMessage.createTime).toISOString()
+      : undefined
     return [
       `Feishu ${message.chatType === 'p2p' ? 'direct message' : 'group mention'}:`,
       '',
       message.content.trim() || '(empty message)',
+      ...(repliedMessage
+        ? [
+            '',
+            'Replied Feishu message:',
+            `- Message ID: ${repliedMessage.messageId}`,
+            ...(repliedMessage.senderId ? [`- Sender: ${repliedMessage.senderId}`] : []),
+            `- Type: ${repliedMessage.rawContentType || 'unknown'}`,
+            ...(repliedCreatedAt ? [`- Created at: ${repliedCreatedAt}`] : []),
+            '',
+            'Replied message content:',
+            repliedMessage.content.trim() || '(empty message)',
+            ...(repliedResourceLines.length ? ['', 'Replied message attached resources:', ...repliedResourceLines] : []),
+            ...(repliedMessage.notes.length || repliedNotes.length
+              ? ['', 'Replied message notes:', ...repliedMessage.notes, ...repliedNotes]
+              : []),
+          ]
+        : []),
       ...(resourceLines.length ? ['', 'Attached resources:', ...resourceLines] : []),
       ...(notes.length ? ['', 'Attachment notes:', ...notes] : []),
     ].join('\n')
@@ -571,6 +663,9 @@ export class FeishuBridgeRuntime {
       bot_open_id: this.channel.botIdentity?.openId || '',
       is_group_mention: String(message.chatType === 'group'),
       feishu_message_id: message.messageId,
+      feishu_reply_to_message_id: message.replyToMessageId || '',
+      feishu_root_id: message.rootId || '',
+      feishu_thread_id: message.threadId || '',
       tenant_key: raw.sender?.tenant_key || '',
     }
   }
@@ -603,15 +698,29 @@ export class FeishuBridgeRuntime {
     return {
       chatId: task.chatId,
       replyTo: task.userMessageId,
-      replyInThread: task.chatType === 'group',
+      replyInThread: task.replyInThread === true,
     }
   }
 
-  private buildCardShell(elements: Record<string, unknown>[]): Record<string, unknown> {
+  private buildCardShell(
+    elements: Record<string, unknown>[],
+    options: { streaming?: boolean } = {},
+  ): Record<string, unknown> {
     return {
       schema: '2.0',
       config: {
         wide_screen_mode: true,
+        ...(options.streaming
+          ? {
+            streaming_mode: true,
+            summary: { content: '' },
+            streaming_config: {
+              print_frequency_ms: CARD_STREAM_PRINT_FREQUENCY_MS,
+              print_step: CARD_STREAM_PRINT_STEP,
+              print_strategy: 'fast',
+            },
+          }
+          : {}),
       },
       body: {
         direction: 'vertical',
@@ -622,20 +731,18 @@ export class FeishuBridgeRuntime {
   }
 
   private buildStreamingCard(task: BridgeTaskState): Record<string, unknown> {
-    const content = this.sanitizeCardText(task.streamText?.trim() || '_正在输入..._')
     const statusText = this.buildStreamingStatusText(task)
-    return this.buildCardShell([
-      {
+    const elements = this.buildStreamTimelineElements(task, { includePlaceholder: true })
+
+    if (statusText) {
+      elements.push({
         tag: 'markdown',
-        content,
-      },
-      ...(statusText
-        ? [{
-            tag: 'markdown',
-            content: this.sanitizeCardText(`_${statusText}_`),
-          } satisfies Record<string, unknown>]
-        : []),
-    ])
+        element_id: 'st_s',
+        content: this.sanitizeCardText(`_${statusText}_`),
+      })
+    }
+
+    return this.buildCardShell(elements, { streaming: true })
   }
 
   private buildHelpPreludeCard(task: BridgeTaskState): Record<string, unknown> {
@@ -650,9 +757,10 @@ export class FeishuBridgeRuntime {
       },
     ]
 
-    if (task.streamText?.trim()) {
-      elements.push(this.buildCollapsiblePanel('刚才的过程', task.streamText))
-    }
+    elements.push(...this.buildStreamTimelineElements(task, {
+      textPanelTitle: '刚才的过程',
+      includePlaceholder: false,
+    }))
 
     return this.buildCardShell(elements)
   }
@@ -668,8 +776,14 @@ export class FeishuBridgeRuntime {
     const finalText = this.renderCompletedMarkdown(task)
     const streamText = task.streamText?.trim()
     const elements: Record<string, unknown>[] = []
-    if (streamText && this.shouldShowReplayPanel(streamText, finalText)) {
-      elements.push(this.buildCollapsiblePanel('过程回放', streamText))
+    if (
+      (streamText && this.shouldShowReplayPanel(streamText, finalText))
+      || task.streamEntries?.some((entry) => entry.type === 'tool')
+    ) {
+      elements.push(...this.buildStreamTimelineElements(task, {
+        textPanelTitle: '过程回放',
+        includePlaceholder: false,
+      }))
     }
     elements.push({
       tag: 'markdown',
@@ -690,8 +804,14 @@ export class FeishuBridgeRuntime {
 
     const streamText = task.streamText?.trim()
     const elements: Record<string, unknown>[] = []
-    if (streamText && this.shouldShowReplayPanel(streamText, lines.join('\n'))) {
-      elements.push(this.buildCollapsiblePanel('过程回放', streamText))
+    if (
+      (streamText && this.shouldShowReplayPanel(streamText, lines.join('\n')))
+      || task.streamEntries?.some((entry) => entry.type === 'tool')
+    ) {
+      elements.push(...this.buildStreamTimelineElements(task, {
+        textPanelTitle: '过程回放',
+        includePlaceholder: false,
+      }))
     }
     elements.push({
       tag: 'markdown',
@@ -700,36 +820,122 @@ export class FeishuBridgeRuntime {
     return this.buildCardShell(elements)
   }
 
-  private buildCollapsiblePanel(title: string, content: string): Record<string, unknown> {
+  private buildLightToolPanel(
+    entry: Extract<BridgeStreamEntry, { type: 'tool' }>,
+    options: { elementId: string; contentElementId: string },
+  ): Record<string, unknown> {
+    const toolCount = Math.max(
+      1,
+      entry.tools?.length
+        ?? entry.content.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).length,
+    )
+    const title = `执行了 ${toolCount} 个工具调用`
+
     return {
       tag: 'collapsible_panel',
       expanded: false,
-      element_id: `panel_${Math.abs(this.hashString(title)).toString(36).slice(0, 8)}`,
+      element_id: options.elementId,
       header: {
         title: {
-          tag: 'plain_text',
-          content: title,
+          tag: 'markdown',
+          content: this.sanitizeCardText(`<font color='grey'>${title}</font>`),
         },
+        vertical_align: 'center',
+        padding: '0px 0px 0px 0px',
         icon: {
           tag: 'standard_icon',
-          token: 'down-small-ccm_outlined',
+          token: 'right-small-ccm_outlined',
+          color: 'grey',
           size: '16px 16px',
         },
-        icon_position: 'right',
-        icon_expanded_angle: -180,
-      },
-      border: {
-        color: 'grey',
-        corner_radius: '5px',
+        icon_position: 'follow_text',
+        icon_expanded_angle: 90,
       },
       elements: [
         {
           tag: 'markdown',
-          element_id: `panelc_${Math.abs(this.hashString(`${title}:${content.length}`)).toString(36).slice(0, 8)}`,
-          content: this.sanitizeCardText(content.trim()),
+          element_id: options.contentElementId,
+          content: this.sanitizeCardText(entry.content.trim()),
         },
       ],
     }
+  }
+
+  private buildLightTimelinePanel(
+    title: string,
+    elements: Record<string, unknown>[],
+    options: { elementId: string },
+  ): Record<string, unknown> {
+    return {
+      tag: 'collapsible_panel',
+      expanded: false,
+      element_id: options.elementId,
+      header: {
+        title: {
+          tag: 'markdown',
+          content: this.sanitizeCardText(`<font color='grey'>${title}</font>`),
+        },
+        vertical_align: 'center',
+        padding: '0px 0px 0px 0px',
+        icon: {
+          tag: 'standard_icon',
+          token: 'right-small-ccm_outlined',
+          color: 'grey',
+          size: '16px 16px',
+        },
+        icon_position: 'follow_text',
+        icon_expanded_angle: 90,
+      },
+      elements,
+    }
+  }
+
+  private buildStreamTimelineElements(
+    task: BridgeTaskState,
+    options: {
+      includePlaceholder?: boolean
+      textPanelTitle?: string
+    } = {},
+  ): Record<string, unknown>[] {
+    const entries = this.resolveStreamEntries(task)
+    const elements: Record<string, unknown>[] = []
+
+    if (entries.length === 0) {
+      if (options.includePlaceholder === false) return elements
+      return [{
+        tag: 'markdown',
+        element_id: 'st_ph',
+        content: this.sanitizeCardText('_正在思考..._'),
+      }]
+    }
+
+    entries.forEach((entry, index) => {
+      const elementId = this.buildStreamEntryElementId(entry.type, index)
+      if (entry.type === 'text') {
+        const text = entry.text.trim()
+        if (!text) return
+
+        elements.push({
+          tag: 'markdown',
+          element_id: elementId,
+          content: this.sanitizeCardText(text),
+        })
+        return
+      }
+
+      elements.push(this.buildLightToolPanel(entry, {
+        elementId,
+        contentElementId: this.buildStreamEntryContentElementId('tool', index),
+      }))
+    })
+
+    if (options.textPanelTitle && elements.length > 0) {
+      return [this.buildLightTimelinePanel(options.textPanelTitle, elements, {
+        elementId: 'st_rp',
+      })]
+    }
+
+    return elements
   }
 
   private renderCompletedMarkdown(task: BridgeTaskState): string {
@@ -740,6 +946,296 @@ export class FeishuBridgeRuntime {
     if (task.progressLabel?.trim()) return task.progressLabel.trim()
     if (task.statusLabel?.trim()) return task.statusLabel.trim()
     return '正在回复...'
+  }
+
+  private sanitizeStreamEntryId(value: string): string {
+    return value
+      .replace(/[^a-zA-Z0-9_-]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '')
+      .slice(0, 48) || randomUUID().slice(0, 8)
+  }
+
+  private toCardElementId(value: string): string {
+    const normalized = value
+      .replace(/[^a-zA-Z0-9_]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^[^a-zA-Z]+/, '')
+      .slice(0, 20)
+    return normalized || `e${Math.abs(this.hashString(value)).toString(36).slice(0, 8)}`
+  }
+
+  private buildStreamEntryElementId(type: BridgeStreamEntry['type'], index: number): string {
+    return this.toCardElementId(`st_${type === 'text' ? 't' : 'o'}_${index}`)
+  }
+
+  private buildStreamEntryContentElementId(type: BridgeStreamEntry['type'], index: number): string {
+    return this.toCardElementId(`st_${type === 'text' ? 'tc' : 'oc'}_${index}`)
+  }
+
+  private resolveStreamEntries(task: BridgeTaskState): BridgeStreamEntry[] {
+    const entries = task.streamEntries?.length ? task.streamEntries : this.resolveLegacyStreamEntries(task)
+    return this.sliceStreamEntries(entries, task.streamCardStart)
+  }
+
+  private resolveLegacyStreamEntries(task: BridgeTaskState): BridgeStreamEntry[] {
+    const entries: BridgeStreamEntry[] = []
+    if (task.streamText?.trim()) {
+      entries.push({
+        id: 'legacy_text',
+        type: 'text',
+        text: task.streamText,
+      })
+    }
+    if (task.toolTraceText?.trim()) {
+      entries.push({
+        id: 'legacy_tools',
+        type: 'tool',
+        title: this.buildToolPanelTitle({ label: '工具调用' }),
+        content: task.toolTraceText,
+      })
+    }
+    return entries
+  }
+
+  private sliceStreamEntries(
+    entries: BridgeStreamEntry[],
+    cursor: BridgeStreamCursor | undefined,
+  ): BridgeStreamEntry[] {
+    if (!cursor) return entries
+
+    const entryIndex = Math.max(0, Math.min(cursor.entryIndex, entries.length))
+    return entries.slice(entryIndex).flatMap((entry, index) => {
+      if (index !== 0 || entry.type !== 'text' || cursor.textOffset == null) return [entry]
+
+      const text = entry.text.slice(Math.max(0, cursor.textOffset))
+      if (!text.trim()) return []
+      return [{
+        ...entry,
+        text,
+      }]
+    })
+  }
+
+  private captureStreamCursorForAppend(task: BridgeTaskState, kind: 'text' | 'tool' | 'status'): BridgeStreamCursor {
+    const entries = task.streamEntries ?? []
+    const last = entries.at(-1)
+    if (!last) return { entryIndex: 0 }
+
+    if (kind === 'text') {
+      if (last.type === 'text') {
+        return {
+          entryIndex: entries.length - 1,
+          textOffset: last.text.length,
+        }
+      }
+      return { entryIndex: entries.length }
+    }
+
+    if (kind === 'tool' && last.type === 'tool') {
+      return { entryIndex: entries.length - 1 }
+    }
+
+    return { entryIndex: entries.length }
+  }
+
+  private appendTextDelta(task: BridgeTaskState, text: string): void {
+    if (!text) return
+    task.streamText = (task.streamText ?? '') + text
+
+    const entries = task.streamEntries ?? []
+    const last = entries.at(-1)
+    if (last?.type === 'text') {
+      last.text += text
+    } else {
+      entries.push({
+        id: `text_${entries.length}`,
+        type: 'text',
+        text,
+      })
+    }
+    task.streamEntries = entries
+  }
+
+  private isToolProgressPayload(payload: Record<string, unknown>): boolean {
+    return Boolean(
+      payload.toolCallId
+      || payload.title
+      || payload.kind
+      || payload.status
+    )
+  }
+
+  private isGenericToolName(value: string): boolean {
+    const normalized = value.trim().toLowerCase()
+    return !normalized || normalized === 'tool' || normalized === '工具' || this.isOpaqueToolCallId(normalized)
+  }
+
+  private isOpaqueToolCallId(value: string): boolean {
+    return /^call_[a-z0-9]+$/i.test(value.trim())
+  }
+
+  private compactToolName(value: string): string {
+    const raw = value
+      .replace(/^Tool\s+(?:running|completed|failed|pending):\s*/i, '')
+      .split(/\r?\n/)[0]
+      ?.trim() ?? ''
+    const withoutOutput = raw.replace(/\s+>\s+\S.*$/, '').trim()
+    const withoutFlags = withoutOutput.replace(/\s--[a-zA-Z0-9-]+(?:[=\s].*)?$/, '').trim()
+    const compact = withoutFlags || withoutOutput || raw || '工具'
+    return compact.length > 48 ? `${compact.slice(0, 47)}...` : compact
+  }
+
+  private readToolName(payload: Record<string, unknown>): string {
+    const label = typeof payload.label === 'string' ? payload.label.trim() : ''
+    const labelMatch = /^Tool\s+(?:running|completed|failed|pending):\s*(.+)$/i.exec(label)
+    const candidates = [
+      typeof payload.title === 'string' ? payload.title.trim() : '',
+      labelMatch?.[1]?.trim() ?? '',
+      typeof payload.kind === 'string' ? payload.kind.trim() : '',
+    ].map((candidate) => this.compactToolName(candidate)).filter(Boolean)
+
+    return candidates.find((candidate) => !this.isGenericToolName(candidate)) ?? candidates[0] ?? '工具'
+  }
+
+  private readToolStatus(payload: Record<string, unknown>): string | undefined {
+    const explicit = typeof payload.status === 'string' ? payload.status.trim() : ''
+    if (explicit) return explicit
+
+    const label = typeof payload.label === 'string' ? payload.label.trim() : ''
+    const match = /^Tool\s+(running|completed|failed|pending):/i.exec(label)
+    const byLabel: Record<string, string> = {
+      running: 'in_progress',
+      completed: 'completed',
+      failed: 'failed',
+      pending: 'pending',
+    }
+    return match?.[1] ? byLabel[match[1].toLowerCase()] : undefined
+  }
+
+  private formatToolStatus(status?: string): string {
+    const statusLabelByValue: Record<string, string> = {
+      pending: '等待',
+      in_progress: '执行中',
+      completed: '完成',
+      failed: '失败',
+    }
+    return status ? (statusLabelByValue[status] ?? status) : '执行中'
+  }
+
+  private buildToolGroupTitle(tools: BridgeToolTraceItem[]): string {
+    const names = Array.from(new Set(tools.map((tool) => tool.name).filter(Boolean)))
+    if (names.length === 0) return '工具调用'
+    if (names.length === 1) return `工具调用 · ${names[0]}`
+    const visible = names.slice(0, 3).join('、')
+    return names.length > 3 ? `工具调用 · ${visible} 等 ${names.length} 个` : `工具调用 · ${visible}`
+  }
+
+  private formatToolGroupContent(tools: BridgeToolTraceItem[]): string {
+    return tools
+      .map((tool) => `- ${tool.name} · ${this.formatToolStatus(tool.status)}`)
+      .join('\n')
+  }
+
+  private buildToolPanelTitle(payload: Record<string, unknown>): string {
+    return `工具调用 · ${this.readToolName(payload)}`
+  }
+
+  private resolveToolKey(
+    tools: BridgeToolTraceItem[],
+    toolCallId: string | undefined,
+    toolName: string,
+    status: string | undefined,
+  ): string {
+    if (toolCallId) return `id:${toolCallId}`
+
+    if (this.isGenericToolName(toolName) && status && status !== 'in_progress' && status !== 'pending') {
+      const running = [...tools].reverse().find((tool) => tool.status !== 'completed' && tool.status !== 'failed')
+      if (running) return running.key
+    }
+
+    return `name:${toolName}`
+  }
+
+  private findToolEntryForUpdate(
+    entries: BridgeStreamEntry[],
+    toolCallId: string | undefined,
+    toolName: string,
+    status: string | undefined,
+  ): Extract<BridgeStreamEntry, { type: 'tool' }> | undefined {
+    const last = entries.at(-1)
+    if (last?.type === 'tool') return last
+
+    if (toolCallId) {
+      const key = `id:${toolCallId}`
+      const match = [...entries].reverse().find((entry) => (
+        entry.type === 'tool'
+        && (entry.toolCallId === toolCallId || entry.tools?.some((tool) => tool.key === key))
+      ))
+      if (match?.type === 'tool') return match
+    }
+
+    const isFinishing = status === 'completed' || status === 'failed'
+    if (!isFinishing) return undefined
+
+    if (this.isGenericToolName(toolName)) {
+      return [...entries].reverse().find((entry) => (
+        entry.type === 'tool'
+        && entry.tools?.some((tool) => tool.status !== 'completed' && tool.status !== 'failed')
+      )) as Extract<BridgeStreamEntry, { type: 'tool' }> | undefined
+    }
+
+    return [...entries].reverse().find((entry) => (
+      entry.type === 'tool'
+      && entry.tools?.some((tool) => (
+        tool.name === toolName
+        && tool.status !== 'completed'
+        && tool.status !== 'failed'
+      ))
+    )) as Extract<BridgeStreamEntry, { type: 'tool' }> | undefined
+  }
+
+  private appendToolProgress(task: BridgeTaskState, payload: Record<string, unknown>): void {
+    const entries = task.streamEntries ?? []
+    const toolCallId = typeof payload.toolCallId === 'string' && payload.toolCallId.trim()
+      ? payload.toolCallId.trim()
+      : undefined
+    const incomingName = this.readToolName(payload)
+    const status = this.readToolStatus(payload) ?? 'in_progress'
+    let entry = this.findToolEntryForUpdate(entries, toolCallId, incomingName, status)
+    if (!entry) {
+      entry = {
+        id: this.sanitizeStreamEntryId(`tools_${entries.length}`),
+        type: 'tool',
+        title: '工具调用',
+        content: '',
+        tools: [],
+      }
+      entries.push(entry)
+    }
+
+    const tools = entry.tools ?? []
+    const key = this.resolveToolKey(tools, toolCallId, incomingName, status)
+    const existing = tools.find((tool) => tool.key === key)
+
+    if (existing) {
+      if (!this.isGenericToolName(incomingName)) existing.name = incomingName
+      existing.status = status
+    } else {
+      const name = this.isGenericToolName(incomingName) && toolCallId ? '工具' : incomingName
+      tools.push({
+        key,
+        name,
+        status,
+      })
+    }
+
+    entry.tools = tools
+    entry.toolCallId = toolCallId ?? entry.toolCallId
+    entry.title = this.buildToolGroupTitle(tools)
+    entry.content = this.formatToolGroupContent(tools)
+    task.toolTraceText = entry.content
+    task.streamEntries = entries
   }
 
   private shouldShowReplayPanel(streamText?: string, finalText?: string): boolean {
@@ -793,42 +1289,435 @@ export class FeishuBridgeRuntime {
     return hash
   }
 
-  private async prepareAttachments(resources: ResourceDescriptor[]): Promise<PreparedAttachments> {
+  private async resolveRepliedMessageContext(message: NormalizedMessage): Promise<RepliedMessageContext | undefined> {
+    const replyToMessageId = message.replyToMessageId?.trim()
+    if (!replyToMessageId || replyToMessageId === message.messageId) return undefined
+
+    try {
+      const response = await this.channel.rawClient.im.v1.message.get({
+        path: {
+          message_id: replyToMessageId,
+        },
+        params: {
+          user_id_type: 'open_id',
+          card_msg_content_type: 'user_card_content',
+        },
+      } as Parameters<typeof this.channel.rawClient.im.v1.message.get>[0] & {
+        params: {
+          user_id_type: 'open_id'
+          card_msg_content_type: 'user_card_content'
+        }
+      })
+      const responseRecord = response && typeof response === 'object' ? response as Record<string, unknown> : {}
+      const code = typeof responseRecord.code === 'number' ? responseRecord.code : 0
+      if (code !== 0) {
+        throw new Error(`${responseRecord.msg ?? `code=${code}`}`)
+      }
+
+      const data = this.extractResponseData(response)
+      const items = Array.isArray(data.items) ? data.items : []
+      const item = items
+        .map((value) => value && typeof value === 'object' ? value as Record<string, unknown> : undefined)
+        .find((value) => value?.message_id === replyToMessageId)
+        ?? (items[0] && typeof items[0] === 'object' ? items[0] as Record<string, unknown> : undefined)
+
+      if (!item) {
+        throw new Error('message.get returned no items')
+      }
+
+      const body = item.body && typeof item.body === 'object' ? item.body as Record<string, unknown> : {}
+      const rawContent = typeof body.content === 'string' ? body.content : ''
+      const rawContentType = typeof item.msg_type === 'string' ? item.msg_type : ''
+      const mentions = Array.isArray(item.mentions) ? item.mentions : []
+      const storedCardText = rawContentType === 'interactive'
+        ? this.resolveStoredCardMessageText(replyToMessageId)
+        : undefined
+      const parsed = this.parseReferencedMessageContent(rawContent, rawContentType, mentions)
+      const content = parsed.content === '[interactive card]' && storedCardText
+        ? storedCardText
+        : parsed.content
+      const sender = item.sender && typeof item.sender === 'object' ? item.sender as Record<string, unknown> : {}
+      const createTime = typeof item.create_time === 'string'
+        ? Number.parseInt(item.create_time, 10)
+        : undefined
+
+      return {
+        messageId: typeof item.message_id === 'string' ? item.message_id : replyToMessageId,
+        senderId: typeof sender.id === 'string' ? sender.id : undefined,
+        createTime: createTime != null && Number.isFinite(createTime) ? createTime : undefined,
+        rawContentType,
+        content,
+        resources: parsed.resources,
+        notes: content === storedCardText ? ['Resolved replied card content from local bridge state.'] : [],
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      this.logger.error(`[feishu reply context ${message.messageId}] Failed to fetch ${replyToMessageId}: ${reason}`)
+      return {
+        messageId: replyToMessageId,
+        rawContentType: 'unknown',
+        content: '',
+        resources: [],
+        notes: [`Failed to fetch replied message ${replyToMessageId}: ${reason}`],
+      }
+    }
+  }
+
+  private parseReferencedMessageContent(
+    rawContent: string,
+    rawContentType: string,
+    rawMentions: unknown[],
+  ): { content: string; resources: ResourceDescriptor[] } {
+    const parsed = this.safeParseRecord(rawContent)
+    const resources: ResourceDescriptor[] = []
+    const type = rawContentType.toLowerCase()
+
+    if (type === 'text') {
+      const text = typeof parsed?.text === 'string' ? parsed.text : rawContent
+      return {
+        content: this.resolveReferencedMentions(text, rawMentions),
+        resources,
+      }
+    }
+
+    if (type === 'post') {
+      return this.parseReferencedPostContent(parsed, rawMentions)
+    }
+
+    if (type === 'image') {
+      const fileKey = typeof parsed?.image_key === 'string' ? parsed.image_key : ''
+      if (fileKey) resources.push({ type: 'image', fileKey })
+      return { content: fileKey ? `![image](${fileKey})` : '[image]', resources }
+    }
+
+    if (type === 'file') {
+      const fileKey = typeof parsed?.file_key === 'string' ? parsed.file_key : ''
+      const fileName = typeof parsed?.file_name === 'string' ? parsed.file_name : undefined
+      if (fileKey) resources.push({ type: 'file', fileKey, fileName })
+      return { content: fileKey ? `<file key="${fileKey}"${fileName ? ` name="${fileName}"` : ''}/>` : '[file]', resources }
+    }
+
+    if (type === 'audio') {
+      const fileKey = typeof parsed?.file_key === 'string' ? parsed.file_key : ''
+      const durationMs = typeof parsed?.duration === 'number' ? parsed.duration : undefined
+      if (fileKey) resources.push({ type: 'audio', fileKey, durationMs })
+      return { content: fileKey ? `<audio key="${fileKey}"/>` : '[audio]', resources }
+    }
+
+    if (type === 'media' || type === 'video') {
+      const fileKey = typeof parsed?.file_key === 'string' ? parsed.file_key : ''
+      const coverImageKey = typeof parsed?.image_key === 'string' ? parsed.image_key : undefined
+      if (fileKey) resources.push({ type: 'video', fileKey, coverImageKey })
+      return { content: fileKey ? `<video key="${fileKey}"/>` : '[video]', resources }
+    }
+
+    if (type === 'sticker') {
+      const fileKey = typeof parsed?.file_key === 'string' ? parsed.file_key : ''
+      if (fileKey) resources.push({ type: 'sticker', fileKey })
+      return { content: fileKey ? `<sticker key="${fileKey}"/>` : '[sticker]', resources }
+    }
+
+    if (type === 'interactive') {
+      return {
+        content: this.extractInteractiveCardText(parsed ?? rawContent) || '[interactive card]',
+        resources,
+      }
+    }
+
+    const fallback = this.extractTextFromArbitraryJson(parsed ?? rawContent) || `[${rawContentType || 'message'}]`
+    return {
+      content: this.resolveReferencedMentions(fallback, rawMentions),
+      resources,
+    }
+  }
+
+  private resolveStoredCardMessageText(messageId: string): string | undefined {
+    const matchingTask = Object.values(this.state.tasks).find((task) => (
+      task.bridgeMessageId === messageId
+      || task.helpCardMessageId === messageId
+      || task.dispatchMessageId === messageId
+    ))
+    if (!matchingTask) return undefined
+
+    const streamText = matchingTask.streamText?.trim()
+    const outputText = matchingTask.outputText?.trim()
+    const helpQuestion = matchingTask.helpQuestion?.trim()
+    const resultError = matchingTask.resultError?.trim()
+    const userMessage = matchingTask.userMessageText?.trim()
+
+    if (outputText) return outputText
+    if (streamText) return streamText
+    if (helpQuestion) {
+      return [
+        'Agent requested more information:',
+        helpQuestion,
+        ...(matchingTask.blockedReason ? ['', `Blocked reason: ${matchingTask.blockedReason}`] : []),
+      ].join('\n')
+    }
+    if (resultError) return `Agent card error: ${resultError}`
+    if (userMessage) return userMessage
+    return undefined
+  }
+
+  private extractInteractiveCardText(value: unknown): string {
+    const rawText = this.extractTextFromArbitraryJson(value)
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !this.isInteractiveCardNoiseLine(line))
+
+    return Array.from(new Set(lines)).slice(0, 30).join('\n')
+  }
+
+  private isInteractiveCardNoiseLine(line: string): boolean {
+    if (/请升级至最新版本客户端|upgrade.*client/i.test(line)) return true
+    if (/^---\s*This email was sent by AAMP\./i.test(line)) return true
+    if (/^(img|text|button|markdown|plain_text|lark_md|column|column_set|div|note)$/i.test(line)) return true
+    if (/^(img|om|oc|ou|cli|msg|card|evt|str|task|call)_[a-z0-9_-]{12,}$/i.test(line)) return true
+    return false
+  }
+
+  private parseReferencedPostContent(
+    parsed: Record<string, unknown> | undefined,
+    rawMentions: unknown[],
+  ): { content: string; resources: ResourceDescriptor[] } {
+    if (!parsed) return { content: '[rich text message]', resources: [] }
+
+    const localized = this.unwrapPostLocale(parsed)
+    const resources: ResourceDescriptor[] = []
+    const title = typeof localized?.title === 'string' ? localized.title.trim() : ''
+    const rawBlocks = Array.isArray(localized?.content) ? localized.content : []
+    const lines = rawBlocks.flatMap((block) => {
+      if (!Array.isArray(block)) return []
+      const line = block.map((element) => this.renderReferencedPostElement(element, rawMentions, resources)).join('').trimEnd()
+      return line ? [line] : []
+    })
+
+    const content = [
+      ...(title ? [title] : []),
+      ...lines,
+    ].join('\n').trim()
+
+    return {
+      content: content || '[rich text message]',
+      resources,
+    }
+  }
+
+  private renderReferencedPostElement(
+    value: unknown,
+    rawMentions: unknown[],
+    resources: ResourceDescriptor[],
+  ): string {
+    if (!value || typeof value !== 'object') return ''
+    const element = value as Record<string, unknown>
+    const tag = typeof element.tag === 'string' ? element.tag : ''
+
+    if (tag === 'text') return typeof element.text === 'string' ? element.text : ''
+    if (tag === 'a') {
+      const text = typeof element.text === 'string' ? element.text : ''
+      const href = typeof element.href === 'string' ? element.href : ''
+      return href ? `[${text || href}](${href})` : text
+    }
+    if (tag === 'at') {
+      const userName = typeof element.user_name === 'string' ? element.user_name : ''
+      const userId = typeof element.user_id === 'string' ? element.user_id : ''
+      if (userId === 'all' || userId === 'all_members') return '@all'
+      if (userName) return `@${userName}`
+      const mentionName = this.findReferencedMentionName(rawMentions, userId)
+      return mentionName ? `@${mentionName}` : (userId ? `@${userId}` : '@user')
+    }
+    if (tag === 'img') {
+      const fileKey = typeof element.image_key === 'string' ? element.image_key : ''
+      if (!fileKey) return ''
+      resources.push({ type: 'image', fileKey })
+      return `![image](${fileKey})`
+    }
+    if (tag === 'media') {
+      const fileKey = typeof element.file_key === 'string' ? element.file_key : ''
+      if (!fileKey) return ''
+      resources.push({ type: 'file', fileKey })
+      return `<file key="${fileKey}"/>`
+    }
+    if (tag === 'code_block') {
+      const language = typeof element.language === 'string' ? element.language : ''
+      const text = typeof element.text === 'string' ? element.text : ''
+      return `\n\`\`\`${language}\n${text}\n\`\`\`\n`
+    }
+    if (tag === 'hr') return '\n---\n'
+    return typeof element.text === 'string' ? element.text : ''
+  }
+
+  private safeParseRecord(value: string): Record<string, unknown> | undefined {
+    try {
+      const parsed = JSON.parse(value) as unknown
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  private unwrapPostLocale(parsed: Record<string, unknown>): Record<string, unknown> | undefined {
+    if ('title' in parsed || 'content' in parsed) return parsed
+    for (const key of ['zh_cn', 'en_us', 'ja_jp']) {
+      const candidate = parsed[key]
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        return candidate as Record<string, unknown>
+      }
+    }
+    const first = Object.values(parsed).find((value) => value && typeof value === 'object' && !Array.isArray(value))
+    return first as Record<string, unknown> | undefined
+  }
+
+  private resolveReferencedMentions(text: string, rawMentions: unknown[]): string {
+    let current = text
+    for (const item of rawMentions) {
+      if (!item || typeof item !== 'object') continue
+      const mention = item as Record<string, unknown>
+      const key = typeof mention.key === 'string' ? mention.key : ''
+      const name = typeof mention.name === 'string' ? mention.name : ''
+      if (key && name) current = current.replaceAll(key, `@${name}`)
+    }
+    return current
+  }
+
+  private findReferencedMentionName(rawMentions: unknown[], userId: string): string | undefined {
+    if (!userId) return undefined
+    const match = rawMentions.find((item) => {
+      if (!item || typeof item !== 'object') return false
+      const mention = item as Record<string, unknown>
+      return mention.id === userId
+    }) as Record<string, unknown> | undefined
+    return typeof match?.name === 'string' ? match.name : undefined
+  }
+
+  private extractTextFromArbitraryJson(value: unknown): string {
+    const chunks: string[] = []
+    const visit = (item: unknown) => {
+      if (item == null) return
+      if (typeof item === 'string') {
+        if (item.trim()) chunks.push(item.trim())
+        return
+      }
+      if (typeof item === 'number' || typeof item === 'boolean') return
+      if (Array.isArray(item)) {
+        item.forEach(visit)
+        return
+      }
+      if (typeof item !== 'object') return
+
+      const record = item as Record<string, unknown>
+      for (const key of ['text', 'content', 'title', 'label', 'value']) {
+        const candidate = record[key]
+        if (typeof candidate === 'string' && candidate.trim()) {
+          chunks.push(candidate.trim())
+        }
+      }
+      Object.values(record).forEach(visit)
+    }
+
+    visit(value)
+    return Array.from(new Set(chunks)).slice(0, 20).join('\n')
+  }
+
+  private async prepareAttachments(
+    message: Pick<NormalizedMessage, 'messageId' | 'resources'>,
+    options: { filenamePrefix?: string; notesPrefix?: string } = {},
+  ): Promise<PreparedAttachments> {
     const attachments: AampAttachment[] = []
     const notes: string[] = []
 
-    for (const resource of resources) {
+    for (const resource of message.resources) {
       if (resource.type !== 'image' && resource.type !== 'file') {
         notes.push(`Skipped ${resource.type} resource ${resource.fileName || resource.fileKey}: unsupported by bridge uploader.`)
         continue
       }
 
       try {
-        const content = await this.channel.downloadResource(resource.fileKey, resource.type)
-        const filename = this.resolveAttachmentFilename(resource)
+        const downloaded = await this.downloadMessageResource(message.messageId, resource)
+        const resolvedFilename = this.resolveAttachmentFilename(resource, downloaded.contentType)
+        const filename = options.filenamePrefix ? `${options.filenamePrefix}${resolvedFilename}` : resolvedFilename
         attachments.push({
           filename,
-          contentType: this.resolveAttachmentContentType(resource, filename),
-          content,
-          size: content.byteLength,
+          contentType: this.resolveAttachmentContentType(resource, filename, downloaded.contentType),
+          content: downloaded.content,
+          size: downloaded.content.byteLength,
         })
       } catch (error) {
-        notes.push(`Failed to download ${resource.type} resource ${resource.fileName || resource.fileKey}: ${error instanceof Error ? error.message : String(error)}`)
+        notes.push(`${options.notesPrefix ?? ''}Failed to download ${resource.type} resource ${resource.fileName || resource.fileKey}: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
 
     return { attachments, notes }
   }
 
-  private resolveAttachmentFilename(resource: ResourceDescriptor): string {
+  private async downloadMessageResource(messageId: string, resource: ResourceDescriptor): Promise<DownloadedResource> {
+    const type = resource.type === 'image' ? 'image' : 'file'
+    try {
+      const response = await this.channel.rawClient.im.v1.messageResource.get({
+        path: {
+          message_id: messageId,
+          file_key: resource.fileKey,
+        },
+        params: { type },
+      })
+      return {
+        content: await this.bufferFromReadableStream(response.getReadableStream()),
+        contentType: this.contentTypeFromHeaders(response.headers),
+      }
+    } catch (primaryError) {
+      try {
+        return {
+          content: await this.channel.downloadResource(resource.fileKey, type),
+        }
+      } catch (fallbackError) {
+        const primaryMessage = primaryError instanceof Error ? primaryError.message : String(primaryError)
+        const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+        throw new Error(`messageResource.get failed: ${primaryMessage}; fallback downloadResource failed: ${fallbackMessage}`)
+      }
+    }
+  }
+
+  private async bufferFromReadableStream(stream: Readable): Promise<Buffer> {
+    const chunks: Buffer[] = []
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    return Buffer.concat(chunks)
+  }
+
+  private contentTypeFromHeaders(headers: unknown): string | undefined {
+    const value = typeof (headers as { get?: (name: string) => unknown } | undefined)?.get === 'function'
+      ? (headers as { get(name: string): unknown }).get('content-type')
+      : (headers as Record<string, unknown> | undefined)?.['content-type']
+        ?? (headers as Record<string, unknown> | undefined)?.['Content-Type']
+    return typeof value === 'string' && value.trim() ? value.split(';')[0]!.trim() : undefined
+  }
+
+  private extensionForContentType(contentType?: string): string | undefined {
+    const normalized = contentType?.toLowerCase()
+    const byContentType: Record<string, string> = {
+      'image/png': '.png',
+      'image/jpeg': '.jpg',
+      'image/gif': '.gif',
+      'image/webp': '.webp',
+      'image/svg+xml': '.svg',
+    }
+    return normalized ? byContentType[normalized] : undefined
+  }
+
+  private resolveAttachmentFilename(resource: ResourceDescriptor, contentType?: string): string {
     const fallbackBase = resource.type === 'image' ? 'feishu-image' : 'feishu-file'
     const baseName = resource.fileName?.trim() || `${fallbackBase}-${resource.fileKey.slice(0, 8)}`
     if (path.extname(baseName)) return baseName
-    if (resource.type === 'image') return `${baseName}.png`
+    if (resource.type === 'image') return `${baseName}${this.extensionForContentType(contentType) ?? '.png'}`
     return baseName
   }
 
-  private resolveAttachmentContentType(resource: ResourceDescriptor, filename: string): string {
+  private resolveAttachmentContentType(resource: ResourceDescriptor, filename: string, downloadedContentType?: string): string {
+    if (downloadedContentType) return downloadedContentType
     const ext = path.extname(filename).toLowerCase()
     const byExtension: Record<string, string> = {
       '.png': 'image/png',
@@ -848,12 +1737,368 @@ export class FeishuBridgeRuntime {
     return resource.type === 'image' ? 'image/png' : 'application/octet-stream'
   }
 
+  private sanitizeResultAttachmentFilename(attachment: ReceivedAttachment, index: number): string {
+    const fallback = `attachment-${index + 1}`
+    const baseName = path.basename(attachment.filename?.replace(/[\r\n]/g, ' ').trim() || fallback)
+      .replace(/[^\w .()@+-]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return baseName || fallback
+  }
+
+  private describeResultAttachment(attachment: ReceivedAttachment, filename: string): string {
+    const details = [
+      filename,
+      attachment.contentType,
+      Number.isFinite(attachment.size) ? `${attachment.size} bytes` : '',
+    ].filter(Boolean)
+    return details.join(', ')
+  }
+
+  private isImageAttachment(attachment: ReceivedAttachment, filename: string): boolean {
+    const contentType = attachment.contentType.toLowerCase()
+    if (contentType.startsWith('image/')) return true
+    return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico', '.tif', '.tiff']
+      .includes(path.extname(filename).toLowerCase())
+  }
+
+  private describeError(error: unknown): string {
+    if (!(error instanceof Error)) return String(error)
+
+    const parts = [error.message]
+    const details = error as Error & {
+      code?: string | number
+      cause?: unknown
+      response?: {
+        status?: number
+        data?: {
+          code?: number
+          msg?: string
+          message?: string
+        }
+      }
+      data?: {
+        code?: number
+        msg?: string
+        message?: string
+      }
+    }
+
+    if (details.code != null) parts.push(`code=${details.code}`)
+    const responseStatus = details.response?.status
+    if (responseStatus != null) parts.push(`status=${responseStatus}`)
+    const apiCode = details.response?.data?.code ?? details.data?.code
+    if (apiCode != null) parts.push(`api_code=${apiCode}`)
+    const apiMessage = details.response?.data?.msg ?? details.response?.data?.message ?? details.data?.msg ?? details.data?.message
+    if (apiMessage) parts.push(apiMessage)
+
+    if (details.cause) {
+      parts.push(`cause=${this.describeError(details.cause)}`)
+    }
+
+    return parts.join(' | ')
+  }
+
+  private async sendResultAttachment(
+    task: BridgeTaskState,
+    attachment: ReceivedAttachment,
+    filename: string,
+    content: Buffer,
+  ): Promise<string> {
+    const options = {
+      replyTo: task.bridgeMessageId || task.userMessageId,
+      replyInThread: task.replyInThread === true,
+    }
+
+    if (this.isImageAttachment(attachment, filename)) {
+      const result = await this.channel.send(
+        task.chatId,
+        { image: { source: content } },
+        options,
+      )
+      return result.messageId
+    }
+
+    const result = await this.channel.send(
+      task.chatId,
+      {
+        file: {
+          source: content,
+          fileName: filename,
+        },
+      },
+      options,
+    )
+    return result.messageId
+  }
+
+  private async sendResultAttachments(
+    task: BridgeTaskState,
+    attachments: ReceivedAttachment[] | undefined,
+  ): Promise<ResultAttachmentSendOutcome> {
+    const sent: string[] = []
+    const failed: string[] = []
+    if (!attachments?.length) return { sent, failed }
+
+    const usedNames = new Set<string>()
+    for (const [index, attachment] of attachments.entries()) {
+      const baseName = this.sanitizeResultAttachmentFilename(attachment, index)
+      const filename = usedNames.has(baseName) ? `${index + 1}-${baseName}` : baseName
+      usedNames.add(filename)
+
+      try {
+        const content = await this.aamp.downloadBlob(attachment.blobId, attachment.filename)
+        task.bridgeMessageId = await this.sendResultAttachment(task, attachment, filename, content)
+        task.updatedAt = new Date().toISOString()
+        const conversation = this.state.conversations[task.threadKey]
+        if (conversation) {
+          conversation.lastBridgeMessageId = task.bridgeMessageId
+          conversation.updatedAt = task.updatedAt
+        }
+        sent.push(filename)
+      } catch (error) {
+        const reason = this.describeError(error)
+        const description = this.describeResultAttachment(attachment, filename)
+        failed.push(`${description}: ${reason}`)
+        this.logger.error(`[aamp->feishu attachment ${task.taskId}] Failed to send ${filename}: ${reason}`)
+      }
+    }
+
+    await this.persistState()
+    return { sent, failed }
+  }
+
+  private normalizeCardEntityData(card: Record<string, unknown>): string {
+    return JSON.stringify(card)
+  }
+
+  private buildCardEntityMessageContent(cardId: string): string {
+    return JSON.stringify({
+      type: 'card',
+      data: {
+        card_id: cardId,
+      },
+    })
+  }
+
+  private extractResponseData(response: unknown): Record<string, unknown> {
+    const record = response && typeof response === 'object' ? response as Record<string, unknown> : {}
+    const data = record.data
+    if (data && typeof data === 'object') return data as Record<string, unknown>
+    return record
+  }
+
+  private pickResponseString(response: unknown, keys: string[]): string | undefined {
+    const visit = (value: unknown): string | undefined => {
+      if (!value || typeof value !== 'object') return undefined
+
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          const found = visit(item)
+          if (found) return found
+        }
+        return undefined
+      }
+
+      const record = value as Record<string, unknown>
+      for (const key of keys) {
+        const candidate = record[key]
+        if (typeof candidate === 'string' && candidate.trim()) return candidate.trim()
+      }
+
+      for (const item of Object.values(record)) {
+        const found = visit(item)
+        if (found) return found
+      }
+      return undefined
+    }
+
+    return visit(response)
+  }
+
+  private async createCardEntity(card: Record<string, unknown>): Promise<string> {
+    const response = await this.channel.rawClient.cardkit.v1.card.create({
+      data: {
+        type: 'card_json',
+        data: this.normalizeCardEntityData(card),
+      },
+    })
+    const cardId = this.pickResponseString(response, ['card_id', 'cardId'])
+    if (!cardId) {
+      this.logger.error(`[feishu card entity] card.create response missing card_id: ${JSON.stringify(response).slice(0, 1000)}`)
+      throw new Error('cardkit.card.create returned no card_id')
+    }
+    return cardId
+  }
+
+  private async updateCardEntity(
+    cardId: string,
+    card: Record<string, unknown>,
+    sequence: number,
+  ): Promise<void> {
+    await this.channel.rawClient.cardkit.v1.card.update({
+      path: {
+        card_id: cardId,
+      },
+      data: {
+        card: {
+          type: 'card_json',
+          data: this.normalizeCardEntityData(card),
+        },
+        sequence,
+      },
+    })
+  }
+
+  private async updateCardElementContent(
+    cardId: string,
+    elementId: string,
+    content: string,
+    sequence: number,
+  ): Promise<void> {
+    await this.channel.rawClient.cardkit.v1.cardElement.content({
+      path: {
+        card_id: cardId,
+        element_id: elementId,
+      },
+      data: {
+        content,
+        sequence,
+        uuid: `feishu_bridge_${cardId}_${sequence}`,
+      },
+    })
+  }
+
+  private async finishCardEntityStreaming(cardId: string, sequence: number): Promise<void> {
+    await this.channel.rawClient.cardkit.v1.card.settings({
+      path: {
+        card_id: cardId,
+      },
+      data: {
+        settings: JSON.stringify({
+          config: {
+            streaming_mode: false,
+          },
+        }),
+        sequence,
+        uuid: `feishu_bridge_finish_${cardId}_${sequence}`,
+      },
+    }).catch(() => {})
+  }
+
+  private async sendCardEntity(
+    task: BridgeTaskState,
+    cardId: string,
+    replyTarget: DispatchReplyTarget,
+  ): Promise<string> {
+    const content = this.buildCardEntityMessageContent(cardId)
+    if (replyTarget.replyTo) {
+      try {
+        const response = await this.channel.rawClient.im.v1.message.reply({
+          path: {
+            message_id: replyTarget.replyTo,
+          },
+          data: {
+            content,
+            msg_type: 'interactive',
+            reply_in_thread: replyTarget.replyInThread === true,
+          },
+        })
+        const messageId = this.pickResponseString(response, ['message_id', 'messageId'])
+        if (messageId) return messageId
+      } catch (error) {
+        this.logger.error(`[feishu card entity ${task.taskId}] reply failed, falling back to chat send: ${this.describeError(error)}`)
+      }
+    }
+
+    const response = await this.channel.rawClient.im.v1.message.create({
+      params: {
+        receive_id_type: 'chat_id',
+      },
+      data: {
+        receive_id: replyTarget.chatId,
+        msg_type: 'interactive',
+        content,
+      },
+    })
+    const messageId = this.pickResponseString(response, ['message_id', 'messageId'])
+    if (!messageId) {
+      throw new Error('card entity message send returned no message_id')
+    }
+    return messageId
+  }
+
+  private collectMarkdownElements(
+    value: unknown,
+    elements: MarkdownElementContent[] = [],
+  ): MarkdownElementContent[] {
+    if (!value || typeof value !== 'object') return elements
+
+    if (Array.isArray(value)) {
+      value.forEach((item) => this.collectMarkdownElements(item, elements))
+      return elements
+    }
+
+    const record = value as Record<string, unknown>
+    if (
+      record.tag === 'markdown'
+      && typeof record.element_id === 'string'
+      && typeof record.content === 'string'
+    ) {
+      elements.push({
+        elementId: record.element_id,
+        content: record.content,
+      })
+    }
+
+    Object.values(record).forEach((item) => this.collectMarkdownElements(item, elements))
+    return elements
+  }
+
+  private cardStructureFingerprint(card: Record<string, unknown>): string {
+    const stripMarkdownContent = (value: unknown): unknown => {
+      if (!value || typeof value !== 'object') return value
+      if (Array.isArray(value)) return value.map((item) => stripMarkdownContent(item))
+
+      const record = value as Record<string, unknown>
+      return Object.fromEntries(Object.entries(record).map(([key, item]) => {
+        if (
+          record.tag === 'markdown'
+          && typeof record.element_id === 'string'
+          && key === 'content'
+        ) return [key, '<markdown-content>']
+        return [key, stripMarkdownContent(item)]
+      }))
+    }
+
+    return JSON.stringify(stripMarkdownContent(card))
+  }
+
+  private buildMarkdownElementUpdateOperations(
+    currentCard: Record<string, unknown>,
+    nextCard: Record<string, unknown>,
+  ): MarkdownElementContent[] | null {
+    if (this.cardStructureFingerprint(currentCard) !== this.cardStructureFingerprint(nextCard)) {
+      return null
+    }
+
+    const currentById = new Map(this.collectMarkdownElements(currentCard).map((item) => [item.elementId, item.content]))
+    const nextElements = this.collectMarkdownElements(nextCard)
+    const operations = nextElements.filter((item) => currentById.get(item.elementId) !== item.content)
+    return operations.length > 0 ? operations : []
+  }
+
   private createCardSession(task: BridgeTaskState, replyTarget: DispatchReplyTarget): FeishuCardSession {
-    let controllerRef: CardStreamController | undefined
+    const runtime = this
+    let messageId: string | undefined
+    let cardId: string | undefined
+    let entityMode = true
+    let elementStreamingMode = true
     let readyResolve!: () => void
     let finishResolve!: () => void
     let chain = Promise.resolve()
     let currentCard = this.buildStreamingCard(task)
+    let sequence = 0
 
     const ready = new Promise<void>((resolve) => {
       readyResolve = resolve
@@ -867,28 +2112,35 @@ export class FeishuBridgeRuntime {
       await chain
     }
 
-    const result = this.channel.stream(
-      replyTarget.chatId,
-      {
-        card: {
-          initial: currentCard,
-          producer: async (controller) => {
-            controllerRef = controller
-            readyResolve()
-            await finish
+    const result = (async () => {
+      try {
+        cardId = await this.createCardEntity(currentCard)
+        messageId = await this.sendCardEntity(task, cardId, replyTarget)
+      } catch (error) {
+        entityMode = false
+        cardId = undefined
+        this.logger.error(`[feishu stream ${task.taskId}] card entity unavailable, falling back to message patch: ${this.describeError(error)}`)
+        const sent = await this.channel.send(
+          replyTarget.chatId,
+          { card: currentCard },
+          {
+            replyTo: replyTarget.replyTo,
+            replyInThread: replyTarget.replyInThread === true,
           },
-        },
-      },
-      {
-        replyTo: replyTarget.replyTo,
-        replyInThread: replyTarget.replyInThread,
-      },
-    ).then(() => undefined)
+        )
+        messageId = sent.messageId
+      }
+      readyResolve()
+      await finish
+    })()
 
     const session: FeishuCardSession = {
       closed: false,
       get messageId() {
-        return controllerRef?.messageId
+        return messageId
+      },
+      get cardId() {
+        return cardId
       },
       get currentCard() {
         return currentCard
@@ -899,24 +2151,51 @@ export class FeishuBridgeRuntime {
       ready,
       result,
       async update(nextCard: Record<string, unknown>) {
-        currentCard = nextCard
-        if (!controllerRef) {
-          await ready
-        }
-        await enqueue(() => controllerRef!.update(nextCard))
+        await ready
+        await enqueue(async () => {
+          if (entityMode && cardId) {
+            const operations = runtime.buildMarkdownElementUpdateOperations(currentCard, nextCard)
+            if (operations === null || !elementStreamingMode) {
+              sequence += 1
+              await runtime.updateCardEntity(cardId, nextCard, sequence)
+            } else {
+              try {
+                for (const operation of operations) {
+                  sequence += 1
+                  await runtime.updateCardElementContent(cardId, operation.elementId, operation.content, sequence)
+                }
+              } catch (error) {
+                elementStreamingMode = false
+                runtime.logger.error(`[feishu stream ${task.taskId}] card element streaming failed, falling back to card entity update: ${runtime.describeError(error)}`)
+                sequence += 1
+                await runtime.updateCardEntity(cardId, nextCard, sequence)
+              }
+            }
+          } else {
+            if (!messageId) throw new Error('card message is not ready')
+            await runtime.channel.updateCard(messageId, nextCard)
+          }
+          currentCard = nextCard
+        })
       },
       async close(finalCard?: Record<string, unknown>) {
         if (session.closed) return
         session.closed = true
-        if (finalCard) {
-          if (!controllerRef) {
-            await ready
+        try {
+          if (finalCard) {
+            await session.update(finalCard)
           }
-          currentCard = finalCard
-          await enqueue(() => controllerRef!.update(finalCard))
+          if (cardId) {
+            await enqueue(async () => {
+              if (!cardId) return
+              sequence += 1
+              await runtime.finishCardEntityStreaming(cardId, sequence)
+            })
+          }
+        } finally {
+          finishResolve()
+          await result.catch(() => {})
         }
-        finishResolve()
-        await result.catch(() => {})
       },
     }
 
@@ -931,7 +2210,15 @@ export class FeishuBridgeRuntime {
     const existing = this.cardSessions.get(task.taskId)
     if (existing) return existing
 
-    const session = this.createCardSession(task, this.buildReplyTarget(task))
+    const session = await this.startStreamCardSession(task, this.buildReplyTarget(task))
+    return session
+  }
+
+  private async startStreamCardSession(
+    task: BridgeTaskState,
+    replyTarget: DispatchReplyTarget,
+  ): Promise<FeishuCardSession> {
+    const session = this.createCardSession(task, replyTarget)
     this.cardSessions.set(task.taskId, session)
     await session.ready
     task.bridgeMessageId = session.messageId
@@ -945,6 +2232,57 @@ export class FeishuBridgeRuntime {
     return session
   }
 
+  private isCardUpdateTooLargeError(error: unknown, card: Record<string, unknown>): boolean {
+    const serializedLength = Buffer.byteLength(JSON.stringify(card), 'utf8')
+    if (serializedLength >= CARD_UPDATE_SIZE_HEURISTIC_BYTES) return true
+
+    const message = this.describeError(error).toLowerCase()
+    return /card|message|content|payload|body|param|参数|内容|卡片/.test(message)
+      && /too large|too long|exceed|exceeded|limit|size|length|overflow|过大|过长|超过|超限|长度|大小/.test(message)
+  }
+
+  private normalizeStreamCursor(task: BridgeTaskState, cursor: BridgeStreamCursor): BridgeStreamCursor {
+    const entries = task.streamEntries ?? []
+    const entryIndex = Math.max(0, Math.min(cursor.entryIndex, entries.length))
+    const entry = entries[entryIndex]
+    if (entry?.type === 'text' && cursor.textOffset != null) {
+      return {
+        entryIndex,
+        textOffset: Math.max(0, Math.min(cursor.textOffset, entry.text.length)),
+      }
+    }
+    return { entryIndex }
+  }
+
+  private async rotateStreamCardAfterUpdateFailure(
+    task: BridgeTaskState,
+    cursor: BridgeStreamCursor,
+    failedCard: Record<string, unknown>,
+    error: unknown,
+  ): Promise<void> {
+    if (!this.isCardUpdateTooLargeError(error, failedCard)) {
+      throw error
+    }
+
+    const previousSession = this.cardSessions.get(task.taskId)
+    if (previousSession) {
+      await previousSession.close().catch(() => {})
+      this.cardSessions.delete(task.taskId)
+    }
+
+    const previousMessageId = task.bridgeMessageId
+    task.streamCardStart = this.normalizeStreamCursor(task, cursor)
+    task.streamCardSequence = (task.streamCardSequence ?? 0) + 1
+    task.updatedAt = new Date().toISOString()
+
+    this.logger.error(`[feishu stream ${task.taskId}] card update exceeded size; continuing in a new card`)
+    await this.startStreamCardSession(task, {
+      chatId: task.chatId,
+      replyTo: previousMessageId || task.userMessageId,
+      replyInThread: task.replyInThread === true,
+    })
+  }
+
   private async sendCard(
     task: BridgeTaskState,
     card: Record<string, unknown>,
@@ -955,7 +2293,7 @@ export class FeishuBridgeRuntime {
       { card },
       {
         replyTo,
-        replyInThread: task.chatType === 'group',
+        replyInThread: task.replyInThread === true,
       },
     )
 
@@ -974,14 +2312,25 @@ export class FeishuBridgeRuntime {
     const finalCard = this.buildTerminalCard(task)
     const session = this.cardSessions.get(task.taskId)
     if (session) {
-      await session.close(finalCard)
+      await session.close(finalCard).catch(async (error) => {
+        if (!this.isCardUpdateTooLargeError(error, finalCard)) throw error
+        task.streamCardStart = this.captureStreamCursorForAppend(task, 'status')
+        task.streamCardSequence = (task.streamCardSequence ?? 0) + 1
+        await this.sendCard(task, this.buildTerminalCard(task), task.bridgeMessageId || task.userMessageId)
+      })
       this.cardSessions.delete(task.taskId)
       await this.persistState()
       return
     }
 
     if (task.bridgeMessageId) {
-      await this.channel.updateCard(task.bridgeMessageId, finalCard).catch(async () => {
+      await this.channel.updateCard(task.bridgeMessageId, finalCard).catch(async (error) => {
+        if (this.isCardUpdateTooLargeError(error, finalCard)) {
+          task.streamCardStart = this.captureStreamCursorForAppend(task, 'status')
+          task.streamCardSequence = (task.streamCardSequence ?? 0) + 1
+          await this.sendCard(task, this.buildTerminalCard(task), task.bridgeMessageId || task.userMessageId)
+          return
+        }
         await this.sendCard(task, finalCard, task.userMessageId)
       })
       return
@@ -990,12 +2339,22 @@ export class FeishuBridgeRuntime {
     await this.sendCard(task, finalCard, task.userMessageId)
   }
 
-  private async updateStreamingCard(taskId: string): Promise<void> {
+  private async updateStreamingCard(taskId: string, splitCursor?: BridgeStreamCursor): Promise<void> {
     const task = this.state.tasks[taskId]
     if (!task) return
     const session = await this.ensureStreamCardSession(task)
     task.updatedAt = new Date().toISOString()
-    await session.update(this.buildStreamingCard(task))
+    const nextCard = this.buildStreamingCard(task)
+    try {
+      await session.update(nextCard)
+    } catch (error) {
+      await this.rotateStreamCardAfterUpdateFailure(
+        task,
+        splitCursor ?? this.captureStreamCursorForAppend(task, 'status'),
+        nextCard,
+        error,
+      )
+    }
     await this.persistState()
   }
 
@@ -1102,35 +2461,47 @@ export class FeishuBridgeRuntime {
     task.updatedAt = new Date().toISOString()
 
     if (event.type === 'text.delta') {
+      const splitCursor = this.captureStreamCursorForAppend(task, 'text')
       const text = String(event.payload.text ?? '')
-      task.streamText = (task.streamText ?? '') + text
+      this.appendTextDelta(task, text)
       task.status = 'streaming'
       task.statusLabel = '正在回复...'
-      await this.updateStreamingCard(taskId)
+      await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
     if (event.type === 'status') {
+      const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.statusLabel = String(event.payload.label ?? event.payload.stage ?? '正在回复...')
-      await this.updateStreamingCard(taskId)
+      await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
     if (event.type === 'progress') {
+      const splitCursor = this.captureStreamCursorForAppend(task, this.isToolProgressPayload(event.payload) ? 'tool' : 'status')
+      if (this.isToolProgressPayload(event.payload)) {
+        this.appendToolProgress(task, event.payload)
+        task.status = 'streaming'
+        task.statusLabel = '正在回复...'
+        await this.updateStreamingCard(taskId, splitCursor)
+        return
+      }
       task.progressLabel = String(event.payload.label ?? '')
-      await this.updateStreamingCard(taskId)
+      await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
     if (event.type === 'error') {
+      const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.resultError = String(event.payload.message ?? event.payload.error ?? 'Unknown stream error')
-      await this.updateStreamingCard(taskId)
+      await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
     if (event.type === 'done') {
+      const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.statusLabel = '正在整理最终回复...'
-      await this.updateStreamingCard(taskId)
+      await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
@@ -1148,6 +2519,24 @@ export class FeishuBridgeRuntime {
     state.updatedAt = new Date().toISOString()
     this.closeActiveStream(task.taskId)
     await this.sendOrUpdateTerminalCard(state)
+    const attachmentOutcome = await this.sendResultAttachments(state, task.attachments)
+    if (attachmentOutcome.failed.length > 0) {
+      await this.channel.send(
+        state.chatId,
+        {
+          markdown: this.sanitizeCardText([
+            '有附件没有发出来：',
+            ...attachmentOutcome.failed.map((item) => `- ${item}`),
+          ].join('\n')),
+        },
+        {
+          replyTo: state.bridgeMessageId || state.userMessageId,
+            replyInThread: state.replyInThread === true,
+        },
+      ).catch((error: Error) => {
+        this.logger.error(`[aamp->feishu attachment note ${task.taskId}] ${error.message}`)
+      })
+    }
     await this.clearReceivedReaction(state)
     await this.clearTypingReaction(state)
     this.liveTaskIds.delete(task.taskId)
@@ -1186,7 +2575,7 @@ export class FeishuBridgeRuntime {
       },
       {
         replyTo: task.bridgeMessageId || task.userMessageId,
-        replyInThread: task.chatType === 'group',
+        replyInThread: task.replyInThread === true,
       },
     )
 

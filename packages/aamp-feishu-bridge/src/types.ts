@@ -33,6 +33,32 @@ export type BridgeTaskStatus =
   | 'rejected'
   | 'failed'
 
+export interface BridgeToolTraceItem {
+  key: string
+  name: string
+  status?: string
+}
+
+export interface BridgeStreamCursor {
+  entryIndex: number
+  textOffset?: number
+}
+
+export type BridgeStreamEntry =
+  | {
+      id: string
+      type: 'text'
+      text: string
+    }
+  | {
+      id: string
+      type: 'tool'
+      toolCallId?: string
+      title: string
+      content: string
+      tools?: BridgeToolTraceItem[]
+    }
+
 export interface BridgeConversationState {
   threadKey: string
   chatId: string
@@ -49,6 +75,7 @@ export interface BridgeTaskState {
   threadKey: string
   chatId: string
   chatType: BridgeChatType
+  replyInThread?: boolean
   senderId: string
   senderName?: string
   userMessageId: string
@@ -64,6 +91,10 @@ export interface BridgeTaskState {
   title: string
   outputText: string
   streamText?: string
+  streamEntries?: BridgeStreamEntry[]
+  streamCardStart?: BridgeStreamCursor
+  streamCardSequence?: number
+  toolTraceText?: string
   statusLabel?: string
   progressLabel?: string
   helpQuestion?: string
