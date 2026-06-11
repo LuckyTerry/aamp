@@ -156,6 +156,8 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.match(rules, /Include the parent task guid and child task guids explicitly in commands/i)
   assert.match(rules, /mark the parent task as in progress before material work/i)
   assert.match(rules, /mark each child task as in progress for context tracking only/i)
+  assert.match(rules, /agent_task_progress/i)
+  assert.match(rules, /正在执行/)
   assert.match(rules, /task_flow_intent=comment_reply, do not mark any task in progress/i)
   assert.match(rules, /only mark child tasks in progress for execution tracking/i)
   assert.equal(countOccurrences(rules, /Feishu Write Contract:/g), 1)

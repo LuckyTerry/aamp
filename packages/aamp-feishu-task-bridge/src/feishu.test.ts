@@ -130,13 +130,16 @@ test('OapiFeishuTaskClient completes agent tasks by patching v2 agent_task_statu
     path: { task_guid: 'task_guid_done' },
     params: { user_id_type: undefined },
     data: {
-      task: { agent_task_status: 4 },
-      update_fields: ['agent_task_status'],
+      task: {
+        agent_task_status: 4,
+        agent_task_progress: '执行完成',
+      },
+      update_fields: ['agent_task_status', 'agent_task_progress'],
     },
   }])
 })
 
-test('OapiFeishuTaskClient marks agent tasks blocked by patching v2 agent_task_status', async () => {
+test('OapiFeishuTaskClient marks agent tasks blocked with progress text', async () => {
   const calls: unknown[] = []
   const client = new OapiFeishuTaskClient({
     appId: 'cli_xxx',
@@ -164,8 +167,11 @@ test('OapiFeishuTaskClient marks agent tasks blocked by patching v2 agent_task_s
     path: { task_guid: 'task_guid_blocked' },
     params: { user_id_type: undefined },
     data: {
-      task: { agent_task_status: 3 },
-      update_fields: ['agent_task_status'],
+      task: {
+        agent_task_status: 3,
+        agent_task_progress: '待确认',
+      },
+      update_fields: ['agent_task_status', 'agent_task_progress'],
     },
   }])
 })
