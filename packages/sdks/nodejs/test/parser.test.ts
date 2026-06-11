@@ -109,6 +109,35 @@ describe('parseAampHeaders', () => {
       if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
       expect(result.expiresAt).toBeUndefined()
     })
+
+    it('round-trips promptRules through task.dispatch headers', () => {
+      const promptRules = [
+        'Feishu task rules:',
+        '- Treat the Feishu task prompt as the complete task context.',
+        '- Do not use the generic ACP task rules.',
+        '- Follow the Feishu Write Contract.',
+        '- Finish with FEISHU_TASK_RESULT_JSON.',
+      ].join('\n')
+      const headers = buildDispatchHeaders({
+        taskId: 'task-with-prompt-rules',
+        dispatchContext: { source: 'feishu-task' },
+        promptRules,
+      })
+
+      expect(headers['X-AAMP-Prompt-Rules']).toBeTruthy()
+
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-prompt-rules>',
+        subject: '[AAMP Task] Feishu task',
+        headers,
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+      expect(result.promptRules).toEqual(promptRules)
+    })
   })
 
   describe('task.result', () => {
@@ -354,6 +383,30 @@ describe('round-trip: build headers then parse them', () => {
     if (parsed?.intent !== 'task.dispatch') throw new Error('expected task.dispatch')
     expect(parsed.taskId).toBe('task-rt-1')
     expect(parsed.expiresAt).toBe('2026-04-07T12:00:00.000Z')
+  })
+
+  it('round-trips task.dispatch prompt rules', () => {
+    const promptRules = [
+      'Domain task rules:',
+      '- Run the domain runtime first.',
+      '- Return HELP for missing permissions.',
+      '- Do not emit structured output by default.',
+    ].join('\n')
+    const built = buildDispatchHeaders({
+      taskId: 'task-prompt-rules',
+      promptRules,
+    })
+
+    const parsed = parseAampHeaders({
+      from: 'coordinator@aamp.example.com',
+      to: 'agent@aamp.example.com',
+      messageId: 'msg-prompt-rules',
+      subject: '[AAMP Task] Prompt rules',
+      headers: built as Record<string, string>,
+    })
+
+    if (parsed?.intent !== 'task.dispatch') throw new Error('expected task.dispatch')
+    expect(parsed.promptRules).toEqual(promptRules)
   })
 
   it('round-trips task.result', () => {

@@ -1,0 +1,169 @@
+# aamp-feishu-task-bridge
+
+Local bridge daemon for dispatching Feishu task events to a target AAMP Agent.
+
+## Shape
+
+This package is intentionally thin:
+
+- Feishu task event -> AAMP `task.dispatch` -> target Agent
+- AAMP `task.ack` -> one default Feishu task comment
+- AAMP `task.help_needed` -> one Feishu task comment with the help question,
+  then mark the Feishu task blocked/waiting for human input
+- AAMP `task.stream.opened` + selected stream events -> throttled Feishu task
+  steps on the parent task
+- AAMP `task.result` -> parse `FEISHU_TASK_RESULT_JSON`, write a summary
+  comment, and complete child tasks before the parent task for success/failure
+- `card.*`, cancel, and delete are not consumed by this bridge
+
+The bridge dispatches only trusted task execution triggers from
+`task.task.update_user_access_v2`:
+
+- `task_create`
+- `task_comment_create`
+- `task_comment_reply`
+- `task_comment_update`
+
+Other task update event types are recorded as ignored and are not dispatched.
+
+The dispatched prompt treats handled Feishu events as execution of an existing
+Feishu task, not as a plain chat question. It carries
+`source=feishu-task`, task guid/id/status, event id/types, event kind, and
+whether the task has children in dispatch context. The dispatched `bodyText`
+is also sent as `rawBodyText`; it contains only Feishu task context facts: the
+parent task text, child task text, loaded task comments, latest effective human
+comment, and event metadata. This lets the target Agent infer intent directly
+without installing a Feishu task skill.
+
+For ACP agents, the bridge also sends `promptRules` on `task.dispatch` so
+`aamp-acp-bridge` replaces its default task rules with a complete Feishu task
+rule prompt. Feishu execution constraints, environment-switch commands, result
+schema, and deliverable rules live in `promptRules`, not in `bodyText`. This
+keeps task context focused while preventing Feishu task events from being
+treated as simple direct-answer questions. The target Agent should use local
+`lark-cli` or `larksuite-cli` for direct Feishu task writes requested by those
+rules:
+
+- Write delivery only to the parent task when there is a concrete deliverable.
+- For task execution, mark the parent task in progress before material work; child
+  tasks are context-tracking only and never receive steps or deliverables.
+- Do not write steps directly; selected `status` / `progress` / `error` stream
+  events are converted by this bridge into Feishu task steps.
+- Do not complete tasks directly; the bridge completes child tasks before the
+  parent after parsing the final result.
+
+The final result must be an `AAMP_RESULT_JSON` object containing only `output`,
+and `output` must start with `FEISHU_TASK_RESULT_JSON:` followed by compact JSON:
+
+```text
+AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\"status\":\"success\",\"summary\":\"...\",\"deliverable_written\":true,\"deliverable_summary\":\"...\"}"}
+```
+
+Use `status=answered` when the agent already wrote a normal Feishu comment and
+there is no separate deliverable. Use `status=success` for completed work with
+a concrete deliverable, `status=failed` for execution that
+ended with a blocker but should still close the Feishu task, and
+`status=need_help` when human input is required before continuing.
+
+Default ACK comments are scenario-specific:
+
+- `task_create`: `已收到任务派发请求，正在转交智能体处理。`
+- `task_comment_*`: `已收到您的回复，正在转交智能体处理。`
+
+When the target Agent returns a `HELP:` response, `aamp-acp-bridge` converts it
+to `task.help_needed`. This bridge writes the help `question` body back to the
+Feishu task exactly once for the corresponding AAMP task id, then marks the
+task blocked/waiting for human input. When the target Agent returns
+`task.result`, successful and failed `FEISHU_TASK_RESULT_JSON` payloads are
+summarized as a Feishu comment and completed by the bridge. Rejected or malformed
+results are treated as failures and completed with an error summary.
+
+## Usage
+
+```bash
+cd ../sdks/nodejs
+npm install
+npm run build
+
+cd ../aamp-feishu-task-bridge
+npm install
+npm run build
+
+node dist/index.js init \
+  --aamp-host https://meshmail.ai \
+  --target-agent agent@meshmail.ai \
+  --app-id cli_xxx \
+  --app-secret xxx
+```
+
+For ByteDance BOE debugging, start the bridge with runtime-only overrides:
+
+```bash
+node dist/index.js start \
+  --boe \
+  --env boe_task_event
+```
+
+For ByteDance PRE + PPE debugging, start the bridge with runtime-only overrides:
+
+```bash
+node dist/index.js start \
+  --pre \
+  --env ppe_task_event
+```
+
+For PPE debugging on the normal configured domain, omit `--pre`:
+
+```bash
+node dist/index.js start --env ppe_task_event
+```
+
+Environment mode behavior:
+
+- `--boe --env boe_task_event`: uses `https://open.feishu-boe.cn`, sends
+  `x-tt-env: boe_task_event`, and tells the target agent to run
+  `source ~/lark-env.sh boe --boe-env-name boe_task_event`.
+- `--pre --env ppe_task_event`: uses `https://open.feishu-pre.cn`, sends
+  `x-use-ppe: 1` and `x-tt-env: ppe_task_event`, and tells the target agent to
+  run `source ~/lark-env.sh pre --ppe-env-name ppe_task_event`.
+- `--env ppe_task_event`: keeps the configured/default domain, sends
+  `x-use-ppe: 1` and `x-tt-env: ppe_task_event`, and tells the target agent to
+  run `source ~/lark-env.sh --ppe-env-name ppe_task_event`.
+
+Environment mode flags (`--domain`, `--boe`, `--pre`, `--env`) are runtime-only.
+They are applied to the current `start` process but are not persisted in
+`config.json`.
+
+`init` writes the config and starts the local bridge immediately. Use
+`--no-start` when you only want to write the config.
+
+If the target Agent prints a pairing URL:
+
+```bash
+node dist/index.js init \
+  --pairing-url "aamp://connect?mailbox=agent@meshmail.ai&pair_code=abc123" \
+  --app-id cli_xxx \
+  --app-secret xxx
+```
+
+The bridge sends `pair.request` with
+`dispatchContextRules={ "source": ["feishu-task"] }`.
+
+## Options
+
+- `--event-name NAME`: register a Feishu event name. Can be repeated.
+- `--boe`: use ByteDance BOE OpenAPI domain.
+- `--pre`: use ByteDance PRE OpenAPI domain.
+- `--env NAME`: add `x-tt-env: NAME` to Feishu OpenAPI requests. With `--pre`
+  or without `--boe`, also add `x-use-ppe: 1`.
+- `--debug`: print detailed logs and write detailed ACK comments.
+- `--task-api-version v1|v2`: choose Feishu task API version. Defaults to `v2`.
+  When v2 lookup/comment fails, the OAPI client tries the v1 task API as a
+  fallback because the currently generated SDK task events expose v1
+  `task_id`.
+- `--no-ack-comment`: disable the default Feishu comment on AAMP `task.ack`.
+- `--config-dir DIR`: use a custom config/state directory.
+
+Default event name is `task.task.update_user_access_v2`. The event normalizer
+requires `event_id` and accepts `task_guid`, `guid`, `task_id`, `resource_id`,
+or `object_id` as the task identifier.

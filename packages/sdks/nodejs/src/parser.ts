@@ -185,6 +185,19 @@ export function serializeDispatchContextHeader(context?: Record<string, string>)
   return parts.length ? parts.join('; ') : undefined
 }
 
+function normalizePromptRules(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function decodePromptRules(value?: string): string | undefined {
+  return normalizePromptRules(decodeBase64UrlJson<unknown>(value))
+}
+
+function encodePromptRules(value?: string): string | undefined {
+  const normalized = normalizePromptRules(value)
+  return normalized ? encodeBase64UrlJson(normalized) : undefined
+}
+
 function decodeStructuredResult(value?: string): TaskResult['structuredResult'] | undefined {
   if (!value) return undefined
   try {
@@ -259,6 +272,7 @@ export function parseAampHeaders(meta: EmailMetadata): AampMessage | null {
       getAampHeader(headers, AAMP_HEADER.DISPATCH_CONTEXT),
     )
     const sessionKey = getAampHeader(headers, AAMP_HEADER.SESSION_KEY)
+    const promptRules = decodePromptRules(getAampHeader(headers, AAMP_HEADER.PROMPT_RULES))
 
     const parentTaskId = getAampHeader(headers, AAMP_HEADER.PARENT_TASK_ID)
     const priority = (getAampHeader(headers, AAMP_HEADER.PRIORITY) ?? 'normal') as TaskDispatch['priority']
@@ -273,6 +287,7 @@ export function parseAampHeaders(meta: EmailMetadata): AampMessage | null {
       priority: priority === 'urgent' || priority === 'high' ? priority : 'normal',
       ...(expiresAt ? { expiresAt } : {}),
       ...(dispatchContext ? { dispatchContext } : {}),
+      ...(promptRules ? { promptRules } : {}),
       ...(parentTaskId ? { parentTaskId } : {}),
       from,
       to,
@@ -456,6 +471,7 @@ export function buildDispatchHeaders(params: {
   expiresAt?: string
   sessionKey?: string
   dispatchContext?: Record<string, string>
+  promptRules?: string
   parentTaskId?: string
 }): Record<string, string> {
   const headers: Record<string, string> = {
@@ -473,6 +489,10 @@ export function buildDispatchHeaders(params: {
   const dispatchContext = serializeDispatchContextHeader(params.dispatchContext)
   if (dispatchContext) {
     headers[AAMP_HEADER.DISPATCH_CONTEXT] = dispatchContext
+  }
+  const promptRules = encodePromptRules(params.promptRules)
+  if (promptRules) {
+    headers[AAMP_HEADER.PROMPT_RULES] = promptRules
   }
   if (params.parentTaskId) {
     headers[AAMP_HEADER.PARENT_TASK_ID] = params.parentTaskId

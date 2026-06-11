@@ -1,0 +1,528 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createFeishuHttpInstance, normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
+
+test('normalizeFeishuTaskEvent accepts task v1 event task_id as task guid', () => {
+  const event = normalizeFeishuTaskEvent({
+    event_id: 'evt_456',
+    event_type: 'task.task.updated_v1',
+    task_id: 'task_id_456',
+    ts: '1775793266152',
+  }, 'task.task.updated_v1')
+
+  assert.deepEqual(event, {
+    eventId: 'evt_456',
+    taskGuid: 'task_id_456',
+    eventTypes: ['task.task.updated_v1'],
+    timestamp: '1775793266152',
+    raw: {
+      event_id: 'evt_456',
+      event_type: 'task.task.updated_v1',
+      task_id: 'task_id_456',
+      ts: '1775793266152',
+    },
+  })
+})
+
+test('normalizeFeishuTaskEvent accepts task v2 update_user_access task_guid', () => {
+  const event = normalizeFeishuTaskEvent({
+    schema: '2.0',
+    header: {
+      event_id: 'evt_v2',
+      event_type: 'task.task.update_user_access_v2',
+      create_time: '1775793266152',
+    },
+    event: {
+      event_types: ['task_create', 'task_summary_update'],
+      task_guid: 'task_guid_v2',
+    },
+  }, 'task.task.update_user_access_v2')
+
+  assert.equal(event?.eventId, 'evt_v2')
+  assert.equal(event?.taskGuid, 'task_guid_v2')
+  assert.deepEqual(event?.eventTypes, ['task_create', 'task_summary_update'])
+  assert.equal(event?.timestamp, '1775793266152')
+})
+
+test('normalizeFeishuTaskEvent reads task summary updates from v2 event_types', () => {
+  const event = normalizeFeishuTaskEvent({
+    header: {
+      event_id: 'evt_summary',
+      event_type: 'task.task.update_user_access_v2',
+    },
+    event: {
+      event_types: ['task_summary_update'],
+      task_guid: 'task_guid_summary',
+    },
+  }, 'task.task.update_user_access_v2')
+
+  assert.equal(event?.eventId, 'evt_summary')
+  assert.equal(event?.taskGuid, 'task_guid_summary')
+  assert.deepEqual(event?.eventTypes, ['task_summary_update'])
+})
+
+test('normalizeFeishuTaskEvent requires an event_id', () => {
+  const event = normalizeFeishuTaskEvent({
+    header: {
+      event_type: 'task.task.update_user_access_v2',
+    },
+    event: {
+      event_types: ['task_create'],
+      task_guid: 'task_guid_without_event_id',
+    },
+  }, 'task.task.update_user_access_v2')
+
+  assert.equal(event, null)
+})
+
+test('createFeishuHttpInstance injects configured HTTP headers', async () => {
+  const http = createFeishuHttpInstance({
+    'x-tt-env': 'boe_task_event',
+  })
+  assert.ok(http)
+
+  const result = await http.request({
+    method: 'GET',
+    url: 'https://example.invalid/test',
+    headers: {
+      locale: 'zh',
+    },
+    adapter: async (config: { headers?: unknown }) => ({
+      data: {
+        headers: config.headers,
+      },
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    }),
+  } as never) as { headers: Record<string, string> & { get?: (key: string) => string | undefined } }
+
+  assert.equal(result.headers['x-tt-env'] ?? result.headers.get?.('x-tt-env'), 'boe_task_event')
+  assert.equal(result.headers.locale ?? result.headers.get?.('locale'), 'zh')
+})
+
+test('OapiFeishuTaskClient completes agent tasks by patching v2 agent_task_status', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  await client.completeTask('task_guid_done')
+
+  assert.deepEqual(calls, [{
+    path: { task_guid: 'task_guid_done' },
+    params: { user_id_type: undefined },
+    data: {
+      task: { agent_task_status: 4 },
+      update_fields: ['agent_task_status'],
+    },
+  }])
+})
+
+test('OapiFeishuTaskClient marks agent tasks blocked by patching v2 agent_task_status', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  await client.markTaskWaitingForHuman('task_guid_blocked')
+
+  assert.deepEqual(calls, [{
+    path: { task_guid: 'task_guid_blocked' },
+    params: { user_id_type: undefined },
+    data: {
+      task: { agent_task_status: 3 },
+      update_fields: ['agent_task_status'],
+    },
+  }])
+})
+
+test('OapiFeishuTaskClient normalizes escaped newlines before creating v2 comments', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        comment: {
+          create: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  await client.commentTask('task_guid_comment', '成都天气。\\n\\n数据来源：国家气象中心\\nhttps://example.com')
+
+  assert.deepEqual(calls, [{
+    params: { user_id_type: undefined },
+    data: {
+      content: '成都天气。\n\n数据来源：国家气象中心\nhttps://example.com',
+      resource_type: 'task',
+      resource_id: 'task_guid_comment',
+    },
+  }])
+})
+
+test('OapiFeishuTaskClient appends task steps through raw REST endpoint', async () => {
+  let sdkAppendCalled = false
+  const rawRequests: Array<{
+    method?: string
+    url?: string
+    params?: unknown
+    data?: {
+      task_guid?: string
+      task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+    }
+    headers?: unknown
+  }> = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-boe.cn',
+    formatPayload: async (payload: {
+      params?: unknown
+      data?: {
+        task_guid?: string
+        task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+      }
+    }) => ({
+      params: payload.params,
+      data: payload.data,
+      headers: { Authorization: 'Bearer token' },
+    }),
+    httpInstance: {
+      request: async (options: {
+        method?: string
+        url?: string
+        params?: unknown
+        data?: {
+          task_guid?: string
+          task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+        }
+        headers?: unknown
+      }) => {
+        rawRequests.push(options)
+        return { data: {}, status: 200 }
+      },
+    },
+    task: {
+      v2: {
+        taskStep: {
+          append: async () => {
+            sdkAppendCalled = true
+          },
+        },
+      },
+    },
+  }
+
+  const before = Math.floor(Date.now() / 1000)
+  await client.appendTaskStep('task_guid_step', '正在分析需求')
+  const after = Math.floor(Date.now() / 1000)
+
+  assert.equal(sdkAppendCalled, false)
+  assert.equal(rawRequests.length, 1)
+  assert.equal(rawRequests[0]?.method, 'POST')
+  assert.equal(rawRequests[0]?.url, 'https://open.feishu-boe.cn/open-apis/task/v2/agent_task_step_info/append_task_steps')
+  assert.deepEqual(rawRequests[0]?.params, { user_id_type: undefined })
+  assert.deepEqual(rawRequests[0]?.headers, { Authorization: 'Bearer token' })
+  assert.equal(rawRequests[0]?.data?.task_guid, 'task_guid_step')
+  assert.equal(rawRequests[0]?.data?.task_steps?.[0]?.quote, '')
+  assert.equal(rawRequests[0]?.data?.task_steps?.[0]?.content, '正在分析需求')
+  assert.ok((rawRequests[0]?.data?.task_steps?.[0]?.timestamp ?? 0) >= before)
+  assert.ok((rawRequests[0]?.data?.task_steps?.[0]?.timestamp ?? 0) <= after)
+})
+
+test('OapiFeishuTaskClient appends batched task steps through one raw REST request', async () => {
+  const rawRequests: Array<{
+    method?: string
+    url?: string
+    params?: unknown
+    data?: {
+      task_guid?: string
+      task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+    }
+    headers?: unknown
+  }> = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-boe.cn',
+    formatPayload: async (payload: {
+      params?: unknown
+      data?: {
+        task_guid?: string
+        task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+      }
+    }) => ({
+      params: payload.params,
+      data: payload.data,
+      headers: { Authorization: 'Bearer token' },
+    }),
+    httpInstance: {
+      request: async (options: {
+        method?: string
+        url?: string
+        params?: unknown
+        data?: {
+          task_guid?: string
+          task_steps?: Array<{ quote?: string; content?: string; timestamp?: number }>
+        }
+        headers?: unknown
+      }) => {
+        rawRequests.push(options)
+        return { data: {}, status: 200 }
+      },
+    },
+  }
+
+  const before = Math.floor(Date.now() / 1000)
+  await client.appendTaskSteps('task_guid_step', ['正在分析需求', '正在更新飞书任务'])
+  const after = Math.floor(Date.now() / 1000)
+
+  assert.equal(rawRequests.length, 1)
+  assert.equal(rawRequests[0]?.method, 'POST')
+  assert.equal(rawRequests[0]?.url, 'https://open.feishu-boe.cn/open-apis/task/v2/agent_task_step_info/append_task_steps')
+  assert.equal(rawRequests[0]?.data?.task_guid, 'task_guid_step')
+  assert.deepEqual(rawRequests[0]?.data?.task_steps?.map((step) => ({
+    quote: step.quote,
+    content: step.content,
+  })), [
+    { quote: '', content: '正在分析需求' },
+    { quote: '', content: '正在更新飞书任务' },
+  ])
+  assert.ok(rawRequests[0]?.data?.task_steps?.every((step) => (step.timestamp ?? 0) >= before && (step.timestamp ?? 0) <= after))
+})
+
+test('OapiFeishuTaskClient registers the app as a Feishu task agent through raw REST endpoint', async () => {
+  const rawRequests: Array<{
+    method?: string
+    url?: string
+    params?: unknown
+    data?: unknown
+    headers?: unknown
+  }> = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-boe.cn',
+    formatPayload: async (payload: { params?: unknown; data?: unknown }) => ({
+      params: payload.params,
+      data: payload.data,
+      headers: { Authorization: 'Bearer token' },
+    }),
+    httpInstance: {
+      request: async (options: {
+        method?: string
+        url?: string
+        params?: unknown
+        data?: unknown
+        headers?: unknown
+      }) => {
+        rawRequests.push(options)
+        return { data: { agent: { app_id: 'cli_xxx', app_name: 'Feishu CLI - BOE' } }, status: 200 }
+      },
+    },
+  }
+
+  await client.registerAgent()
+
+  assert.equal(rawRequests.length, 1)
+  assert.equal(rawRequests[0]?.method, 'POST')
+  assert.equal(rawRequests[0]?.url, 'https://open.feishu-boe.cn/open-apis/task/v2/agent/register_agent')
+  assert.deepEqual(rawRequests[0]?.params, {})
+  assert.deepEqual(rawRequests[0]?.data, {})
+  assert.deepEqual(rawRequests[0]?.headers, { Authorization: 'Bearer token' })
+})
+
+test('OapiFeishuTaskClient subscribes task events through raw REST endpoint', async () => {
+  const rawRequests: Array<{
+    method?: string
+    url?: string
+    params?: unknown
+    data?: unknown
+    headers?: unknown
+  }> = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    domain: 'https://open.feishu-boe.cn',
+    headers: { 'x-tt-env': 'boe_task_event' },
+    userIdType: 'open_id',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu-boe.cn',
+    formatPayload: async (payload: { params?: unknown; data?: unknown }) => ({
+      params: payload.params,
+      data: payload.data,
+      headers: { Authorization: 'Bearer token' },
+    }),
+    httpInstance: {
+      request: async (options: {
+        method?: string
+        url?: string
+        params?: unknown
+        data?: unknown
+        headers?: unknown
+      }) => {
+        rawRequests.push(options)
+        return { data: {}, status: 200 }
+      },
+    },
+  }
+
+  await client.subscribeTaskEvents()
+
+  assert.equal(rawRequests.length, 1)
+  assert.equal(rawRequests[0]?.method, 'POST')
+  assert.equal(rawRequests[0]?.url, 'https://open.feishu-boe.cn/open-apis/task/v2/task_v2/task_subscription')
+  assert.deepEqual(rawRequests[0]?.params, { user_id_type: 'open_id' })
+  assert.deepEqual(rawRequests[0]?.data, {})
+  assert.deepEqual(rawRequests[0]?.headers, { Authorization: 'Bearer token' })
+})
+
+test('OapiFeishuTaskClient loads v2 task comments into task details', async () => {
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    taskApiVersion: 'v2',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          get: async () => ({
+            data: {
+              task: {
+                guid: 'task_guid_comment_context',
+                task_id: 't_context',
+                summary: '整理上线方案',
+                status: 'todo',
+                rrule: 'FREQ=DAILY',
+                reminders: [{ timestamp: 1775793266 }],
+              },
+            },
+          }),
+        },
+        taskSubtask: {
+          list: async () => ({ data: { items: [] } }),
+        },
+        comment: {
+          list: async () => ({
+            data: {
+              items: [
+                {
+                  comment_id: 'comment_1',
+                  content: '请补充灰度发布。',
+                  author_type: 'human',
+                  create_time: '1775793266000',
+                },
+                {
+                  comment_id: 'comment_2',
+                  content: '已收到任务派发请求，正在转交智能体处理。',
+                  create_time: '1775793266100',
+                },
+                {
+                  comment_id: 'comment_3',
+                  content: '已完成上线方案整理。\n\n交付物：交付物已上传为父任务 task_delivery 附件。',
+                  create_time: '1775793266200',
+                },
+              ],
+            },
+          }),
+        },
+      },
+    },
+  }
+
+  const task = await client.getTask('task_guid_comment_context')
+
+  assert.equal(task.rrule, 'FREQ=DAILY')
+  assert.deepEqual(task.reminders, [{ timestamp: 1775793266 }])
+  assert.deepEqual(task.comments, [
+    {
+      id: 'comment_1',
+      authorType: 'human',
+      content: '请补充灰度发布。',
+      createdAt: '1775793266000',
+    },
+    {
+      id: 'comment_2',
+      authorType: 'agent',
+      content: '已收到任务派发请求，正在转交智能体处理。',
+      createdAt: '1775793266100',
+    },
+    {
+      id: 'comment_3',
+      authorType: 'agent',
+      content: '已完成上线方案整理。\n\n交付物：交付物已上传为父任务 task_delivery 附件。',
+      createdAt: '1775793266200',
+    },
+  ])
+})
