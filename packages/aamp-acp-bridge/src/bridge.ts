@@ -4,6 +4,7 @@ import { AgentBridge } from './agent-bridge.js'
 export interface BridgeStartOptions {
   quiet?: boolean
   onEvent?: (event: BridgeRuntimeEvent) => void
+  debug?: boolean
 }
 
 export type BridgeRuntimeEvent =
@@ -64,7 +65,11 @@ export class AampAcpBridge {
       this.emit({ type: 'agent.starting', bridge: 'acp-bridge', agent: agentConfig.name })
       const bridge = new AgentBridge(agentConfig, this.config.aampHost, this.config.rejectUnauthorized)
       try {
-        await bridge.start({ quiet: options.quiet, onEvent: options.onEvent })
+        await bridge.start({
+          quiet: options.quiet,
+          onEvent: options.onEvent,
+          debug: options.debug,
+        })
         this.agents.set(agentConfig.name, bridge)
         this.emit({
           type: 'agent.started',

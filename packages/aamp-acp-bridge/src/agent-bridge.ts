@@ -141,6 +141,21 @@ function matchCombinedSenderPolicy(
 export interface AgentBridgeStartOptions {
   quiet?: boolean
   onEvent?: (event: BridgeRuntimeEvent) => void
+  debug?: boolean
+}
+
+export function formatDebugPromptLog(options: {
+  agentName: string
+  taskId: string
+  sessionName: string
+  prompt: string
+}): string {
+  return [
+    `[${options.agentName}] ACP prompt debug task=${options.taskId} session=${options.sessionName}`,
+    '--- BEGIN ACP PROMPT ---',
+    options.prompt,
+    '--- END ACP PROMPT ---',
+  ].join('\n')
 }
 
 interface HandleEventOptions {
@@ -407,6 +422,7 @@ export class AgentBridge {
   private activeTaskIds = new Set<string>()
   private isHistoricalReconcile = false
   private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
+  private debugPrompt = false
 
   constructor(
     private readonly agentConfig: AgentConfig,
@@ -482,6 +498,7 @@ export class AgentBridge {
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
     this.onEvent = options.onEvent
     let quietStartup = options.quiet === true
+    this.debugPrompt = options.debug === true
 
     // 1. Resolve AAMP identity
     this.identity = await this.resolveIdentity()
@@ -990,6 +1007,14 @@ export class AgentBridge {
           }
         : hydratedTask
       const prompt = buildPrompt(promptTask, hydratedTask.threadContextText, this.name)
+      if (this.debugPrompt) {
+        console.log(formatDebugPromptLog({
+          agentName: this.name,
+          taskId: task.taskId,
+          sessionName: taskSessionName,
+          prompt,
+        }))
+      }
       await this.acpx.ensureSession(this.agentConfig.acpCommand, taskSessionName)
       await appendStreamEvent('todo', {
         items: [{ id: 'acp-prompt', content: 'Prompt sent to ACP agent', status: 'completed' }],
