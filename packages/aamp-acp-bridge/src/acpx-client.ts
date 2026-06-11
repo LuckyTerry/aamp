@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { delimiter, join } from 'node:path'
 
 export interface AcpEvent {
   eventVersion?: number
@@ -256,6 +257,7 @@ function sanitizePromptOutput(output: string): string {
  */
 export class AcpxClient {
   private cwd: string
+  private activeProcesses = new Set<ChildProcessWithoutNullStreams>()
 
   constructor(cwd?: string) {
     this.cwd = cwd ?? process.cwd()
@@ -282,6 +284,106 @@ export class AcpxClient {
     return ['acpx', ...this.buildAcpxArgs(agent, args, globalArgs)]
       .map((arg) => this.formatArgForLog(arg))
       .join(' ')
+  }
+
+  private acpxEnv(): NodeJS.ProcessEnv {
+    return {
+      ...process.env,
+      PATH: [
+        join(this.cwd, 'node_modules', '.bin'),
+        process.env.PATH ?? '',
+      ].filter(Boolean).join(delimiter),
+    }
+  }
+
+  private spawnAcpx(args: string[]): ChildProcessWithoutNullStreams {
+    return spawn('acpx', args, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: this.cwd,
+      env: this.acpxEnv(),
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    })
+  }
+
+  private spawnNpxAcpx(args: string[]): ChildProcessWithoutNullStreams {
+    return spawn('npx', ['-y', 'acpx', ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: this.cwd,
+      env: this.acpxEnv(),
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    })
+  }
+
+  private isSpawnNotFoundError(err: unknown): boolean {
+    return (err as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+
+  private runAcpx(
+    args: string[],
+    handlers: {
+      onStdout?: (chunk: Buffer) => void
+      onStderr?: (chunk: Buffer) => void
+      onClose: (code: number | null) => void
+      onError: (err: Error) => void
+    },
+  ): void {
+    let startedFallback = false
+    let settled = false
+
+    const attach = (proc: ChildProcessWithoutNullStreams) => {
+      this.activeProcesses.add(proc)
+      const forgetProcess = () => {
+        this.activeProcesses.delete(proc)
+      }
+      proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
+      proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
+      proc.on('close', (code) => {
+        forgetProcess()
+        if (settled) return
+        settled = true
+        handlers.onClose(code)
+      })
+      proc.on('error', (err) => {
+        forgetProcess()
+        if (!startedFallback && this.isSpawnNotFoundError(err)) {
+          startedFallback = true
+          attach(this.spawnNpxAcpx(args))
+          return
+        }
+        if (settled) return
+        settled = true
+        handlers.onError(err)
+      })
+    }
+
+    attach(this.spawnAcpx(args))
+  }
+
+  stop(): void {
+    for (const proc of [...this.activeProcesses]) {
+      this.terminateProcessTree(proc)
+    }
+    this.activeProcesses.clear()
+  }
+
+  private terminateProcessTree(proc: ChildProcessWithoutNullStreams): void {
+    const pid = proc.pid
+    if (!pid) return
+
+    if (process.platform !== 'win32') {
+      try {
+        process.kill(-pid, 'SIGTERM')
+        return
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ESRCH') return
+      }
+    }
+
+    try {
+      proc.kill('SIGTERM')
+    } catch { /* best-effort cleanup */ }
   }
 
   private formatProcessFailure(
@@ -353,15 +455,11 @@ export class AcpxClient {
     let previousEventType: string | undefined
 
     return new Promise<AcpResult>((resolve, reject) => {
-      const proc = spawn('acpx', this.buildAcpxArgs(agent, [
+      const acpxArgs = this.buildAcpxArgs(agent, [
         'prompt',
         '-s', sessionName,
         text,
-      ], ['--format', 'json', '--json-strict']), {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: this.cwd,
-        env: { ...process.env },
-      })
+      ], ['--format', 'json', '--json-strict'])
 
       let stdoutBuffer = ''
       let rawStdout = ''
@@ -466,43 +564,43 @@ export class AcpxClient {
         }
       }
 
-      proc.stdout.on('data', processStdoutChunk)
-      proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      this.runAcpx(acpxArgs, {
+        onStdout: processStdoutChunk,
+        onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
+        onClose: (code) => {
+          if (stdoutBuffer.trim()) {
+            processLine(stdoutBuffer.replace(/\r$/, ''))
+          }
 
-      proc.on('close', (code) => {
-        if (stdoutBuffer.trim()) {
-          processLine(stdoutBuffer.replace(/\r$/, ''))
-        }
+          const finalAssistantOutput = [...assistantMessageOrder]
+            .reverse()
+            .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
+            .find((message) => message.length > 0) ?? ''
+          const output = finalAssistantOutput
+            || sanitizePromptOutput(rawStdout)
+            || sanitizePromptOutput(stderr)
 
-        const finalAssistantOutput = [...assistantMessageOrder]
-          .reverse()
-          .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
-          .find((message) => message.length > 0) ?? ''
-        const output = finalAssistantOutput
-          || sanitizePromptOutput(rawStdout)
-          || sanitizePromptOutput(stderr)
-
-        if (code !== 0 && !output) {
-          reject(new Error(this.formatProcessFailure(
-            agent,
-            ['prompt', '-s', sessionName, text],
-            code,
-            rawStdout,
-            stderr,
-            ['--format', 'json', '--json-strict'],
-          )))
-        } else {
-          resolve({
-            output,
-            events,
-            ...(stopReason ? { stopReason } : {}),
-            streamedAssistantText,
-          })
-        }
-      })
-
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn acpx: ${err.message}. Is acpx installed?`))
+          if (code !== 0 && !output) {
+            reject(new Error(this.formatProcessFailure(
+              agent,
+              ['prompt', '-s', sessionName, text],
+              code,
+              rawStdout,
+              stderr,
+              ['--format', 'json', '--json-strict'],
+            )))
+          } else {
+            resolve({
+              output,
+              events,
+              ...(stopReason ? { stopReason } : {}),
+              streamedAssistantText,
+            })
+          }
+        },
+        onError: (err) => {
+          reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
+        },
       })
     })
   }
@@ -512,40 +610,36 @@ export class AcpxClient {
 
     return await new Promise<AcpResult>((resolve, reject) => {
       // Old acpx builds may not support JSON output yet.
-      const proc = spawn('acpx', this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, text]), {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: this.cwd,
-        env: { ...process.env },
-      })
+      const acpxArgs = this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, text])
 
       let stdout = ''
       let stderr = ''
 
-      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-      proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      this.runAcpx(acpxArgs, {
+        onStdout: (chunk: Buffer) => { stdout += chunk.toString() },
+        onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
+        onClose: (code) => {
+          const output = sanitizePromptOutput(stdout) || sanitizePromptOutput(stderr)
 
-      proc.on('close', (code) => {
-        const output = sanitizePromptOutput(stdout) || sanitizePromptOutput(stderr)
-
-        if (code !== 0 && !output) {
-          reject(new Error(this.formatProcessFailure(
-            agent,
-            ['prompt', '-s', sessionName, text],
-            code,
-            stdout,
-            stderr,
-          )))
-        } else {
-          resolve({
-            output,
-            events,
-            streamedAssistantText: false,
-          })
-        }
-      })
-
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn acpx: ${err.message}. Is acpx installed?`))
+          if (code !== 0 && !output) {
+            reject(new Error(this.formatProcessFailure(
+              agent,
+              ['prompt', '-s', sessionName, text],
+              code,
+              stdout,
+              stderr,
+            )))
+          } else {
+            resolve({
+              output,
+              events,
+              streamedAssistantText: false,
+            })
+          }
+        },
+        onError: (err) => {
+          reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
+        },
       })
     })
   }
@@ -569,25 +663,21 @@ export class AcpxClient {
    */
   private exec(agent: string, args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
-      const proc = spawn('acpx', this.buildAcpxArgs(agent, args), {
-        stdio: ['pipe', 'pipe', 'pipe'],
-        cwd: this.cwd,
-        env: { ...process.env },
-      })
+      const acpxArgs = this.buildAcpxArgs(agent, args)
 
       let stdout = ''
       let stderr = ''
 
-      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
-      proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-
-      proc.on('close', (code) => {
-        if (code !== 0) reject(new Error(this.formatProcessFailure(agent, args, code, stdout, stderr)))
-        else resolve(stdout)
-      })
-
-      proc.on('error', (err) => {
-        reject(new Error(`Failed to spawn acpx: ${err.message}`))
+      this.runAcpx(acpxArgs, {
+        onStdout: (chunk: Buffer) => { stdout += chunk.toString() },
+        onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
+        onClose: (code) => {
+          if (code !== 0) reject(new Error(this.formatProcessFailure(agent, args, code, stdout, stderr)))
+          else resolve(stdout)
+        },
+        onError: (err) => {
+          reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}`))
+        },
       })
     })
   }

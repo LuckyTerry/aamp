@@ -5,11 +5,15 @@ import { AampClient } from 'aamp-sdk'
 import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
 import { AampAcpBridge } from './bridge.js'
 import { renderPairingCode, runInit } from './cli/init.js'
-import { resolvePairingFile } from './pairing.js'
+import { discoverAcpBridgeAgents } from './discovery.js'
+import { runJsonInit } from './json-init.js'
+import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
+import { getAgentSenderPolicy, setAgentSenderPolicy } from './sender-policy.js'
 import { resolveConfigPath, resolveCredentialsFile } from './storage.js'
 
 const args = process.argv.slice(2)
 const command = args[0] ?? 'start'
+const jsonOutput = args.includes('--json') || getOptionValue('--output') === 'json'
 const configPath = resolveConfigPath(
   args.includes('--config') ? (args[args.indexOf('--config') + 1] ?? '') : undefined,
 )
@@ -17,6 +21,44 @@ const configPath = resolveConfigPath(
 function getOptionValue(flag: string): string | undefined {
   const idx = args.indexOf(flag)
   return idx >= 0 ? args[idx + 1] : undefined
+}
+
+function writeJsonEvent(event: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    ...event,
+  })}\n`)
+}
+
+function redirectConsoleToStderr(): void {
+  console.log = (...values: unknown[]) => {
+    process.stderr.write(`${values.map(String).join(' ')}\n`)
+  }
+  console.warn = (...values: unknown[]) => {
+    process.stderr.write(`${values.map(String).join(' ')}\n`)
+  }
+  console.error = (...values: unknown[]) => {
+    process.stderr.write(`${values.map(String).join(' ')}\n`)
+  }
+}
+
+async function readJsonInput(): Promise<unknown> {
+  const inputPath = getOptionValue('--input')
+  const raw = inputPath && inputPath !== '-'
+    ? readFileSync(inputPath, 'utf-8')
+    : await new Promise<string>((resolve, reject) => {
+        let data = ''
+        process.stdin.setEncoding('utf-8')
+        process.stdin.on('data', (chunk) => { data += chunk })
+        process.stdin.on('end', () => resolve(data))
+        process.stdin.on('error', reject)
+      })
+
+  if (!raw.trim()) {
+    throw new Error('Missing JSON input. Pass --input FILE or pipe JSON on stdin.')
+  }
+
+  return JSON.parse(raw)
 }
 
 function getAgent(config: BridgeConfig, agentName: string): AgentConfig {
@@ -72,10 +114,36 @@ function renderPairingForAgent(configPathValue: string, agentName: string): void
   )
 }
 
+function createPairingForAgent(configPathValue: string, agentName: string) {
+  const config = loadConfig(configPathValue)
+  const agent = getAgent(config, agentName)
+  const creds = loadAgentCredentials(agent)
+  const pairingFile = resolvePairingFile(agent.pairingFile, agent.name)
+  const pairing = createPairingCode({
+    mailbox: creds.email,
+    file: pairingFile,
+  })
+
+  return {
+    type: 'pairing.created',
+    bridge: 'acp-bridge',
+    agent: agent.name,
+    mailbox: pairing.mailbox,
+    pairCode: pairing.pairCode,
+    expiresAt: pairing.expiresAt,
+    connectUrl: pairing.connectUrl,
+    webUrl: pairingUrlToWebUrl(pairing.connectUrl),
+    pairingFile,
+  }
+}
+
 async function startBridge(
   configPathValue: string,
-  options: { quiet?: boolean; agent?: string } = {},
+  options: { quiet?: boolean; agent?: string; json?: boolean } = {},
 ): Promise<void> {
+  if (options.json) {
+    redirectConsoleToStderr()
+  }
   const config = loadConfig(configPathValue)
   const agents = options.agent ? [getAgent(config, options.agent)] : config.agents
   const bridge = new AampAcpBridge({
@@ -84,15 +152,25 @@ async function startBridge(
   })
 
   // Graceful shutdown
-  const shutdown = () => {
-    console.log('\nShutting down...')
-    bridge.stop()
+  let shuttingDown = false
+  const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    if (options.json) {
+      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'acp-bridge', reason: 'signal' })
+    } else {
+      console.log('\nShutting down...')
+    }
+    await bridge.stop()
     process.exit(0)
   }
-  process.on('SIGTERM', shutdown)
-  process.on('SIGINT', shutdown)
+  process.on('SIGTERM', () => { void shutdown() })
+  process.on('SIGINT', () => { void shutdown() })
 
-  await bridge.start({ quiet: options.quiet })
+  await bridge.start({
+    quiet: options.quiet || options.json,
+    onEvent: options.json ? writeJsonEvent : undefined,
+  })
 
   // Keep alive
   setInterval(() => {}, 60_000)
@@ -101,6 +179,11 @@ async function startBridge(
 async function main() {
   switch (command) {
     case 'init': {
+      if (jsonOutput) {
+        const result = await runJsonInit(configPath, await readJsonInput())
+        console.log(JSON.stringify(result, null, 2))
+        break
+      }
       const initialized = await runInit(configPath, { agent: getOptionValue('--agent') })
       if (!initialized) break
       if (args.includes('--no-start')) {
@@ -113,13 +196,19 @@ async function main() {
     }
 
     case 'start': {
-      await startBridge(configPath)
+      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent') })
       break
     }
 
     case 'pair': {
       const agentName = getOptionValue('--agent')
       if (!agentName) throw new Error('Missing required --agent')
+      if (jsonOutput) {
+        console.log(JSON.stringify(createPairingForAgent(configPath, agentName), null, 2))
+        if (args.includes('--no-start')) break
+        await startBridge(configPath, { quiet: true, agent: agentName, json: true })
+        break
+      }
       renderPairingForAgent(configPath, agentName)
       if (args.includes('--no-start')) break
       await startBridge(configPath, { quiet: true, agent: agentName })
@@ -128,6 +217,33 @@ async function main() {
 
     case 'list': {
       const config = loadConfig(configPath)
+      if (jsonOutput) {
+        const agents = config.agents.map((agent) => {
+          const credFile = resolveCredentialsFile(agent.credentialsFile, agent.name)
+          let email: string | undefined
+          try {
+            const creds = JSON.parse(readFileSync(credFile, 'utf-8')) as { email?: string }
+            email = creds.email
+          } catch { /* no credentials yet */ }
+          return {
+            name: agent.name,
+            bridge: 'acp-bridge',
+            connection: 'acp_bridge',
+            email,
+            acpCommand: agent.acpCommand,
+            credentialsFile: credFile,
+            configured: true,
+          }
+        })
+        console.log(JSON.stringify({
+          schemaVersion: 1,
+          bridge: 'acp-bridge',
+          configPath,
+          aampHost: config.aampHost,
+          agents,
+        }, null, 2))
+        break
+      }
       console.log(`\nConfigured agents (${config.agents.length}):`)
       for (const a of config.agents) {
         const credFile = resolveCredentialsFile(a.credentialsFile, a.name)
@@ -142,12 +258,37 @@ async function main() {
       break
     }
 
+    case 'discover': {
+      console.log(JSON.stringify(discoverAcpBridgeAgents(configPath), null, 2))
+      break
+    }
+
+    case 'sender-policy': {
+      const action = args[1]
+      const agentName = getOptionValue('--agent')
+      if (!agentName) throw new Error('Missing required --agent')
+      const config = loadConfig(configPath)
+
+      if (action === 'get') {
+        console.log(JSON.stringify(getAgentSenderPolicy(config, agentName), null, 2))
+        break
+      }
+
+      if (action === 'set') {
+        const input = await readJsonInput() as { senderPolicy?: string }
+        console.log(JSON.stringify(setAgentSenderPolicy(config, configPath, agentName, input.senderPolicy ?? ''), null, 2))
+        break
+      }
+
+      throw new Error('Usage: sender-policy get|set --agent NAME --json [--input -]')
+    }
+
     case 'status': {
       const config = loadConfig(configPath)
       const bridge = new AampAcpBridge(config)
       await bridge.start()
       bridge.list()
-      bridge.stop()
+      await bridge.stop()
       break
     }
 
@@ -206,9 +347,11 @@ AAMP ACP Bridge -- Connect ACP agents to the AAMP email network
 
 Usage:
   aamp-acp-bridge init [--agent NAME] [--no-start]  Interactive setup wizard, then start bridge
-  aamp-acp-bridge start [--config X]   Start the bridge (default: ~/.aamp/acp-bridge/config.json)
+  aamp-acp-bridge init --json --input -  Non-interactive setup for desktop clients
+  aamp-acp-bridge start [--agent NAME] [--config X] [--json]  Start the bridge (default: ~/.aamp/acp-bridge/config.json)
   aamp-acp-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
   aamp-acp-bridge list  [--config X]   List configured agents
+  aamp-acp-bridge discover [--config X] [--json]  Discover local ACP agent candidates
   aamp-acp-bridge status               Show live connection status
   aamp-acp-bridge directory-list --agent NAME [--config X] [--include-self] [--limit N]
   aamp-acp-bridge directory-search --agent NAME --query TEXT [--config X] [--include-self] [--limit N]
@@ -228,6 +371,14 @@ Examples:
 }
 
 main().catch((err) => {
-  console.error(`Error: ${(err as Error).message}`)
+  if (jsonOutput) {
+    console.error(JSON.stringify({
+      type: 'error',
+      bridge: 'acp-bridge',
+      message: (err as Error).message,
+    }))
+  } else {
+    console.error(`Error: ${(err as Error).message}`)
+  }
   process.exit(1)
 })

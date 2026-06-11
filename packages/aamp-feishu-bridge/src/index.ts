@@ -4,13 +4,15 @@ import { inspect } from 'node:util'
 import {
   ensureBridgeHomeDir,
   getBridgeHomeDir,
+  getBridgeInstanceDir,
   initializeBridgeConfig,
-  loadBridgeConfig,
+  loadBridgeConfigEntries,
   loadBridgeState,
+  removeBridgeConfigEntry,
 } from './config.js'
 import { FeishuBridgeRuntime } from './runtime.js'
 
-type CommandName = 'init' | 'start' | 'run' | 'status' | 'help' | 'unknown'
+type CommandName = 'init' | 'start' | 'run' | 'status' | 'remove' | 'unbind' | 'help' | 'unknown'
 
 interface ParsedArgs {
   command: CommandName
@@ -57,16 +59,51 @@ function firstArg(args: ParsedArgs, key: string): string | undefined {
   return args.values[key]?.[0]
 }
 
+function jsonOutput(args: ParsedArgs): boolean {
+  return args.booleans.has('json') || firstArg(args, 'output') === 'json'
+}
+
+function writeJsonEvent(event: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    ...event,
+  })}\n`)
+}
+
+function bridgeConfigSummary(config: Awaited<ReturnType<typeof initializeBridgeConfig>>) {
+  const applinkHost = config.feishu.domain === 'lark' ? 'applink.larksuite.com' : 'applink.feishu.cn'
+  const botOpenUrl = `https://${applinkHost}/client/bot/open?appId=${encodeURIComponent(config.feishu.appId)}`
+  return {
+    version: config.version,
+    aampHost: config.aampHost,
+    targetAgentEmail: config.targetAgentEmail,
+    slug: config.slug,
+    feishu: {
+      appId: config.feishu.appId,
+      domain: config.feishu.domain,
+      authMode: config.feishu.authMode ?? (config.feishu.appSecret ? 'app-secret' : 'lark-cli'),
+      cliProfile: config.feishu.cliProfile,
+      botOpenUrl,
+    },
+    mailbox: {
+      email: config.mailbox.email,
+      baseUrl: config.mailbox.baseUrl,
+    },
+  }
+}
+
 function printUsage(): void {
   console.log(`AAMP Feishu Bridge
 
 Usage:
-  aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--slug NAME] [--domain DOMAIN] [--no-start]
-  aamp-feishu-bridge start [--config-dir DIR]
+  aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
+  aamp-feishu-bridge start [--config-dir DIR] [--json]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
+  aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
 Aliases:
   run    Alias for start
+  unbind Alias for remove
 `)
 }
 
@@ -80,9 +117,26 @@ async function runInit(args: ParsedArgs): Promise<void> {
     pairingUrl: firstArg(args, 'pairing-url'),
     appId: firstArg(args, 'app-id'),
     appSecret: firstArg(args, 'app-secret'),
+    useFeishuCli: args.booleans.has('use-feishu-cli') || args.booleans.has('feishu-cli'),
+    feishuCliNew: args.booleans.has('feishu-cli-new'),
+    feishuCliProfile: firstArg(args, 'feishu-cli-profile'),
+    feishuCliBin: firstArg(args, 'feishu-cli-bin'),
+    feishuCliAppName: firstArg(args, 'feishu-cli-app-name'),
+    feishuCliOpen: args.booleans.has('feishu-cli-open'),
     slug: firstArg(args, 'slug'),
     domain: firstArg(args, 'domain'),
   })
+
+  if (jsonOutput(args)) {
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      type: 'init.completed',
+      bridge: 'feishu-bridge',
+      configDir: getBridgeInstanceDir(config.slug, configDir),
+      config: bridgeConfigSummary(config),
+    }, null, 2))
+    return
+  }
 
   console.log(`Initialized bridge in ${getBridgeHomeDir(configDir)}`)
   console.log(`AAMP mailbox: ${config.mailbox.email}`)
@@ -96,47 +150,157 @@ async function runInit(args: ParsedArgs): Promise<void> {
 
 async function runStatus(args: ParsedArgs): Promise<void> {
   const configDir = firstArg(args, 'config-dir')
-  const config = await loadBridgeConfig(configDir)
-  const state = await loadBridgeState(configDir)
+  const entries = await loadBridgeConfigEntries(configDir)
+  const agents = await Promise.all(entries.map(async (entry) => ({
+    configDir: entry.configDir,
+    configPath: entry.configPath,
+    legacy: entry.legacy,
+    config: bridgeConfigSummary(entry.config),
+    state: await loadBridgeState(entry.configDir),
+  })))
   if (args.booleans.has('json')) {
-    console.log(JSON.stringify({ config, state }, null, 2))
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      type: 'status',
+      bridge: 'feishu-bridge',
+      configDir: getBridgeHomeDir(configDir),
+      agents,
+      config: agents[0]?.config ?? null,
+      state: agents[0]?.state ?? null,
+    }, null, 2))
     return
   }
-  if (!config) {
+  if (agents.length === 0) {
     console.log(`No bridge config found in ${getBridgeHomeDir(configDir)}.`)
     return
   }
 
   console.log(`Bridge home: ${getBridgeHomeDir(configDir)}`)
-  console.log(`AAMP mailbox: ${config.mailbox.email}`)
-  console.log(`Target agent: ${config.targetAgentEmail}`)
-  console.log(`Feishu app: ${config.feishu.appId}`)
-  console.log(`Connectivity: feishu=${state.connectivity.feishu} aamp=${state.connectivity.aamp}`)
-  console.log(`Active conversations: ${Object.keys(state.conversations).length}`)
-  console.log(`Tracked tasks: ${Object.keys(state.tasks).length}`)
-  if (state.bot?.name || state.bot?.openId) {
-    console.log(`Bot identity: ${state.bot.name || '(unknown)'} ${state.bot.openId ? `(${state.bot.openId})` : ''}`.trim())
+  for (const agent of agents) {
+    console.log(`\n[${agent.config.slug}]`)
+    console.log(`Config: ${agent.configPath}`)
+    console.log(`AAMP mailbox: ${agent.config.mailbox.email}`)
+    console.log(`Target agent: ${agent.config.targetAgentEmail}`)
+    console.log(`Feishu app: ${agent.config.feishu.appId}`)
+    console.log(`Connectivity: feishu=${agent.state.connectivity.feishu} aamp=${agent.state.connectivity.aamp}`)
+    console.log(`Active conversations: ${Object.keys(agent.state.conversations).length}`)
+    console.log(`Tracked tasks: ${Object.keys(agent.state.tasks).length}`)
+    if (agent.state.bot?.name || agent.state.bot?.openId) {
+      console.log(`Bot identity: ${agent.state.bot.name || '(unknown)'} ${agent.state.bot.openId ? `(${agent.state.bot.openId})` : ''}`.trim())
+    }
+    if (agent.state.lastError) {
+      console.log(`Last error: ${agent.state.lastError}`)
+    }
   }
-  if (state.lastError) {
-    console.log(`Last error: ${state.lastError}`)
+}
+
+async function runRemove(args: ParsedArgs): Promise<void> {
+  const configDir = firstArg(args, 'config-dir')
+  const removed = await removeBridgeConfigEntry({
+    configDir,
+    targetAgentEmail: firstArg(args, 'target-agent'),
+    slug: firstArg(args, 'slug'),
+  })
+  if (!removed) {
+    throw new Error(`No Feishu access config matched in ${getBridgeHomeDir(configDir)}.`)
   }
+
+  if (jsonOutput(args)) {
+    console.log(JSON.stringify({
+      schemaVersion: 1,
+      type: 'access.removed',
+      bridge: 'feishu-bridge',
+      configDir: removed.configDir,
+      config: bridgeConfigSummary(removed.config),
+    }, null, 2))
+    return
+  }
+
+  console.log(`Removed Feishu access for ${removed.config.targetAgentEmail}.`)
+  console.log(`Bridge mailbox: ${removed.config.mailbox.email}`)
 }
 
 async function runBridge(args: ParsedArgs): Promise<void> {
   const configDir = firstArg(args, 'config-dir')
-  const config = await loadBridgeConfig(configDir)
-  if (!config) {
+  const entries = await loadBridgeConfigEntries(configDir)
+  if (entries.length === 0) {
     throw new Error(`No bridge config found in ${getBridgeHomeDir(configDir)}. Run "aamp-feishu-bridge init" first.`)
   }
 
-  const runtime = new FeishuBridgeRuntime(config, { configDir })
-  await runtime.start()
-  console.log(`Feishu bridge is running for ${config.targetAgentEmail}`)
-  console.log(`Mailbox: ${config.mailbox.email}`)
+  const runtimes = entries.map((entry) => ({
+    entry,
+    runtime: new FeishuBridgeRuntime(entry.config, { configDir: entry.configDir }),
+  }))
+  if (jsonOutput(args)) {
+    for (const { entry } of runtimes) {
+      writeJsonEvent({
+        type: 'bridge.starting',
+        bridge: 'feishu-bridge',
+        targetAgentEmail: entry.config.targetAgentEmail,
+        mailbox: entry.config.mailbox.email,
+        configDir: entry.configDir,
+      })
+    }
+  }
+  const started: FeishuBridgeRuntime[] = []
+  const failed: Array<{ targetAgentEmail: string; error: string }> = []
+  for (const { entry, runtime } of runtimes) {
+    try {
+      await runtime.start()
+      started.push(runtime)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : inspect(error)
+      failed.push({ targetAgentEmail: entry.config.targetAgentEmail, error: message })
+      if (jsonOutput(args)) {
+        writeJsonEvent({
+          type: 'bridge.failed',
+          bridge: 'feishu-bridge',
+          targetAgentEmail: entry.config.targetAgentEmail,
+          mailbox: entry.config.mailbox.email,
+          configDir: entry.configDir,
+          error: message,
+        })
+      } else {
+        console.error(`Failed to start ${entry.config.targetAgentEmail}: ${message}`)
+      }
+    }
+  }
+  if (started.length === 0) {
+    throw new Error(`No Feishu bridge instance started. ${failed.map((item) => `${item.targetAgentEmail}: ${item.error}`).join('; ')}`)
+  }
+  if (jsonOutput(args)) {
+    for (const { entry } of runtimes.filter(({ runtime }) => started.includes(runtime))) {
+      writeJsonEvent({
+        type: 'bridge.running',
+        bridge: 'feishu-bridge',
+        targetAgentEmail: entry.config.targetAgentEmail,
+        mailbox: entry.config.mailbox.email,
+        configDir: entry.configDir,
+      })
+    }
+    writeJsonEvent({
+      type: 'bridge.supervisor.running',
+      bridge: 'feishu-bridge',
+      agents: started.length,
+      failedAgents: failed.length,
+    })
+  } else {
+    console.log(`Feishu bridge is running for ${started.length} Agent(s).`)
+    for (const { entry } of runtimes.filter(({ runtime }) => started.includes(runtime))) {
+      console.log(`- ${entry.config.targetAgentEmail}: ${entry.config.mailbox.email}`)
+    }
+  }
 
   const shutdown = async (signal: string) => {
-    console.log(`Received ${signal}, shutting down...`)
-    await runtime.stop()
+    if (jsonOutput(args)) {
+      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'feishu-bridge', reason: signal })
+    } else {
+      console.log(`Received ${signal}, shutting down...`)
+    }
+    await Promise.all(started.map((runtime) => runtime.stop().catch(() => {})))
+    if (jsonOutput(args)) {
+      writeJsonEvent({ type: 'bridge.stopped', bridge: 'feishu-bridge' })
+    }
     process.exit(0)
   }
 
@@ -160,6 +324,10 @@ async function main(): Promise<void> {
       return
     case 'status':
       await runStatus(args)
+      return
+    case 'remove':
+    case 'unbind':
+      await runRemove(args)
       return
     case 'help':
       printUsage()

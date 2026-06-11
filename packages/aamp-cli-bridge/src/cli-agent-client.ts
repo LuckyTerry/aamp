@@ -12,6 +12,7 @@ import {
 export interface CliPromptContext {
   agentName: string
   sessionKey?: string
+  safeSessionKey?: string
   prompt: string
 }
 
@@ -42,6 +43,8 @@ function renderTemplate(value: string, context: CliPromptContext): string {
         return context.agentName
       case 'sessionKey':
         return context.sessionKey ?? ''
+      case 'safeSessionKey':
+        return context.safeSessionKey ?? context.sessionKey ?? ''
       case 'prompt':
         return context.prompt
       default:
@@ -74,6 +77,17 @@ function formatOutput(stdout: string, stderr: string, profile: CliProfileDefinit
   return output
 }
 
+function sanitizeSessionKey(value: string | undefined, fallback: string): string {
+  const normalized = (value ?? fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 96)
+  return normalized || fallback
+}
+
 export class CliAgentClient {
   constructor(
     private readonly profile: CliProfileDefinition,
@@ -88,6 +102,7 @@ export class CliAgentClient {
     const context: CliPromptContext = {
       agentName: this.agentName,
       sessionKey,
+      safeSessionKey: sanitizeSessionKey(sessionKey, `aamp-${this.agentName}`),
       prompt: text,
     }
     const command = renderTemplate(this.profile.command, context)

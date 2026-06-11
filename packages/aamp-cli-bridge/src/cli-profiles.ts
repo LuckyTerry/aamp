@@ -36,7 +36,7 @@ export const BUILTIN_CLI_PROFILES: Record<string, CliProfileDefinition> = {
     name: 'codem',
     description: 'Codem Bot',
     command: 'codem',
-    args: ['-p', '{{prompt}}', '--sse', '--yolo', '--session', '{{sessionKey}}'],
+    args: ['-p', '{{prompt}}', '--sse', '--yolo', '--session', '{{safeSessionKey}}'],
     timeoutMs: 1_800_000,
     stream: {
       format: 'sse',

@@ -24,7 +24,7 @@ export const cliProfileDefinitionSchema = z.object({
 })
 
 const senderPolicySchema = z.object({
-  sender: z.string().email(),
+  sender: z.string().min(1),
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
 })
 

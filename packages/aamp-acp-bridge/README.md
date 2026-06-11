@@ -45,6 +45,33 @@ Start the bridge:
 npx aamp-acp-bridge start
 ```
 
+Desktop and other non-interactive clients can use JSON output:
+
+```bash
+npx aamp-acp-bridge init --json --input -
+npx aamp-acp-bridge discover --json
+npx aamp-acp-bridge list --json
+npx aamp-acp-bridge start --json
+npx aamp-acp-bridge pair --agent claude --json --no-start
+```
+
+`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
+
+Example JSON init input:
+
+```json
+{
+  "aampHost": "https://meshmail.ai",
+  "agents": [
+    {
+      "name": "claude",
+      "acpCommand": "claude",
+      "createPairing": true
+    }
+  ]
+}
+```
+
 By default, the bridge stores its config under `~/.aamp/acp-bridge/config.json` and agent credentials under `~/.aamp/acp-bridge/credentials/`.
 Legacy `./bridge.json` and `~/.acp-bridge/` data are migrated automatically on first use without deleting the original files.
 

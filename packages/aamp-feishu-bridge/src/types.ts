@@ -12,8 +12,11 @@ export interface BridgeConfig {
   slug: string
   feishu: {
     appId: string
-    appSecret: string
+    appSecret?: string
     domain?: string
+    authMode?: 'app-secret' | 'lark-cli'
+    cliProfile?: string
+    cliBin?: string
   }
   mailbox: BridgeMailboxIdentity
   behavior: {

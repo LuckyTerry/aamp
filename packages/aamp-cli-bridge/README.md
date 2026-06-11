@@ -76,6 +76,33 @@ npx aamp-cli-bridge start --config ./production.cli-bridge.json
 npx aamp-cli-bridge list --config ./production.cli-bridge.json
 ```
 
+Desktop and other non-interactive clients can use JSON output:
+
+```bash
+npx aamp-cli-bridge init --json --input -
+npx aamp-cli-bridge discover --json
+npx aamp-cli-bridge list --json
+npx aamp-cli-bridge start --json
+npx aamp-cli-bridge pair --agent codex --json --no-start
+```
+
+`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans built-in profiles, user profiles, and already configured agents, then reports which commands are available on PATH. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
+
+Example JSON init input:
+
+```json
+{
+  "aampHost": "https://meshmail.ai",
+  "agents": [
+    {
+      "name": "codex",
+      "cliProfile": "codex",
+      "createPairing": true
+    }
+  ]
+}
+```
+
 ## Profile Model
 
 A CLI profile describes how to invoke an agent and how to interpret its output.
@@ -314,9 +341,11 @@ The CLI agent can use these plain-output conventions:
 
 ```bash
 npx aamp-cli-bridge init [--no-start]
-npx aamp-cli-bridge start [--config X]
+npx aamp-cli-bridge init --json --input -
+npx aamp-cli-bridge start [--config X] [--json]
 npx aamp-cli-bridge pair --agent NAME [--config X] [--no-start]
 npx aamp-cli-bridge list [--config X]
+npx aamp-cli-bridge discover [--config X] [--json]
 npx aamp-cli-bridge status
 npx aamp-cli-bridge profile-list
 npx aamp-cli-bridge profile-maker

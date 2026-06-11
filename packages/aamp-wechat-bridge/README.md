@@ -49,6 +49,19 @@ Inspect current config and login state:
 ./dist/index.js status
 ```
 
+Desktop and other non-interactive clients can use JSON output:
+
+```bash
+./dist/index.js init --json --no-start --target-agent agent@meshmail.ai
+./dist/index.js login --json
+./dist/index.js status --json
+./dist/index.js start --json
+```
+
+`login --json` emits JSONL events such as `wechat.qr.created`,
+`wechat.qr.status`, and `wechat.login.completed`, so desktop clients can render
+the QR code and login progress without parsing terminal output.
+
 By default, bridge config and runtime state are stored under `~/.aamp/wechat-bridge/`.
 
 ## What it does

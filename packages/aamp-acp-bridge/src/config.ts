@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { readFileSync, existsSync } from 'node:fs'
 
 const senderPolicySchema = z.object({
-  sender: z.string().email(),
+  sender: z.string().min(1),
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
 })
 

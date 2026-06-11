@@ -25,6 +25,7 @@ import {
   type SenderPolicy,
 } from './pairing.js'
 import type { ParsedCliStreamUpdate } from './stream-parser.js'
+import type { BridgeRuntimeEvent } from './bridge.js'
 
 export interface AgentIdentity {
   email: string
@@ -39,7 +40,7 @@ function matchSenderPolicy(
   if (!senderPolicies?.length) return { allowed: false, reason: 'no configured senderPolicies' }
 
   const sender = task.from.toLowerCase()
-  const policy = senderPolicies.find((item) => item.sender.trim().toLowerCase() === sender)
+  const policy = senderPolicies.find((item) => matchesSenderPattern(sender, item.sender))
   if (!policy) {
     return { allowed: false, reason: `sender ${task.from} is not allowed by senderPolicies` }
   }
@@ -61,6 +62,17 @@ function matchSenderPolicy(
   }
 
   return { allowed: true }
+}
+
+function matchesSenderPattern(senderEmail: string, pattern: string): boolean {
+  const normalizedSender = senderEmail.trim().toLowerCase()
+  const normalizedPattern = pattern.trim().toLowerCase()
+  if (!normalizedSender || !normalizedPattern) return false
+  const canonicalPattern = normalizedPattern.startsWith('@')
+    ? `*${normalizedPattern}`
+    : normalizedPattern
+  const escaped = canonicalPattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+  return new RegExp(`^${escaped}$`, 'i').test(normalizedSender)
 }
 
 function matchPairedSenderPolicy(
@@ -106,6 +118,7 @@ function matchCombinedSenderPolicy(
 
 export interface AgentBridgeStartOptions {
   quiet?: boolean
+  onEvent?: (event: BridgeRuntimeEvent) => void
 }
 
 interface HandleEventOptions {
@@ -233,6 +246,7 @@ export class AgentBridge {
   private streamEnabled: boolean
   private senderPolicies: SenderPolicy[] = []
   private isHistoricalReconcile = false
+  private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
 
   constructor(
     private readonly agentConfig: AgentConfig,
@@ -251,6 +265,10 @@ export class AgentBridge {
   get isConnected(): boolean { return this.client?.isConnected() ?? false }
   get isUsingPollingFallback(): boolean { return this.pollingFallback || (this.client?.isUsingPollingFallback() ?? false) }
   get isBusy(): boolean { return this.activeTaskCount > 0 }
+
+  private emit(event: BridgeRuntimeEvent): void {
+    this.onEvent?.(event)
+  }
 
   private getConfiguredCardText(): string | undefined {
     const inline = this.agentConfig.cardText?.trim()
@@ -284,6 +302,7 @@ export class AgentBridge {
   }
 
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
+    this.onEvent = options.onEvent
     let quietStartup = options.quiet === true
     this.identity = await this.resolveIdentity()
     this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
@@ -294,6 +313,13 @@ export class AgentBridge {
       console.log(`[${this.name}] AAMP identity: ${this.identity.email}`)
       console.log(`[${this.name}] CLI profile: ${this.profileLabel}`)
     }
+    this.emit({
+      type: 'agent.identity',
+      bridge: 'cli-bridge',
+      agent: this.name,
+      email: this.identity.email,
+      profile: this.profileLabel,
+    })
 
     this.client = AampClient.fromMailboxIdentity({
       email: this.identity.email,
@@ -326,6 +352,13 @@ export class AgentBridge {
 
     client.on('connected', () => {
       this.pollingFallback = client.isUsingPollingFallback()
+      this.emit({
+        type: 'agent.connected',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        pollingFallback: this.pollingFallback,
+      })
       if (!quietStartup) {
         console.log(`[${this.name}] AAMP connected${this.pollingFallback ? ' (polling fallback)' : ''}`)
       }
@@ -333,6 +366,14 @@ export class AgentBridge {
 
     client.on('disconnected', (reason: string) => {
       this.pollingFallback = client.isUsingPollingFallback()
+      this.emit({
+        type: 'agent.disconnected',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        reason,
+        pollingFallback: this.pollingFallback,
+      })
       if (!quietStartup) {
         console.warn(`[${this.name}] AAMP disconnected: ${reason}`)
       }
@@ -341,11 +382,25 @@ export class AgentBridge {
     client.on('error', (err: Error) => {
       if (err.message.includes('falling back to polling')) {
         this.pollingFallback = true
+        this.emit({
+          type: 'agent.error',
+          bridge: 'cli-bridge',
+          agent: this.name,
+          email: this.email,
+          message: err.message,
+        })
         if (!quietStartup) {
           console.warn(`[${this.name}] ${err.message}`)
         }
         return
       }
+      this.emit({
+        type: 'agent.error',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        message: err.message,
+      })
       console.error(`[${this.name}] AAMP error: ${err.message}`)
     })
 
@@ -364,6 +419,13 @@ export class AgentBridge {
     if (!quietStartup) {
       console.log(`[${this.name}] Reconciled ${reconciled} recent email(s)`)
     }
+    this.emit({
+      type: 'agent.reconciled',
+      bridge: 'cli-bridge',
+      agent: this.name,
+      email: this.email,
+      count: reconciled,
+    })
     await this.syncDirectoryProfile({ quiet: quietStartup }).catch((err) => {
       if (!quietStartup) {
         console.warn(`[${this.name}] Directory profile sync failed: ${(err as Error).message}`)
@@ -383,6 +445,15 @@ export class AgentBridge {
     const shouldLogTask = !options.historical
     if (shouldLogTask) {
       console.log(`[${this.name}] <- task.dispatch  ${task.taskId}  "${task.title}"  from=${task.from}`)
+      this.emit({
+        type: 'task.received',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: task.taskId,
+        title: task.title,
+        from: task.from,
+      })
     }
 
     if (task.expiresAt && new Date(task.expiresAt).getTime() <= Date.now()) {
@@ -427,6 +498,14 @@ export class AgentBridge {
     if (!senderDecision.allowed) {
       if (options.historical) return
       console.warn(`[${this.name}] Rejecting task ${task.taskId}: ${senderDecision.reason ?? 'sender policy rejected the task'}`)
+      this.emit({
+        type: 'task.rejected',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: task.taskId,
+        reason: senderDecision.reason ?? 'sender policy rejected the task',
+      })
       await this.client.sendResult({
         to: task.from,
         taskId: task.taskId,
@@ -635,6 +714,14 @@ export class AgentBridge {
           inReplyTo: task.messageId,
         })
         console.log(`[${this.name}] -> task.help_needed  ${task.taskId}`)
+        this.emit({
+          type: 'task.completed',
+          bridge: 'cli-bridge',
+          agent: this.name,
+          email: this.email,
+          taskId: task.taskId,
+          status: 'help_needed',
+        })
         return
       }
 
@@ -681,6 +768,14 @@ export class AgentBridge {
         attachments: attachments.length > 0 ? attachments : undefined,
       })
       console.log(`[${this.name}] -> task.result  ${task.taskId}  completed${structuredResult?.length ? ` (${structuredResult.length} structured field(s))` : ''}${attachments.length ? ` (${attachments.length} attachment(s))` : ''}`)
+      this.emit({
+        type: 'task.completed',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: task.taskId,
+        status: 'completed',
+      })
     } catch (err) {
       const errorMsg = (err as Error).message
       console.error(`[${this.name}] Task ${task.taskId} error: ${errorMsg}`)
@@ -705,6 +800,14 @@ export class AgentBridge {
         errorMsg: `CLI agent error: ${errorMsg}`,
         inReplyTo: task.messageId,
       }).catch(() => {})
+      this.emit({
+        type: 'task.completed',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: task.taskId,
+        status: 'rejected',
+      })
     } finally {
       this.activeTaskCount = Math.max(0, this.activeTaskCount - 1)
       this.activeTaskIds.delete(task.taskId)
@@ -745,6 +848,14 @@ export class AgentBridge {
     const shouldLogRequest = !options.historical
     if (shouldLogRequest) {
       console.log(`[${this.name}] <- pair.request  ${request.taskId}  from=${request.from}`)
+      this.emit({
+        type: 'pair.request',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: request.taskId,
+        from: request.from,
+      })
     }
     const requestTo = this.normalizeEmail(request.to)
     if (requestTo && requestTo !== this.normalizeEmail(this.identity.email)) {
@@ -785,6 +896,16 @@ export class AgentBridge {
       }
       console.warn(`[${this.name}] Rejected pair.request from ${request.from}: ${reason}`)
       await this.sendPairResponse(request, false, reason)
+      this.emit({
+        type: 'pair.completed',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: request.taskId,
+        sender: request.from,
+        success: false,
+        reason,
+      })
       return
     }
 
@@ -795,6 +916,15 @@ export class AgentBridge {
     })
     console.log(`[${this.name}] Paired sender ${request.from}; sender policy saved to ${senderPoliciesFile}`)
     if (await this.sendPairResponse(request, true)) {
+      this.emit({
+        type: 'pair.completed',
+        bridge: 'cli-bridge',
+        agent: this.name,
+        email: this.email,
+        taskId: request.taskId,
+        sender: request.from,
+        success: true,
+      })
       consumePairingCode(pairParams)
     } else {
       console.warn(`[${this.name}] Pairing code left active so ${request.from} can retry before it expires`)

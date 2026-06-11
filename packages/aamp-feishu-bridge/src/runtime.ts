@@ -26,6 +26,7 @@ import {
   loadBridgeState,
   saveBridgeState,
 } from './config.js'
+import { LarkCliChannel } from './lark-cli-channel.js'
 import type {
   BridgeConfig,
   BridgeConversationState,
@@ -56,6 +57,7 @@ interface FeishuCardSession {
   result: Promise<void>
   update(nextCard: Record<string, unknown>): Promise<void>
   close(finalCard?: Record<string, unknown>): Promise<void>
+  abandon(): void
 }
 
 interface DispatchReplyTarget {
@@ -96,7 +98,6 @@ interface MarkdownElementContent {
 
 const RECEIVED_REACTION_CANDIDATES = ['Get']
 const TYPING_REACTION_CANDIDATES = ['Typing']
-const CARD_UPDATE_SIZE_HEURISTIC_BYTES = 24_000
 const CARD_STREAM_PRINT_FREQUENCY_MS = {
   default: 30,
   android: 30,
@@ -110,15 +111,22 @@ const CARD_STREAM_PRINT_STEP = {
   pc: 8,
 }
 
+function isTerminalTaskStatus(status: BridgeTaskState['status']): boolean {
+  return status === 'completed'
+    || status === 'rejected'
+    || status === 'failed'
+}
+
 export class FeishuBridgeRuntime {
   private readonly aamp: AampClient
-  private readonly channel: LarkChannel
+  private readonly channel: LarkChannel | LarkCliChannel
   private readonly config: BridgeConfig
   private readonly configDir?: string
   private readonly logger: Pick<Console, 'log' | 'error'>
   private state: BridgeState = createDefaultBridgeState()
   private readonly activeStreamSubscriptions = new Map<string, StreamSubscription>()
   private readonly cardSessions = new Map<string, FeishuCardSession>()
+  private readonly streamCardUpdateChains = new Map<string, Promise<void>>()
   private readonly liveTaskIds = new Set<string>()
   private stopping = false
 
@@ -132,24 +140,30 @@ export class FeishuBridgeRuntime {
       smtpPassword: config.mailbox.smtpPassword,
       baseUrl: config.mailbox.baseUrl,
     })
-    this.channel = createLarkChannel({
-      appId: config.feishu.appId,
-      appSecret: config.feishu.appSecret,
-      transport: 'websocket',
-      loggerLevel: LoggerLevel.info,
-      domain: config.feishu.domain,
-      source: 'aamp-feishu-bridge',
-      includeRawEvent: true,
-      outbound: {
-        streamThrottleMs: config.behavior.streamThrottleMs,
-        streamThrottleChars: config.behavior.streamThrottleChars,
-      },
-    })
+    this.channel = (config.feishu.authMode ?? 'app-secret') === 'lark-cli'
+      ? new LarkCliChannel({
+        cliBin: config.feishu.cliBin ?? 'lark-cli',
+        profile: config.feishu.cliProfile ?? config.slug,
+        logger: this.logger,
+      })
+      : createLarkChannel({
+        appId: config.feishu.appId,
+        appSecret: config.feishu.appSecret ?? '',
+        transport: 'websocket',
+        loggerLevel: LoggerLevel.info,
+        domain: config.feishu.domain,
+        source: 'aamp-feishu-bridge',
+        includeRawEvent: true,
+        outbound: {
+          streamThrottleMs: config.behavior.streamThrottleMs,
+          streamThrottleChars: config.behavior.streamThrottleChars,
+        },
+      })
   }
 
   async start(): Promise<void> {
     this.state = await loadBridgeState(this.configDir)
-    this.expirePendingTasksFromPreviousRun()
+    this.restoreLiveTasksFromState()
     this.state.lastStartedAt = new Date().toISOString()
     this.state.lastError = undefined
     this.setConnectivity('aamp', 'connecting')
@@ -163,6 +177,8 @@ export class FeishuBridgeRuntime {
     await this.channel.connect()
     this.setConnectivity('feishu', 'connected')
     this.captureBotIdentity()
+    await this.resumeActiveStreams()
+    await this.reconcileRecentMailbox(true)
     await this.aamp.updateDirectoryProfile({
       summary: `Feishu bridge mailbox for ${this.config.targetAgentEmail}`,
       cardText: `This mailbox belongs to a local Feishu bridge.\nTarget AAMP Agent: ${this.config.targetAgentEmail}`,
@@ -225,30 +241,37 @@ export class FeishuBridgeRuntime {
   }
 
   private registerFeishuHandlers(): void {
-    this.channel.on('message', (message) => {
+    const channel = this.channel as {
+      on(name: 'message', handler: (message: NormalizedMessage) => void): void
+      on(name: 'cardAction', handler: (event: CardActionEvent) => void): void
+      on(name: 'error', handler: (error: Error) => void): void
+      on(name: 'reconnecting', handler: () => void): void
+      on(name: 'reconnected', handler: () => void): void
+    }
+    channel.on('message', (message: NormalizedMessage) => {
       void this.handleIncomingMessage(message).catch((error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[feishu->aamp] ${error.message}`)
         void this.persistState()
       })
     })
-    this.channel.on('cardAction', (event) => {
+    channel.on('cardAction', (event: CardActionEvent) => {
       void this.handleCardAction(event).catch((error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[feishu card] ${error.message}`)
         void this.persistState()
       })
     })
-    this.channel.on('error', (error) => {
+    channel.on('error', (error: Error) => {
       this.state.lastError = error.message
       this.logger.error(`[feishu] ${error.message}`)
       void this.persistState()
     })
-    this.channel.on('reconnecting', () => {
+    channel.on('reconnecting', () => {
       this.setConnectivity('feishu', 'connecting')
       void this.persistState()
     })
-    this.channel.on('reconnected', () => {
+    channel.on('reconnected', () => {
       this.setConnectivity('feishu', 'connected')
       this.captureBotIdentity()
       void this.persistState()
@@ -765,21 +788,27 @@ export class FeishuBridgeRuntime {
     return this.buildCardShell(elements)
   }
 
-  private buildTerminalCard(task: BridgeTaskState): Record<string, unknown> {
+  private buildTerminalCard(
+    task: BridgeTaskState,
+    options: { includeReplay?: boolean } = {},
+  ): Record<string, unknown> {
     if (task.status === 'completed') {
-      return this.buildResultCard(task)
+      return this.buildResultCard(task, options)
     }
-    return this.buildErrorCard(task)
+    return this.buildErrorCard(task, options)
   }
 
-  private buildResultCard(task: BridgeTaskState): Record<string, unknown> {
+  private buildResultCard(
+    task: BridgeTaskState,
+    options: { includeReplay?: boolean } = {},
+  ): Record<string, unknown> {
     const finalText = this.renderCompletedMarkdown(task)
     const streamText = task.streamText?.trim()
     const elements: Record<string, unknown>[] = []
-    if (
+    if (options.includeReplay !== false && (
       (streamText && this.shouldShowReplayPanel(streamText, finalText))
       || task.streamEntries?.some((entry) => entry.type === 'tool')
-    ) {
+    )) {
       elements.push(...this.buildStreamTimelineElements(task, {
         textPanelTitle: '过程回放',
         includePlaceholder: false,
@@ -792,7 +821,10 @@ export class FeishuBridgeRuntime {
     return this.buildCardShell(elements)
   }
 
-  private buildErrorCard(task: BridgeTaskState): Record<string, unknown> {
+  private buildErrorCard(
+    task: BridgeTaskState,
+    options: { includeReplay?: boolean } = {},
+  ): Record<string, unknown> {
     const lines = [
       task.outputText.trim() || '这次回复没有成功完成。',
       ...(task.resultError ? ['', `错误信息：${task.resultError}`] : []),
@@ -804,10 +836,10 @@ export class FeishuBridgeRuntime {
 
     const streamText = task.streamText?.trim()
     const elements: Record<string, unknown>[] = []
-    if (
+    if (options.includeReplay !== false && (
       (streamText && this.shouldShowReplayPanel(streamText, lines.join('\n')))
       || task.streamEntries?.some((entry) => entry.type === 'tool')
-    ) {
+    )) {
       elements.push(...this.buildStreamTimelineElements(task, {
         textPanelTitle: '过程回放',
         includePlaceholder: false,
@@ -1737,13 +1769,20 @@ export class FeishuBridgeRuntime {
     return resource.type === 'image' ? 'image/png' : 'application/octet-stream'
   }
 
-  private sanitizeResultAttachmentFilename(attachment: ReceivedAttachment, index: number): string {
-    const fallback = `attachment-${index + 1}`
-    const baseName = path.basename(attachment.filename?.replace(/[\r\n]/g, ' ').trim() || fallback)
-      .replace(/[^\w .()@+-]/g, '_')
+  private sanitizeAttachmentFilename(value: string | undefined, fallback: string): string {
+    const normalized = value
+      ?.replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .trim()
+    const lastSegment = (normalized || fallback).split(/[\\/]+/).filter(Boolean).pop() ?? fallback
+    const filename = lastSegment
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-    return baseName || fallback
+    return filename && filename !== '.' && filename !== '..' ? filename : fallback
+  }
+
+  private sanitizeResultAttachmentFilename(attachment: ReceivedAttachment, index: number): string {
+    return this.sanitizeAttachmentFilename(attachment.filename, `attachment-${index + 1}`)
   }
 
   private describeResultAttachment(attachment: ReceivedAttachment, filename: string): string {
@@ -1848,13 +1887,8 @@ export class FeishuBridgeRuntime {
 
       try {
         const content = await this.aamp.downloadBlob(attachment.blobId, attachment.filename)
-        task.bridgeMessageId = await this.sendResultAttachment(task, attachment, filename, content)
+        await this.sendResultAttachment(task, attachment, filename, content)
         task.updatedAt = new Date().toISOString()
-        const conversation = this.state.conversations[task.threadKey]
-        if (conversation) {
-          conversation.lastBridgeMessageId = task.bridgeMessageId
-          conversation.updatedAt = task.updatedAt
-        }
         sent.push(filename)
       } catch (error) {
         const reason = this.describeError(error)
@@ -2099,6 +2133,7 @@ export class FeishuBridgeRuntime {
     let chain = Promise.resolve()
     let currentCard = this.buildStreamingCard(task)
     let sequence = 0
+    let abandoned = false
 
     const ready = new Promise<void>((resolve) => {
       readyResolve = resolve
@@ -2153,6 +2188,7 @@ export class FeishuBridgeRuntime {
       async update(nextCard: Record<string, unknown>) {
         await ready
         await enqueue(async () => {
+          if (abandoned) return
           if (entityMode && cardId) {
             const operations = runtime.buildMarkdownElementUpdateOperations(currentCard, nextCard)
             if (operations === null || !elementStreamingMode) {
@@ -2197,6 +2233,12 @@ export class FeishuBridgeRuntime {
           await result.catch(() => {})
         }
       },
+      abandon() {
+        if (session.closed) return
+        abandoned = true
+        session.closed = true
+        finishResolve()
+      },
     }
 
     result.catch((error: Error) => {
@@ -2233,12 +2275,53 @@ export class FeishuBridgeRuntime {
   }
 
   private isCardUpdateTooLargeError(error: unknown, card: Record<string, unknown>): boolean {
-    const serializedLength = Buffer.byteLength(JSON.stringify(card), 'utf8')
-    if (serializedLength >= CARD_UPDATE_SIZE_HEURISTIC_BYTES) return true
+    const details = error as {
+      code?: string | number
+      response?: {
+        status?: number
+        data?: {
+          code?: number
+        }
+      }
+      data?: {
+        code?: number
+      }
+    }
+    const code = Number(details.response?.data?.code ?? details.data?.code ?? details.code)
+    const status = Number(details.response?.status)
+    if ([11310, 200860, 300305].includes(code)) return true
+    if (status === 413) return true
 
     const message = this.describeError(error).toLowerCase()
-    return /card|message|content|payload|body|param|参数|内容|卡片/.test(message)
-      && /too large|too long|exceed|exceeded|limit|size|length|overflow|过大|过长|超过|超限|长度|大小/.test(message)
+    return [
+      'element exceeds the limit',
+      'card too large',
+      'card over max size',
+      'card content exceeds limit',
+      'request entity too large',
+      'payload too large',
+      'content exceeds limit',
+      'card exceeds size',
+    ].some((needle) => message.includes(needle))
+  }
+
+  private isMessageNotCardError(error: unknown): boolean {
+    const details = error as {
+      code?: string | number
+      response?: {
+        data?: {
+          code?: number
+          msg?: string
+        }
+      }
+      data?: {
+        code?: number
+        msg?: string
+      }
+    }
+    const code = Number(details.response?.data?.code ?? details.data?.code ?? details.code)
+    const msg = details.response?.data?.msg ?? details.data?.msg ?? this.describeError(error)
+    return code === 230001 && /not a card/i.test(msg)
   }
 
   private normalizeStreamCursor(task: BridgeTaskState, cursor: BridgeStreamCursor): BridgeStreamCursor {
@@ -2266,7 +2349,7 @@ export class FeishuBridgeRuntime {
 
     const previousSession = this.cardSessions.get(task.taskId)
     if (previousSession) {
-      await previousSession.close().catch(() => {})
+      previousSession.abandon()
       this.cardSessions.delete(task.taskId)
     }
 
@@ -2308,15 +2391,36 @@ export class FeishuBridgeRuntime {
     return result.messageId
   }
 
-  private async sendOrUpdateTerminalCard(task: BridgeTaskState): Promise<void> {
-    const finalCard = this.buildTerminalCard(task)
+  private async sendOrUpdateTerminalCard(
+    task: BridgeTaskState,
+    options: {
+      allowNewMessageFallback?: boolean
+      includeReplay?: boolean
+    } = {},
+  ): Promise<void> {
+    const allowNewMessageFallback = options.allowNewMessageFallback !== false
+    const finalCard = this.buildTerminalCard(task, { includeReplay: options.includeReplay })
+    const buildCompactFinalCard = () => this.buildTerminalCard(task, { includeReplay: false })
     const session = this.cardSessions.get(task.taskId)
     if (session) {
       await session.close(finalCard).catch(async (error) => {
         if (!this.isCardUpdateTooLargeError(error, finalCard)) throw error
         task.streamCardStart = this.captureStreamCursorForAppend(task, 'status')
         task.streamCardSequence = (task.streamCardSequence ?? 0) + 1
-        await this.sendCard(task, this.buildTerminalCard(task), task.bridgeMessageId || task.userMessageId)
+        const compactCard = buildCompactFinalCard()
+        if (task.bridgeMessageId) {
+          await this.channel.updateCard(task.bridgeMessageId, compactCard).catch(async (compactError) => {
+            if (!allowNewMessageFallback) {
+              this.logger.error(`[feishu terminal ${task.taskId}] skipped compact card update: ${this.describeError(compactError)}`)
+              return
+            }
+            await this.sendCard(task, compactCard, task.bridgeMessageId || task.userMessageId)
+          })
+          return
+        }
+        if (allowNewMessageFallback) {
+          await this.sendCard(task, compactCard, task.userMessageId)
+        }
       })
       this.cardSessions.delete(task.taskId)
       await this.persistState()
@@ -2325,21 +2429,59 @@ export class FeishuBridgeRuntime {
 
     if (task.bridgeMessageId) {
       await this.channel.updateCard(task.bridgeMessageId, finalCard).catch(async (error) => {
+        if (!allowNewMessageFallback && this.isMessageNotCardError(error)) {
+          this.logger.error(`[feishu terminal ${task.taskId}] skipped historical card update because bridgeMessageId is not a card: ${task.bridgeMessageId}`)
+          return
+        }
         if (this.isCardUpdateTooLargeError(error, finalCard)) {
           task.streamCardStart = this.captureStreamCursorForAppend(task, 'status')
           task.streamCardSequence = (task.streamCardSequence ?? 0) + 1
-          await this.sendCard(task, this.buildTerminalCard(task), task.bridgeMessageId || task.userMessageId)
+          const compactCard = buildCompactFinalCard()
+          await this.channel.updateCard(task.bridgeMessageId!, compactCard).catch(async (compactError) => {
+            if (!allowNewMessageFallback) {
+              this.logger.error(`[feishu terminal ${task.taskId}] skipped historical compact card update: ${this.describeError(compactError)}`)
+              return
+            }
+            await this.sendCard(task, compactCard, task.bridgeMessageId || task.userMessageId)
+          })
           return
         }
-        await this.sendCard(task, finalCard, task.userMessageId)
+        if (allowNewMessageFallback) {
+          await this.sendCard(task, buildCompactFinalCard(), task.userMessageId)
+        }
       })
       return
     }
 
-    await this.sendCard(task, finalCard, task.userMessageId)
+    if (!allowNewMessageFallback) return
+    await this.sendCard(task, finalCard, task.userMessageId).catch(async (error) => {
+      if (!this.isCardUpdateTooLargeError(error, finalCard)) throw error
+      await this.sendCard(task, buildCompactFinalCard(), task.userMessageId)
+    })
   }
 
   private async updateStreamingCard(taskId: string, splitCursor?: BridgeStreamCursor): Promise<void> {
+    const previous = this.streamCardUpdateChains.get(taskId) ?? Promise.resolve()
+    const next = previous
+      .catch(() => {})
+      .then(() => this.updateStreamingCardNow(taskId, splitCursor))
+    this.streamCardUpdateChains.set(taskId, next)
+    try {
+      await next
+    } finally {
+      if (this.streamCardUpdateChains.get(taskId) === next) {
+        this.streamCardUpdateChains.delete(taskId)
+      }
+    }
+  }
+
+  private async waitForStreamCardUpdates(taskId: string): Promise<void> {
+    await (this.streamCardUpdateChains.get(taskId) ?? Promise.resolve()).catch((error: Error) => {
+      this.logger.error(`[feishu stream ${taskId}] pending card update failed before terminal update: ${this.describeError(error)}`)
+    })
+  }
+
+  private async updateStreamingCardNow(taskId: string, splitCursor?: BridgeStreamCursor): Promise<void> {
     const task = this.state.tasks[taskId]
     if (!task) return
     const session = await this.ensureStreamCardSession(task)
@@ -2534,15 +2676,26 @@ export class FeishuBridgeRuntime {
   private async handleTaskResult(task: TaskResult): Promise<void> {
     const state = this.state.tasks[task.taskId]
     if (!state) return
-    if (!this.liveTaskIds.has(task.taskId)) return
+    const isLiveTask = this.liveTaskIds.has(task.taskId)
+    const wasResultTerminal = state.status === 'completed' || state.status === 'rejected'
+    this.closeActiveStream(task.taskId)
     state.status = task.status === 'completed' ? 'completed' : 'rejected'
     state.outputText = task.output || state.outputText
     state.resultError = task.errorMsg
     state.statusLabel = task.status === 'completed' ? 'Completed' : 'Rejected'
     state.updatedAt = new Date().toISOString()
-    this.closeActiveStream(task.taskId)
-    await this.sendOrUpdateTerminalCard(state)
-    const attachmentOutcome = await this.sendResultAttachments(state, task.attachments)
+    if (!isLiveTask && wasResultTerminal) {
+      await this.persistState()
+      return
+    }
+    await this.waitForStreamCardUpdates(task.taskId)
+    await this.sendOrUpdateTerminalCard(state, {
+      allowNewMessageFallback: isLiveTask,
+      includeReplay: isLiveTask,
+    })
+    const attachmentOutcome = !isLiveTask || wasResultTerminal
+      ? { sent: [], failed: [] }
+      : await this.sendResultAttachments(state, task.attachments)
     if (attachmentOutcome.failed.length > 0) {
       await this.channel.send(
         state.chatId,
@@ -2568,7 +2721,10 @@ export class FeishuBridgeRuntime {
   private async handleTaskHelp(task: TaskHelp): Promise<void> {
     const state = this.state.tasks[task.taskId]
     if (!state) return
-    if (!this.liveTaskIds.has(task.taskId)) return
+    const isLiveTask = this.liveTaskIds.has(task.taskId)
+    if (state.status === 'completed' || state.status === 'rejected') return
+    if (!isLiveTask) return
+    this.closeActiveStream(task.taskId)
     state.status = 'help_needed'
     state.helpQuestion = task.question
     state.blockedReason = task.blockedReason
@@ -2577,7 +2733,7 @@ export class FeishuBridgeRuntime {
     )
     state.statusLabel = 'Agent needs more information'
     state.updatedAt = new Date().toISOString()
-    this.closeActiveStream(task.taskId)
+    await this.waitForStreamCardUpdates(task.taskId)
 
     const session = this.cardSessions.get(task.taskId)
     if (session) {
@@ -2680,19 +2836,30 @@ export class FeishuBridgeRuntime {
     }
   }
 
-  private expirePendingTasksFromPreviousRun(): void {
+  private restoreLiveTasksFromState(): void {
+    this.liveTaskIds.clear()
     for (const task of Object.values(this.state.tasks)) {
-      if (task.status === 'completed' || task.status === 'rejected' || task.status === 'failed') continue
-      task.status = 'failed'
-      task.statusLabel = 'Expired after bridge restart'
-      task.streamId = undefined
-      task.lastStreamEventId = undefined
-      task.helpQuestion = undefined
-      task.blockedReason = undefined
-      task.helpSuggestedOptions = undefined
-      task.helpCardMessageId = undefined
-      task.updatedAt = new Date().toISOString()
+      if (!isTerminalTaskStatus(task.status)) {
+        this.liveTaskIds.add(task.taskId)
+      }
     }
+  }
+
+  private async resumeActiveStreams(): Promise<void> {
+    for (const task of Object.values(this.state.tasks)) {
+      if (isTerminalTaskStatus(task.status) || !task.streamId) continue
+      await this.subscribeToTaskStream(task).catch((error: Error) => {
+        this.logger.error(`[stream ${task.taskId}] failed to resume stream subscription: ${this.describeError(error)}`)
+      })
+    }
+  }
+
+  private async reconcileRecentMailbox(includeHistorical: boolean): Promise<void> {
+    await this.aamp.reconcileRecentEmails(100, includeHistorical ? { includeHistorical: true } : undefined)
+      .catch((error: Error) => {
+        this.state.lastError = error.message
+        this.logger.error(`[aamp reconcile] ${error.message}`)
+      })
   }
 
   private setConnectivity(kind: 'aamp' | 'feishu', value: BridgeState['connectivity'][typeof kind]): void {

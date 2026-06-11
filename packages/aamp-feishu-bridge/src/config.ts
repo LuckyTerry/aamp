@@ -1,16 +1,25 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { randomUUID } from 'node:crypto'
-import readline from 'node:readline/promises'
+import { createHash, randomUUID } from 'node:crypto'
+import readline from 'node:readline'
 import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
 import type { BridgeConfig, BridgeState } from './types.js'
+import { resolveFeishuCliCredentials } from './feishu-cli.js'
 
 const CONFIG_FILENAME = 'config.json'
 const STATE_FILENAME = 'state.json'
+const INSTANCES_DIRNAME = 'instances'
 const DEFAULT_BRIDGE_SLUG = 'feishu-bridge'
+
+export interface BridgeConfigEntry {
+  config: BridgeConfig
+  configDir: string
+  configPath: string
+  legacy: boolean
+}
 
 export function getBridgeHomeDir(customDir?: string): string {
   return customDir
@@ -24,6 +33,14 @@ export function getConfigPath(customDir?: string): string {
 
 export function getStatePath(customDir?: string): string {
   return path.join(getBridgeHomeDir(customDir), STATE_FILENAME)
+}
+
+export function getBridgeInstancesDir(customDir?: string): string {
+  return path.join(getBridgeHomeDir(customDir), INSTANCES_DIRNAME)
+}
+
+export function getBridgeInstanceDir(instanceSlug: string, customDir?: string): string {
+  return path.join(getBridgeInstancesDir(customDir), instanceSlug)
 }
 
 export async function ensureBridgeHomeDir(customDir?: string): Promise<string> {
@@ -49,6 +66,42 @@ export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig
 
 export async function saveBridgeConfig(config: BridgeConfig, customDir?: string): Promise<void> {
   await writeJsonAtomic(getConfigPath(customDir), config)
+}
+
+async function loadBridgeConfigFromDir(configDir: string, legacy = false): Promise<BridgeConfigEntry | null> {
+  const configPath = path.join(configDir, CONFIG_FILENAME)
+  if (!existsSync(configPath)) return null
+  const raw = await readFile(configPath, 'utf8')
+  return {
+    config: JSON.parse(raw) as BridgeConfig,
+    configDir,
+    configPath,
+    legacy,
+  }
+}
+
+async function saveBridgeConfigToDir(config: BridgeConfig, configDir: string): Promise<void> {
+  await writeJsonAtomic(path.join(configDir, CONFIG_FILENAME), config)
+}
+
+export async function loadBridgeConfigEntries(customDir?: string): Promise<BridgeConfigEntry[]> {
+  const entries: BridgeConfigEntry[] = []
+  const instancesDir = getBridgeInstancesDir(customDir)
+  if (existsSync(instancesDir)) {
+    const children = await readdir(instancesDir, { withFileTypes: true })
+    for (const child of children) {
+      if (!child.isDirectory()) continue
+      const entry = await loadBridgeConfigFromDir(path.join(instancesDir, child.name))
+      if (entry) entries.push(entry)
+    }
+  }
+
+  const legacyEntry = await loadBridgeConfigFromDir(getBridgeHomeDir(customDir), true)
+  if (legacyEntry && !entries.some((entry) => entry.config.targetAgentEmail === legacyEntry.config.targetAgentEmail)) {
+    entries.push(legacyEntry)
+  }
+
+  return entries.sort((left, right) => left.config.slug.localeCompare(right.config.slug))
 }
 
 export function createDefaultBridgeState(): BridgeState {
@@ -94,6 +147,35 @@ export async function resetBridgeState(customDir?: string): Promise<void> {
   await rm(filePath, { force: true })
 }
 
+export interface RemoveBridgeConfigOptions {
+  configDir?: string
+  targetAgentEmail?: string
+  slug?: string
+}
+
+export async function removeBridgeConfigEntry(options: RemoveBridgeConfigOptions): Promise<BridgeConfigEntry | null> {
+  const targetAgentEmail = options.targetAgentEmail?.trim()
+  const slug = options.slug?.trim()
+  if (!targetAgentEmail && !slug) {
+    throw new Error('Target agent email or slug is required.')
+  }
+
+  const entries = await loadBridgeConfigEntries(options.configDir)
+  const matched = entries.find((entry) => (
+    (targetAgentEmail && entry.config.targetAgentEmail === targetAgentEmail)
+      || (slug && entry.config.slug === slug)
+  ))
+  if (!matched) return null
+
+  if (matched.legacy) {
+    await rm(matched.configPath, { force: true })
+    await rm(path.join(matched.configDir, STATE_FILENAME), { force: true })
+  } else {
+    await rm(matched.configDir, { recursive: true, force: true })
+  }
+  return matched
+}
+
 export interface InitBridgeOptions {
   configDir?: string
   aampHost?: string
@@ -102,18 +184,24 @@ export interface InitBridgeOptions {
   slug?: string
   appId?: string
   appSecret?: string
+  useFeishuCli?: boolean
+  feishuCliNew?: boolean
+  feishuCliProfile?: string
+  feishuCliBin?: string
+  feishuCliAppName?: string
+  feishuCliOpen?: boolean
   domain?: string
 }
 
 async function prompt(question: string, defaultValue = ''): Promise<string> {
-  const rl = readline.createInterface({ input, output })
-  try {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input, output })
     const suffix = defaultValue ? ` (${defaultValue})` : ''
-    const answer = await rl.question(`${question}${suffix}: `)
-    return answer.trim() || defaultValue
-  } finally {
-    rl.close()
-  }
+    rl.question(`${question}${suffix}: `, (answer) => {
+      rl.close()
+      resolve(answer.trim() || defaultValue)
+    })
+  })
 }
 
 function normalizeSlug(rawValue: string): string {
@@ -126,22 +214,49 @@ function normalizeSlug(rawValue: string): string {
     .slice(0, 32) || DEFAULT_BRIDGE_SLUG
 }
 
-export async function initializeBridgeConfig(options: InitBridgeOptions): Promise<BridgeConfig> {
-  const existing = await loadBridgeConfig(options.configDir)
+function shortHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 8)
+}
 
-  const aampHost = (options.aampHost ?? existing?.aampHost ?? await prompt('AAMP host', 'https://meshmail.ai')).trim()
-  const targetInput = (options.pairingUrl ?? options.targetAgentEmail ?? existing?.targetAgentEmail ?? await prompt('Target AAMP agent email or pairing URL')).trim()
+function defaultSlugForTarget(targetAgentEmail: string): string {
+  const localPart = targetAgentEmail.split('@')[0] || DEFAULT_BRIDGE_SLUG
+  return normalizeSlug(`${localPart}-${shortHash(targetAgentEmail)}`)
+}
+
+export async function initializeBridgeConfig(options: InitBridgeOptions): Promise<BridgeConfig> {
+  const entries = await loadBridgeConfigEntries(options.configDir)
+  const defaultExisting = entries[0]?.config
+
+  const aampHost = (options.aampHost ?? defaultExisting?.aampHost ?? await prompt('AAMP host', 'https://meshmail.ai')).trim()
+  const targetInput = (options.pairingUrl ?? options.targetAgentEmail ?? defaultExisting?.targetAgentEmail ?? await prompt('Target AAMP agent email or pairing URL')).trim()
   const pairing = isPairingUrl(targetInput)
     ? parsePairingUrl(targetInput)
     : undefined
   const targetAgentEmail = pairing?.mailbox ?? targetInput
-  const appId = (options.appId ?? existing?.feishu.appId ?? await prompt('Feishu App ID')).trim()
-  const appSecret = (options.appSecret ?? existing?.feishu.appSecret ?? await prompt('Feishu App Secret')).trim()
-  const slug = normalizeSlug(options.slug ?? existing?.slug ?? DEFAULT_BRIDGE_SLUG)
+  const matchedEntry = entries.find((entry) => entry.config.targetAgentEmail === targetAgentEmail)
+  const existing = matchedEntry?.config
+  const feishuCliCredentials = (options.useFeishuCli || options.feishuCliNew) && (!options.appId || !options.appSecret)
+    ? await resolveFeishuCliCredentials({
+      cliBin: options.feishuCliBin,
+      createNew: options.feishuCliNew,
+      profile: options.feishuCliProfile,
+      appName: options.feishuCliAppName ?? options.slug,
+      brand: options.domain === 'lark' ? 'lark' : 'feishu',
+      openSetupUrl: options.feishuCliOpen,
+    })
+    : undefined
+  const useCliAuth = Boolean(options.useFeishuCli || options.feishuCliNew)
+  const appId = (options.appId ?? feishuCliCredentials?.appId ?? existing?.feishu.appId ?? await prompt('Feishu App ID')).trim()
+  const appSecret = (options.appSecret ?? feishuCliCredentials?.appSecret ?? existing?.feishu.appSecret ?? (useCliAuth ? '' : await prompt('Feishu App Secret'))).trim()
+  const slug = normalizeSlug(options.slug ?? existing?.slug ?? defaultSlugForTarget(targetAgentEmail))
   const domain = (options.domain ?? existing?.feishu.domain ?? '').trim() || undefined
 
   if (!targetAgentEmail) throw new Error('Target AAMP agent email is required.')
-  if (!appId || !appSecret) throw new Error('Feishu App ID and App Secret are required.')
+  if (!appId) throw new Error('Feishu App ID is required.')
+  if (!useCliAuth && !appSecret) throw new Error('Feishu App ID and App Secret are required.')
+  const instanceDir = matchedEntry && !matchedEntry.legacy
+    ? matchedEntry.configDir
+    : getBridgeInstanceDir(slug, options.configDir)
 
   const mailbox = existing?.mailbox ?? await AampClient.registerMailbox({
     aampHost,
@@ -156,8 +271,11 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
     slug,
     feishu: {
       appId,
-      appSecret,
+      ...(appSecret ? { appSecret } : {}),
       ...(domain ? { domain } : {}),
+      authMode: useCliAuth ? 'lark-cli' : 'app-secret',
+      ...(useCliAuth ? { cliProfile: feishuCliCredentials?.profile ?? options.feishuCliProfile ?? options.feishuCliAppName ?? slug } : {}),
+      ...(useCliAuth && options.feishuCliBin ? { cliBin: options.feishuCliBin } : {}),
     },
     mailbox: {
       email: mailbox.email,
@@ -172,7 +290,8 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
   }
 
   await ensureBridgeHomeDir(options.configDir)
-  await saveBridgeConfig(config, options.configDir)
+  await mkdir(instanceDir, { recursive: true })
+  await saveBridgeConfigToDir(config, instanceDir)
   if (pairing) {
     const client = AampClient.fromMailboxIdentity({
       email: config.mailbox.email,
