@@ -388,7 +388,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
 
   async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] block via v2 agent_task_status`)
-    await this.patchV2AgentTaskStatus(taskGuid, 3)
+    await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认')
   }
 
   private async getV1Task(taskGuid: string): Promise<FeishuTaskDetails> {
@@ -515,18 +515,24 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
   }
 
   private async completeV2AgentTask(taskGuid: string): Promise<void> {
-    await this.patchV2AgentTaskStatus(taskGuid, 4)
+    await this.patchV2AgentTaskStatus(taskGuid, 4, '执行完成')
   }
 
-  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number): Promise<void> {
+  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number, agentTaskProgress?: string): Promise<void> {
+    const task = {
+      agent_task_status: agentTaskStatus,
+      ...(agentTaskProgress ? { agent_task_progress: agentTaskProgress } : {}),
+    }
+    const updateFields = [
+      'agent_task_status',
+      ...(agentTaskProgress ? ['agent_task_progress'] : []),
+    ]
     await this.client.task.v2.task.patch({
       path: { task_guid: taskGuid },
       params: { user_id_type: this.config.userIdType },
       data: {
-        task: {
-          agent_task_status: agentTaskStatus,
-        },
-        update_fields: ['agent_task_status'],
+        task,
+        update_fields: updateFields,
       },
     })
   }

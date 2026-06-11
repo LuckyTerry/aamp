@@ -160,7 +160,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     'Feishu Write Contract:',
     '- The target environment has either `lark-cli` or `larksuite-cli` available.',
     '- Use those CLI tools to update existing Feishu tasks by guid. Include the parent task guid and child task guids explicitly in commands whenever operating on them.',
-    '- For task_create execution, task_reminder_fire execution, or task_flow_intent=complete_task, mark the parent task as in progress before material work. If child tasks exist, mark each child task as in progress for context tracking only.',
+    '- For task_create execution, task_reminder_fire execution, or task_flow_intent=complete_task, mark the parent task as in progress before material work. When setting agent_task_status=2, also set agent_task_progress to `正在执行`. If child tasks exist, mark each child task as in progress for context tracking only with the same progress text.',
     '- For task_flow_intent=comment_reply, do not mark any task in progress and do not modify task status.',
     '- Child tasks are context only: do not write child steps or child deliverables; only mark child tasks in progress for execution tracking and let the bridge complete them after the final result.',
     '- Do not create a new top-level Feishu task.',
