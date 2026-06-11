@@ -1,10 +1,10 @@
 {
-  "name": "aamp-acp-bridge",
+  "name": "@luckyterry/aamp-acp-bridge",
   "files": [
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.25",
+  "version": "0.1.28-dev.6",
   "description": "Bridge ACP-compatible agents (Claude, Codex, Gemini, etc.) into the AAMP email network — zero code, config-driven",
   "type": "module",
   "main": "dist/index.js",
@@ -14,10 +14,11 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "aamp-sdk": "file:../sdks/nodejs",
+    "aamp-sdk": "npm:@luckyterry/aamp-sdk@0.1.24-dev.1",
     "qrcode-terminal": "^0.12.0",
     "zod": "^3.22.4"
   },

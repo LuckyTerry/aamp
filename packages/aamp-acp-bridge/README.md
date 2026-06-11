@@ -45,6 +45,13 @@ Start the bridge:
 npx aamp-acp-bridge start
 ```
 
+When debugging task routing, add `--debug` to print the exact prompt sent to
+the ACP agent for each `task.dispatch`:
+
+```bash
+npx aamp-acp-bridge start --debug
+```
+
 By default, the bridge stores its config under `~/.aamp/acp-bridge/config.json` and agent credentials under `~/.aamp/acp-bridge/credentials/`.
 Legacy `./bridge.json` and `~/.acp-bridge/` data are migrated automatically on first use without deleting the original files.
 
@@ -60,8 +67,14 @@ Dispatch tasks can also carry:
 
 - `priority`: `urgent | high | normal`
 - `expiresAt`: an ISO-8601 timestamp after which the task should no longer run
+- `promptRules`: an optional complete text block that replaces the default task
+  prompt rules
 
 If a `task.cancel` arrives before the ACP agent returns a final answer, the bridge suppresses any later result send for that task.
+
+When `promptRules` is present on `task.dispatch`, the ACP prompt keeps its
+standard task identity, metadata, dispatch context, description, and thread
+context, then replaces the default task rule block with the provided text.
 
 While ACP execution is in progress, the bridge can:
 

@@ -540,6 +540,7 @@ export class SmtpSender {
       priority: opts.priority,
       expiresAt: opts.expiresAt,
       dispatchContext: opts.dispatchContext,
+      promptRules: opts.promptRules,
       parentTaskId: opts.parentTaskId,
     })
 

@@ -3,6 +3,7 @@ import { AgentBridge } from './agent-bridge.js'
 
 export interface BridgeStartOptions {
   quiet?: boolean
+  debug?: boolean
 }
 
 /**
@@ -29,7 +30,7 @@ export class AampAcpBridge {
     for (const agentConfig of this.config.agents) {
       const bridge = new AgentBridge(agentConfig, this.config.aampHost, this.config.rejectUnauthorized)
       try {
-        await bridge.start({ quiet: options.quiet })
+        await bridge.start({ quiet: options.quiet, debug: options.debug })
         this.agents.set(agentConfig.name, bridge)
       } catch (err) {
         console.error(`[${agentConfig.name}] Failed to start: ${(err as Error).message}`)

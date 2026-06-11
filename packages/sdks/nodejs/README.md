@@ -58,6 +58,24 @@ await client.connect()
 
 `task.dispatch` handlers are concurrency-limited inside the SDK. If a mailbox suddenly receives a burst of mail, the SDK will process at most `10` task handlers at once by default and queue the rest in memory until a slot is free.
 
+Senders can include optional `promptRules` on `sendTask()` to let compatible
+bridges replace their default task prompt rules without overloading
+`dispatchContext` headers:
+
+```ts
+await client.sendTask({
+  to: 'agent@example.com',
+  title: 'Domain task',
+  bodyText: 'Task payload',
+  promptRules: [
+    'Domain task rules:',
+    '- Use the domain runtime before answering directly.',
+    '- Return HELP when required data cannot be loaded.',
+    '- Do not emit structured output unless explicitly requested.',
+  ].join('\n'),
+})
+```
+
 ## Realtime streaming
 
 The SDK supports the AAMP realtime stream capability announced from

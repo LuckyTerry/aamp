@@ -74,7 +74,7 @@ function renderPairingForAgent(configPathValue: string, agentName: string): void
 
 async function startBridge(
   configPathValue: string,
-  options: { quiet?: boolean; agent?: string } = {},
+  options: { quiet?: boolean; agent?: string; debug?: boolean } = {},
 ): Promise<void> {
   const config = loadConfig(configPathValue)
   const agents = options.agent ? [getAgent(config, options.agent)] : config.agents
@@ -92,7 +92,7 @@ async function startBridge(
   process.on('SIGTERM', shutdown)
   process.on('SIGINT', shutdown)
 
-  await bridge.start({ quiet: options.quiet })
+  await bridge.start({ quiet: options.quiet, debug: options.debug })
 
   // Keep alive
   setInterval(() => {}, 60_000)
@@ -108,12 +108,16 @@ async function main() {
         console.log(`Run: npx aamp-acp-bridge start\n`)
         break
       }
-      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent') })
+      await startBridge(configPath, {
+        quiet: true,
+        agent: getOptionValue('--agent'),
+        debug: args.includes('--debug'),
+      })
       break
     }
 
     case 'start': {
-      await startBridge(configPath)
+      await startBridge(configPath, { debug: args.includes('--debug') })
       break
     }
 
@@ -122,7 +126,7 @@ async function main() {
       if (!agentName) throw new Error('Missing required --agent')
       renderPairingForAgent(configPath, agentName)
       if (args.includes('--no-start')) break
-      await startBridge(configPath, { quiet: true, agent: agentName })
+      await startBridge(configPath, { quiet: true, agent: agentName, debug: args.includes('--debug') })
       break
     }
 
@@ -205,9 +209,9 @@ async function main() {
 AAMP ACP Bridge -- Connect ACP agents to the AAMP email network
 
 Usage:
-  aamp-acp-bridge init [--agent NAME] [--no-start]  Interactive setup wizard, then start bridge
-  aamp-acp-bridge start [--config X]   Start the bridge (default: ~/.aamp/acp-bridge/config.json)
-  aamp-acp-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
+  aamp-acp-bridge init [--agent NAME] [--no-start] [--debug]  Interactive setup wizard, then start bridge
+  aamp-acp-bridge start [--config X] [--debug]   Start the bridge (default: ~/.aamp/acp-bridge/config.json)
+  aamp-acp-bridge pair --agent NAME [--config X] [--no-start] [--debug]  Show a pairing QR code, then start that agent
   aamp-acp-bridge list  [--config X]   List configured agents
   aamp-acp-bridge status               Show live connection status
   aamp-acp-bridge directory-list --agent NAME [--config X] [--include-self] [--limit N]
@@ -220,6 +224,7 @@ Examples:
   npx aamp-acp-bridge init --agent claude --no-start
   npx aamp-acp-bridge pair --agent claude
   npx aamp-acp-bridge start
+  npx aamp-acp-bridge start --debug
   npx aamp-acp-bridge start --config production.json
   npx aamp-acp-bridge directory-search --agent claude --query reviewer
 `)
