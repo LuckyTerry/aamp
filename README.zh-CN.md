@@ -197,7 +197,7 @@ npx aamp-cli-bridge start
 - `init`：扫描 built-in、用户自定义和已有配置中的 profile；用方向键、Space 和 Enter 多选要桥接的 Agent
 - `start`：为每个选中的 Agent 注册或复用邮箱身份，并开始处理 `task.dispatch`
 
-内置 profile 包括 `claude`、`codex`、`gemini` 和 `codem`。stream profile 可以解析 SSE 或 NDJSON 输出，把标准 text、delta、tool、usage、result、done 事件映射为 AAMP stream 事件，并最终发送拼接后的 `task.result`。
+内置 profile 包括 `claude`、`codex`、`gemini` 和 `codem`。stream profile 可以解析 SSE 或 NDJSON 输出，把标准 text/delta 映射为 `text.delta`，tool 映射为 `tool_call`，usage 或阶段更新映射为 `todo`，并最终发送拼接后的 `task.result`。
 
 默认存储位置：
 

@@ -142,8 +142,6 @@ class MockAampService:
             }
             stream["events"].append(event)
             stream["latestEvent"] = event
-            if event_type == "done":
-                stream["status"] = "closed"
             return dict(event)
 
     def close_stream(self, stream_id: str, payload: dict) -> dict:
@@ -151,16 +149,6 @@ class MockAampService:
             stream = self.streams[stream_id]
             stream["status"] = "closed"
             stream["closedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            if payload:
-                stream["latestEvent"] = {
-                    "id": f"{stream_id}-done",
-                    "streamId": stream_id,
-                    "taskId": stream["taskId"],
-                    "seq": len(stream["events"]) + 1,
-                    "timestamp": stream["closedAt"],
-                    "type": "done",
-                    "payload": payload,
-                }
             return {key: value for key, value in stream.items() if key != "events"}
 
     def get_stream(self, task_id: str | None, stream_id: str | None) -> dict:
@@ -388,10 +376,13 @@ class EndToEndTests(unittest.TestCase):
             )
             agent.append_stream_event(
                 stream_id=stream["streamId"],
-                event_type="status",
-                payload={"stage": "running"},
+                event_type="todo",
+                payload={
+                    "items": [{"id": "integration", "content": "Running integration task", "status": "in_progress"}],
+                    "summary": "Running integration task",
+                },
             )
-            agent.close_stream(stream_id=stream["streamId"], payload={"stage": "done"})
+            agent.close_stream(stream_id=stream["streamId"], payload={"reason": "task.result"})
             agent.send_result(
                 to=task["from"],
                 task_id=task["taskId"],
@@ -455,7 +446,8 @@ class EndToEndTests(unittest.TestCase):
 
         stream_state = dispatcher.get_task_stream(task_id=task_id)
         self.assertEqual(stream_state["status"], "closed")
-        self.assertEqual(stream_state["latestEvent"]["payload"]["stage"], "done")
+        self.assertEqual(stream_state["latestEvent"]["type"], "todo")
+        self.assertEqual(stream_state["latestEvent"]["payload"]["summary"], "Running integration task")
 
         dispatcher.disconnect()
         agent.disconnect()

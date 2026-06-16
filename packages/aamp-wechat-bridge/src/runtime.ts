@@ -314,11 +314,6 @@ export class WechatBridgeRuntime {
       await this.persistState()
       return
     }
-    if (event.type === 'error') {
-      state.resultError = this.readStreamPayloadString(event.payload, ['message', 'error', 'text']) || 'Unknown stream error'
-      state.updatedAt = new Date().toISOString()
-      await this.persistState()
-    }
   }
 
   private readStreamPayloadString(payload: Record<string, unknown>, keys: string[]): string {

@@ -178,6 +178,17 @@ function buildToolProgressLabel(update: AcpToolUpdate): string {
   }
 }
 
+function buildToolProgressDetail(update: AcpToolUpdate): string | undefined {
+  if (typeof update.text === 'string' && update.text.trim()) return update.text.trim()
+
+  const detail = {
+    ...(update.title?.trim() ? { title: update.title.trim() } : {}),
+    ...(update.kind?.trim() ? { kind: update.kind.trim() } : {}),
+    ...(update.locations?.length ? { locations: update.locations } : {}),
+  }
+  return Object.keys(detail).length ? JSON.stringify(detail, null, 2) : undefined
+}
+
 function formatPlanUpdate(entries: AcpPlanEntry[]): string {
   const lines = entries.map((entry) => {
     const prefix = entry.status ? `[${entry.status}] ` : ''
@@ -195,19 +206,20 @@ function normalizePlanStatus(status?: string): string {
 
 function buildTodoPayloadFromPlan(entries: AcpPlanEntry[]) {
   return {
-    kind: 'resumed',
     items: entries.map((entry, index) => ({
       id: `plan-${index + 1}`,
       content: entry.content,
       status: normalizePlanStatus(entry.status),
     })),
-    counts: {
-      total: entries.length,
-      pending: entries.filter((entry) => normalizePlanStatus(entry.status) === 'pending').length,
-      inProgress: entries.filter((entry) => normalizePlanStatus(entry.status) === 'in_progress').length,
-      completed: entries.filter((entry) => normalizePlanStatus(entry.status) === 'completed').length,
-    },
   }
+}
+
+function normalizeToolCallStatus(status?: string): 'pending' | 'running' | 'completed' | 'failed' {
+  const value = status?.toLowerCase()
+  if (value === 'completed' || value === 'done' || value === 'success') return 'completed'
+  if (value === 'failed' || value === 'error' || value === 'rejected') return 'failed'
+  if (value === 'pending') return 'pending'
+  return 'running'
 }
 
 function renderTextChunk(chunk: AcpTextChunk, state: StreamTextRenderState): string {
@@ -805,7 +817,7 @@ export class AgentBridge {
     } | null = null
 
     const queueStreamAppend = (
-      type: 'text.delta' | 'progress' | 'status' | 'todo',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
@@ -849,7 +861,6 @@ export class AgentBridge {
 
       const payload: Record<string, unknown> = {
         text: pendingTextDelta.text,
-        ...(typeof pendingTextDelta.channel === 'string' ? { channel: pendingTextDelta.channel } : {}),
         ...(typeof pendingTextDelta.messageId === 'string' ? { messageId: pendingTextDelta.messageId } : {}),
       }
       clearPendingTextDeltaTimer()
@@ -907,7 +918,7 @@ export class AgentBridge {
     }
 
     const appendStreamEvent = async (
-      type: 'text.delta' | 'progress' | 'status' | 'todo',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
@@ -942,9 +953,9 @@ export class AgentBridge {
       if (currentPhase === channel) return
       flushPendingTextDelta()
       currentPhase = channel
-      queueStreamAppend('status', {
-        state: 'running',
-        label: buildPhaseStatusLabel(channel),
+      queueStreamAppend('todo', {
+        items: [{ id: 'acp-phase', content: buildPhaseStatusLabel(channel), status: 'in_progress' }],
+        summary: buildPhaseStatusLabel(channel),
       })
     }
 
@@ -959,7 +970,10 @@ export class AgentBridge {
         streamId: activeStream.streamId,
         inReplyTo: task.messageId,
       })
-      await appendStreamEvent('status', { state: 'running', label: 'ACP task started' })
+      await appendStreamEvent('todo', {
+        items: [{ id: 'acp-task', content: 'ACP task started', status: 'in_progress' }],
+        summary: 'ACP task started',
+      })
 
       const attachmentPromptLines = await this.materializeIncomingAttachments(hydratedTask)
       const promptTask = attachmentPromptLines.length > 0
@@ -977,7 +991,10 @@ export class AgentBridge {
         : hydratedTask
       const prompt = buildPrompt(promptTask, hydratedTask.threadContextText, this.name)
       await this.acpx.ensureSession(this.agentConfig.acpCommand, taskSessionName)
-      await appendStreamEvent('progress', { value: 0.2, label: 'Prompt sent to ACP agent' })
+      await appendStreamEvent('todo', {
+        items: [{ id: 'acp-prompt', content: 'Prompt sent to ACP agent', status: 'completed' }],
+        summary: 'Prompt sent to ACP agent',
+      })
       const result = await this.acpx.prompt(this.agentConfig.acpCommand, taskSessionName, prompt, {
         onTextChunk: (chunk) => {
           queuePhaseStatus(chunk.channel)
@@ -985,19 +1002,16 @@ export class AgentBridge {
           if (!rendered) return
           queueTextDelta({
             text: rendered,
-            channel: chunk.channel,
             ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
           })
         },
         onToolUpdate: (update) => {
           flushPendingTextDelta()
-          queueStreamAppend('progress', {
+          queueStreamAppend('tool_call', {
+            toolCallId: update.toolCallId ?? update.title ?? buildToolProgressLabel(update),
             label: buildToolProgressLabel(update),
-            ...(update.title ? { title: update.title } : {}),
-            ...(update.status ? { status: update.status } : {}),
-            ...(update.kind ? { kind: update.kind } : {}),
-            ...(update.toolCallId ? { toolCallId: update.toolCallId } : {}),
-            ...(update.locations?.length ? { locations: update.locations } : {}),
+            status: normalizeToolCallStatus(update.status),
+            ...(buildToolProgressDetail(update) ? { output: buildToolProgressDetail(update) } : {}),
           })
         },
         onPlanUpdate: (entries) => {
@@ -1010,7 +1024,10 @@ export class AgentBridge {
         return
       }
       await flushStreamWrites()
-      await appendStreamEvent('progress', { value: 0.8, label: 'ACP response received' })
+      await appendStreamEvent('todo', {
+        items: [{ id: 'acp-response', content: 'ACP response received', status: 'completed' }],
+        summary: 'ACP response received',
+      })
       const parsed = parseResponse(result.output)
       if (!parsed.isHelp
         && !parsed.output
@@ -1029,11 +1046,9 @@ export class AgentBridge {
               { channel: 'assistant', text: parsed.question },
               streamTextState,
             ),
-            channel: 'assistant',
           })
           await flushStreamWrites()
         }
-        await appendStreamEvent('status', { state: 'help_needed', label: parsed.question ?? 'Agent requested clarification' })
         await closeStream({ reason: 'task.help_needed' })
         await this.client.sendHelp({
           to: task.from,
@@ -1085,7 +1100,6 @@ export class AgentBridge {
               { channel: 'assistant', text: parsed.output },
               streamTextState,
             ),
-            channel: 'assistant',
           })
           await flushStreamWrites()
         }

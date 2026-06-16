@@ -374,15 +374,28 @@ function ensurePluginInstallRecord(config, installRecord) {
 export function ensureAampToolAllowlist(toolsConfig, options = {}) {
   const next = toolsConfig && typeof toolsConfig === 'object' ? structuredClone(toolsConfig) : {}
   const existingAllow = Array.isArray(next.allow) ? next.allow.filter((value) => typeof value === 'string' && value.trim()) : []
+  const existingAlsoAllow = Array.isArray(next.alsoAllow)
+    ? next.alsoAllow.filter((value) => typeof value === 'string' && value.trim())
+    : []
   const includeCodingBaseline = options.includeCodingBaseline === true
 
-  const mergedAllow = [
-    ...existingAllow,
-    ...(includeCodingBaseline ? CODING_TOOL_ALLOWLIST : []),
-    ...AAMP_PLUGIN_TOOL_ALLOWLIST,
-  ]
+  const nonAampAllow = existingAllow.filter((tool) => !AAMP_PLUGIN_TOOL_ALLOWLIST.includes(tool))
+  const shouldPreserveAllow = nonAampAllow.length > 0 || includeCodingBaseline
 
-  next.allow = Array.from(new Set(mergedAllow))
+  next.alsoAllow = Array.from(new Set([
+    ...existingAlsoAllow,
+    ...AAMP_PLUGIN_TOOL_ALLOWLIST,
+  ]))
+
+  if (shouldPreserveAllow) {
+    next.allow = Array.from(new Set([
+      ...nonAampAllow,
+      ...(includeCodingBaseline ? CODING_TOOL_ALLOWLIST : []),
+      ...AAMP_PLUGIN_TOOL_ALLOWLIST,
+    ]))
+  } else if (Array.isArray(next.allow)) {
+    delete next.allow
+  }
 
   return next
 }
@@ -390,19 +403,24 @@ export function ensureAampToolAllowlist(toolsConfig, options = {}) {
 export function planToolPolicyUpdate(toolsConfig, options = {}) {
   const current = toolsConfig && typeof toolsConfig === 'object' ? structuredClone(toolsConfig) : {}
   const existingAllow = Array.isArray(current.allow) ? current.allow.filter((value) => typeof value === 'string' && value.trim()) : []
+  const existingAlsoAllow = Array.isArray(current.alsoAllow)
+    ? current.alsoAllow.filter((value) => typeof value === 'string' && value.trim())
+    : []
   const includeCodingBaseline = options.includeCodingBaseline === true
-  const missingAampTools = AAMP_PLUGIN_TOOL_ALLOWLIST.filter((tool) => !existingAllow.includes(tool))
+  const missingAampTools = AAMP_PLUGIN_TOOL_ALLOWLIST.filter((tool) => !existingAlsoAllow.includes(tool))
   const currentProfile = typeof current.profile === 'string' ? current.profile : undefined
   const missingCodingTools = includeCodingBaseline
     ? CODING_TOOL_ALLOWLIST.filter((tool) => !existingAllow.includes(tool))
     : []
+  const allowOnlyAampTools = existingAllow.length > 0 && existingAllow.every((tool) => AAMP_PLUGIN_TOOL_ALLOWLIST.includes(tool))
 
   return {
     current,
     missingAampTools,
     missingCodingTools,
-    needsAnyChange: missingAampTools.length > 0 || missingCodingTools.length > 0,
-    needsNonPluginChange: missingCodingTools.length > 0,
+    needsAllowMigration: allowOnlyAampTools,
+    needsAnyChange: missingAampTools.length > 0 || missingCodingTools.length > 0 || allowOnlyAampTools,
+    needsNonPluginChange: missingCodingTools.length > 0 || allowOnlyAampTools,
     currentProfile,
     next: ensureAampToolAllowlist(current, { includeCodingBaseline }),
   }
@@ -416,10 +434,14 @@ function currentToolPolicySummary(plan) {
     lines.push(`  current tools.profile: (none)`)
   }
   lines.push(`  current tools.allow count: ${Array.isArray(plan.current.allow) ? plan.current.allow.length : 0}`)
+  lines.push(`  current tools.alsoAllow count: ${Array.isArray(plan.current.alsoAllow) ? plan.current.alsoAllow.length : 0}`)
   if (plan.missingAampTools.length > 0) {
-    lines.push(`  missing AAMP tools: ${plan.missingAampTools.join(', ')}`)
+    lines.push(`  missing AAMP tools in tools.alsoAllow: ${plan.missingAampTools.join(', ')}`)
   }
-  if (plan.needsNonPluginChange) {
+  if (plan.needsAllowMigration) {
+    lines.push('  existing tools.allow contains only AAMP tools and will be migrated to tools.alsoAllow')
+  }
+  if (plan.missingCodingTools.length > 0) {
     lines.push(`  additional core tools to add: ${plan.missingCodingTools.join(', ')}`)
   }
   return lines.join('\n')
@@ -783,6 +805,7 @@ export async function runInit() {
       `  senderPoliciesFile: ${DEFAULT_SENDER_POLICIES_FILE}`,
       `  senderPolicies: ${senderPolicies ? JSON.stringify(senderPolicies) : '(default deny until paired or configured)'}`,
       `  tools.allow: ${JSON.stringify(next.tools?.allow ?? [])}`,
+      `  tools.alsoAllow: ${JSON.stringify(next.tools?.alsoAllow ?? [])}`,
       `  codingBaselineAdded: ${toolPolicyPlan.missingCodingTools.length > 0 && includeCodingBaseline ? 'yes' : 'no'}`,
       identityResult.created
         ? `  mailbox: ${identityResult.email} (registered and saved to ${identityResult.credentialsPath})`

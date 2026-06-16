@@ -238,10 +238,10 @@ NDJSON stream:
 The parser accepts common event shapes used by CLI agents:
 
 - `text`, `delta`, `text.delta`: forwarded to AAMP as `text.delta`
-- `tool_start`, `tool_result`, `tool`: forwarded as stream progress or status events
-- `usage`: forwarded as a progress event
+- `tool_start`, `tool_result`, `tool`: forwarded to AAMP as `tool_call`
+- `usage`: forwarded as a `todo` update
 - `result`: used as final text when present
-- `done`: closes the stream state for the current task
+- `done`: ends parser consumption; terminal state is sent through `task.result`
 
 Text deltas are streamed to AAMP and concatenated into the final `task.result`. This lets a mailbox UI show live output while still preserving a complete final answer in the thread.
 

@@ -1,10 +1,10 @@
 import { createInterface, emitKeypressEvents } from 'node:readline'
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
 import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
+import { defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
 import { getDefaultCredentialsPath } from '../storage.js'
 import {
   createPairingCode,
@@ -440,24 +440,6 @@ async function promptConnectionSetupMethod(
   ])
 }
 
-function detectAgent(name: string): string | null {
-  try {
-    execSync(`which ${name}`, { stdio: 'pipe' })
-    try {
-      const version = execSync(`${name} --version 2>/dev/null || echo unknown`, { stdio: 'pipe' }).toString().trim().split('\n')[0]
-      return version
-    } catch {
-      return 'installed'
-    }
-  } catch {
-    return null
-  }
-}
-
-function defaultAcpCommand(name: string): string {
-  return name === 'hermes' ? 'hermes acp' : name
-}
-
 function renderQrFallback(value: string): void {
   console.log('  Could not render a terminal QR code. Paste this pairing URL instead:')
   console.log(`  ${value}`)
@@ -528,10 +510,10 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   console.log(opts.agent ? `? Scanning for ACP agent: ${opts.agent}` : '? Scanning for ACP agents...')
   const detected: Array<{ name: string; version: string }> = []
   for (const name of scanTargets) {
-    const version = detectAgent(name)
-    if (version) {
-      console.log(`  + ${name.padEnd(12)} (${version})`)
-      detected.push({ name, version })
+    const resolution = detectKnownAgent(name)
+    if (resolution) {
+      console.log(`  + ${name.padEnd(12)} (${resolution.version})`)
+      detected.push({ name, version: resolution.version })
     } else {
       console.log(`  - ${name.padEnd(12)} (not installed)`)
     }

@@ -286,14 +286,17 @@ async function ensureTaskStream(task: PendingTask): Promise<string | null> {
   })
   await aampClient.appendStreamEvent({
     streamId: created.streamId,
-    type: 'status',
-    payload: { state: 'running', label: 'Task queued in OpenClaw' },
+    type: 'todo',
+    payload: {
+      items: [{ id: 'openclaw-queued', content: 'Task queued in OpenClaw', status: 'in_progress' }],
+      summary: 'Task queued in OpenClaw',
+    },
   })
   activeTaskStreams.set(task.taskId, created.streamId)
   return created.streamId
 }
 
-async function appendTaskStream(taskId: string, type: 'text.delta' | 'progress' | 'status' | 'artifact' | 'error' | 'done', payload: Record<string, unknown>): Promise<void> {
+async function appendTaskStream(taskId: string, type: 'text.delta' | 'todo' | 'tool_call' | 'artifact', payload: Record<string, unknown>): Promise<void> {
   if (!aampClient?.isConnected()) return
   const streamId = activeTaskStreams.get(taskId)
   if (!streamId) return
@@ -1772,9 +1775,9 @@ export default {
           }))
         }
 
-        await appendTaskStream(task.taskId, 'status', {
-          state: 'completing',
-          label: `Sending ${p.status} result`,
+        await appendTaskStream(task.taskId, 'todo', {
+          items: [{ id: 'openclaw-result', content: `Sending ${p.status} result`, status: 'completed' }],
+          summary: `Sending ${p.status} result`,
         })
         if (p.output) {
           await appendTaskStream(task.taskId, 'text.delta', { text: p.output })
@@ -1869,9 +1872,9 @@ export default {
           return { content: [{ type: 'text', text: 'Error: AAMP client is not connected.' }] }
         }
 
-        await appendTaskStream(task.taskId, 'status', {
-          state: 'help_needed',
-          label: p.blockedReason,
+        await appendTaskStream(task.taskId, 'todo', {
+          items: [{ id: 'openclaw-help', content: p.blockedReason, status: 'completed' }],
+          summary: p.blockedReason,
         })
 
         try {
@@ -1885,12 +1888,9 @@ export default {
           })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
-          await appendTaskStream(task.taskId, 'error', {
-            message: `Failed to send help request: ${message}`,
-          })
-          await appendTaskStream(task.taskId, 'status', {
-            state: 'running',
-            label: 'Help request failed; task still needs a reply',
+          await appendTaskStream(task.taskId, 'todo', {
+            items: [{ id: 'openclaw-help', content: 'Help request failed; task still needs a reply', status: 'in_progress' }],
+            summary: `Failed to send help request: ${message}`,
           })
           api.logger.error(`[AAMP] aamp_send_help failed for ${task.taskId}: ${message}`)
 

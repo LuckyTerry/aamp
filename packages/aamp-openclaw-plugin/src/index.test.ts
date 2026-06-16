@@ -724,9 +724,9 @@ describe('openclaw plugin runtime', () => {
     }))
     expect(client.appendStreamEvent).toHaveBeenCalledWith(expect.objectContaining({
       streamId: 'stream-1',
-      type: 'error',
+      type: 'todo',
       payload: expect.objectContaining({
-        message: 'Failed to send help request: smtp unavailable',
+        summary: 'Failed to send help request: smtp unavailable',
       }),
     }))
     expect(logger.error).toHaveBeenCalledWith('[AAMP] aamp_send_help failed for task-42: smtp unavailable')

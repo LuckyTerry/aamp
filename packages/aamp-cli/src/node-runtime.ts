@@ -1015,9 +1015,10 @@ export class AampLocalNodeService {
       },
     }
 
-    await this.appendStream(streamId, 'status', { stage: 'rejected', summary }, mode)
-    await this.appendStream(streamId, 'error', { message: errorMsg ?? summary }, mode)
-    await this.appendStream(streamId, 'done', { status: 'rejected' }, mode)
+    await this.appendStream(streamId, 'todo', {
+      items: [{ id: 'registered-command', content: summary, status: 'completed' }],
+      summary,
+    }, mode)
     await this.client.sendResult({
       to: dispatch.from,
       taskId: dispatch.taskId,
@@ -1164,7 +1165,10 @@ export class AampLocalNodeService {
     const streamMode = streamModeFromPayload(payload)
     const streamId = await this.ensureStream(dispatch, streamMode)
     const startedAt = new Date()
-    await this.appendStream(streamId, 'status', { stage: 'running', command: command.name }, streamMode)
+    await this.appendStream(streamId, 'todo', {
+      items: [{ id: 'registered-command', content: `Running ${command.name}`, status: 'in_progress' }],
+      summary: `Running ${command.name}`,
+    }, streamMode)
 
     await this.updateLedger({
       taskId: dispatch.taskId,
@@ -1246,7 +1250,7 @@ export class AampLocalNodeService {
       const rendered = appendPreview(preview.stdoutPreview, chunk, params.command.maxStdoutBytes ?? 16_384)
       preview.stdoutPreview = rendered.text
       preview.stdoutTruncated ||= rendered.truncated
-      void this.appendStream(params.streamId, 'text.delta', { stream: 'stdout', text: chunk.toString('utf8') }, params.streamMode)
+      void this.appendStream(params.streamId, 'text.delta', { text: chunk.toString('utf8'), sourceEvent: 'stdout' }, params.streamMode)
     })
     child.stderr.on('data', (chunk: Buffer) => {
       preview.stderrBytes += chunk.length
@@ -1254,7 +1258,7 @@ export class AampLocalNodeService {
       const rendered = appendPreview(preview.stderrPreview, chunk, params.command.maxStderrBytes ?? 16_384)
       preview.stderrPreview = rendered.text
       preview.stderrTruncated ||= rendered.truncated
-      void this.appendStream(params.streamId, 'text.delta', { stream: 'stderr', text: chunk.toString('utf8') }, params.streamMode)
+      void this.appendStream(params.streamId, 'text.delta', { text: chunk.toString('utf8'), sourceEvent: 'stderr' }, params.streamMode)
     })
 
     const timeoutMs = params.command.timeoutMs ?? 60_000
@@ -1312,8 +1316,10 @@ export class AampLocalNodeService {
       },
     }
 
-    await this.appendStream(params.streamId, 'status', { stage: status, summary }, params.streamMode)
-    await this.appendStream(params.streamId, 'done', { status, exitCode }, params.streamMode)
+    await this.appendStream(params.streamId, 'todo', {
+      items: [{ id: 'registered-command', content: summary, status: 'completed' }],
+      summary,
+    }, params.streamMode)
     await this.client.sendResult({
       to: params.dispatch.from,
       taskId: params.dispatch.taskId,
@@ -1344,7 +1350,10 @@ export class AampLocalNodeService {
     }
 
     active.cancelled = true
-    await this.appendStream(active.streamId, 'status', { stage: 'cancelling', reason: cancel.bodyText || 'Task cancelled by dispatcher.' }, 'status-only')
+    await this.appendStream(active.streamId, 'todo', {
+      items: [{ id: 'registered-command', content: cancel.bodyText || 'Task cancelled by dispatcher.', status: 'in_progress' }],
+      summary: 'Cancelling task',
+    }, 'status-only')
     active.child.kill('SIGTERM')
     active.cancelTimer = setTimeout(() => active.child.kill('SIGKILL'), 5_000)
   }

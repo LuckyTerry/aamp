@@ -36,8 +36,11 @@ client.on('task.dispatch', async (task) => {
 
   await client.appendStreamEvent({
     streamId: stream.streamId,
-    type: 'status',
-    payload: { stage: 'running' },
+    type: 'todo',
+    payload: {
+      items: [{ id: 'task', content: 'Processing request', status: 'in_progress' }],
+      summary: 'Processing request',
+    },
   })
 
   await client.sendResult({
@@ -65,7 +68,7 @@ The SDK supports the AAMP realtime stream capability announced from
 
 - `createStream()` creates or reuses the active stream for a task
 - `sendStreamOpened()` sends the mailbox notification intent
-- `appendStreamEvent()` appends `text.delta`, `progress`, `status`, `artifact`, `todo`, `error`, or `done`
+- `appendStreamEvent()` appends `text.delta`, `todo`, `tool_call`, or `artifact`
 - `closeStream()` closes the stream before the final `task.result`
 
 Stream events use a stable AAMP envelope:
@@ -78,7 +81,7 @@ Stream events use a stable AAMP envelope:
   seq: 1,
   timestamp: '2026-06-10T10:00:00.000Z',
   type: 'text.delta',
-  payload: { text: 'Hello', channel: 'assistant' },
+  payload: { text: 'Hello' },
 }
 ```
 
@@ -87,33 +90,33 @@ and bridge cards render consistently:
 
 | Type | Payload fields used by cards |
 | --- | --- |
-| `text.delta` | `{ text: string, channel?: "assistant" | "reasoning" | "tool" | "system" | "debug", messageId?: string }` appends visible agent text. |
-| `status` | `{ label: string, state?: string, detail?: string }` renders a phase line such as "Agent is planning". |
-| `progress` | `{ label: string, value?: number, status?: "pending" | "in_progress" | "running" | "completed" | "failed", toolCallId?: string, title?: string, kind?: string, chunk?: string }` renders tool/progress activity. |
+| `text.delta` | `{ text: string, messageId?: string, sourceEvent?: string }` appends visible agent text. |
+| `todo` | `{ items: Array<{ id: string, content: string, status: "pending" | "in_progress" | "completed" }>, summary?: string }` replaces the pinned task list in agent cards. |
+| `tool_call` | `{ toolCallId: string, label: string, status: "pending" | "running" | "completed" | "failed", input?: string, output?: string }` renders tool activity. |
 | `artifact` | `{ label: string, artifactId?: string, filename?: string, contentType?: string, url?: string, size?: number, kind?: string }` announces a produced artifact. |
-| `todo` | `{ items: Array<{ id: string, content: string, status: "pending" | "in_progress" | "completed" }>, kind?: "added" | "updated" | "resumed", lastChange?: object, counts?: object, summary?: string }` updates the pinned task list in agent cards. |
-| `error` | `{ message: string, code?: string, recoverable?: boolean }` renders a stream error. |
-| `done` | `{ status: "completed" | "rejected" | "cancelled", reason?: string, error?: string, output?: string }` marks the observation stream terminal. The authoritative completion is still `task.result`. |
 
 Minimal custom-agent stream:
 
 ```ts
 await client.appendStreamEvent({
   streamId: stream.streamId,
-  type: 'status',
-  payload: { label: 'Agent is planning', state: 'running' },
+  type: 'todo',
+  payload: {
+    items: [{ id: 'plan', content: 'Plan the next step', status: 'in_progress' }],
+    summary: 'Agent is planning',
+  },
 })
 
 await client.appendStreamEvent({
   streamId: stream.streamId,
   type: 'text.delta',
-  payload: { text: 'I found the issue.', channel: 'assistant' },
+  payload: { text: 'I found the issue.' },
 })
 
 await client.appendStreamEvent({
   streamId: stream.streamId,
-  type: 'progress',
-  payload: { label: 'Tool completed: tests', status: 'completed', toolCallId: 'tests' },
+  type: 'tool_call',
+  payload: { toolCallId: 'tests', label: 'Tool completed: tests', status: 'completed' },
 })
 
 await client.closeStream({

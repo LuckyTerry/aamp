@@ -3,6 +3,7 @@ import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import { z } from 'zod'
 import type { AgentConfig, BridgeConfig, SenderPolicy } from './config.js'
+import { defaultAcpCommand } from './agent-resolver.js'
 import { createPairingCode, defaultPairingFile, defaultSenderPoliciesFile, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getDefaultCredentialsPath, resolveCredentialsFile } from './storage.js'
 
@@ -36,10 +37,6 @@ interface MailboxCredentials {
   email: string
   mailboxToken?: string
   smtpPassword: string
-}
-
-function defaultAcpCommand(name: string): string {
-  return name === 'hermes' ? 'hermes acp' : name
 }
 
 function loadPreviousConfig(configPath: string): BridgeConfig | undefined {
@@ -93,8 +90,7 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
   for (const requestedAgent of input.agents) {
     const previousAgent = previousAgents.get(requestedAgent.name)
     const acpCommand = requestedAgent.acpCommand
-      ?? previousAgent?.acpCommand
-      ?? defaultAcpCommand(requestedAgent.name)
+      ?? defaultAcpCommand(requestedAgent.name, previousAgent?.acpCommand)
     const credentialsFile = requestedAgent.credentialsFile
       ?? previousAgent?.credentialsFile
       ?? getDefaultCredentialsPath(requestedAgent.name)

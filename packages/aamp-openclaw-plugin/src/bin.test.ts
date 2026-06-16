@@ -73,11 +73,41 @@ describe('openclaw plugin installer helpers', () => {
       aampHost: 'https://meshmail.ai',
       slug: 'openclaw-agent',
     })
-    expect(next.tools.allow).toContain('aamp_send_result')
-    expect(next.tools.allow).toContain('aamp_directory_search')
-    expect(next.tools.allow).toContain('aamp_pairing_code')
-    expect(next.tools.allow).toContain('aamp_cancel_task')
-    expect(next.tools.allow).toContain('aamp_dispatch_task')
+    expect(next.tools.alsoAllow).toContain('aamp_send_result')
+    expect(next.tools.alsoAllow).toContain('aamp_directory_search')
+    expect(next.tools.alsoAllow).toContain('aamp_pairing_code')
+    expect(next.tools.alsoAllow).toContain('aamp_cancel_task')
+    expect(next.tools.alsoAllow).toContain('aamp_dispatch_task')
+    expect(next.tools.allow).toBeUndefined()
+  })
+
+  it('migrates legacy AAMP-only tools.allow entries to tools.alsoAllow', async () => {
+    const { ensurePluginConfig } = await import('../bin/aamp-openclaw-plugin.mjs')
+    const legacyAampTools = [
+      'aamp_directory_search',
+      'aamp_send_result',
+      'aamp_send_help',
+      'aamp_pending_tasks',
+      'aamp_pairing_code',
+      'aamp_cancel_task',
+      'aamp_dispatch_task',
+      'aamp_check_protocol',
+      'aamp_download_attachment',
+    ]
+    const next = ensurePluginConfig({
+      tools: {
+        profile: 'coding',
+        allow: legacyAampTools,
+      },
+    }, {
+      aampHost: 'https://meshmail.ai',
+      slug: 'openclaw-agent',
+      credentialsFile: '~/.openclaw/extensions/aamp-openclaw-plugin/.credentials.json',
+    })
+
+    expect(next.tools.profile).toBe('coding')
+    expect(next.tools.allow).toBeUndefined()
+    expect(next.tools.alsoAllow).toEqual(legacyAampTools)
   })
 
   it('parses and compares OpenClaw host versions', async () => {

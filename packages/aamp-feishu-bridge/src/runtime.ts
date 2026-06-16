@@ -2612,37 +2612,25 @@ export class FeishuBridgeRuntime {
       return
     }
 
-    if (event.type === 'status') {
+    if (event.type === 'todo') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
-      task.statusLabel = this.readStreamPayloadString(event.payload, ['label', 'stage', 'state', 'message', 'text']) || '正在回复...'
+      task.statusLabel = this.readStreamPayloadString(event.payload, ['summary', 'label', 'message', 'text']) || '正在回复...'
       await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
-    if (event.type === 'progress') {
-      const splitCursor = this.captureStreamCursorForAppend(task, this.isToolProgressPayload(event.payload) ? 'tool' : 'status')
-      if (this.isToolProgressPayload(event.payload)) {
-        this.appendToolProgress(task, event.payload)
-        task.status = 'streaming'
-        task.statusLabel = '正在回复...'
-        await this.updateStreamingCard(taskId, splitCursor)
-        return
-      }
-      task.progressLabel = this.readStreamPayloadString(event.payload, ['label', 'message', 'text', 'state', 'value'])
+    if (event.type === 'tool_call') {
+      const splitCursor = this.captureStreamCursorForAppend(task, 'tool')
+      this.appendToolProgress(task, event.payload)
+      task.status = 'streaming'
+      task.statusLabel = '正在回复...'
       await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
-    if (event.type === 'error') {
+    if (event.type === 'artifact') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
-      task.resultError = this.readStreamPayloadString(event.payload, ['message', 'error', 'text']) || 'Unknown stream error'
-      await this.updateStreamingCard(taskId, splitCursor)
-      return
-    }
-
-    if (event.type === 'done') {
-      const splitCursor = this.captureStreamCursorForAppend(task, 'status')
-      task.statusLabel = '正在整理最终回复...'
+      task.progressLabel = this.readStreamPayloadString(event.payload, ['label', 'filename', 'url', 'message'])
       await this.updateStreamingCard(taskId, splitCursor)
       return
     }

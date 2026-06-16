@@ -55,7 +55,7 @@ npx aamp-acp-bridge start --json
 npx aamp-acp-bridge pair --agent claude --json --no-start
 ```
 
-`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
+`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH, also detects the Codex CLI bundled inside `/Applications/Codex.app`, and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
 
 Example JSON init input:
 
@@ -94,9 +94,9 @@ While ACP execution is in progress, the bridge can:
 
 - create an AAMP task stream for the task
 - send `task.stream.opened`
-- append `status`, `progress`, and `text.delta` events
+- append `todo`, `tool_call`, and `text.delta` events
 - forward ACP `agent_thought_chunk` / `agent_message_chunk` updates into the AAMP stream in realtime
-- expose tool progress as stream progress labels while the agent is working
+- expose tool activity as `tool_call` updates while the agent is working
 - close the stream before the authoritative `task.result` or `task.help_needed`
 
 When `acpx` supports `--format json --json-strict`, the bridge consumes the structured ACP NDJSON stream so reasoning / reply chunks can be forwarded live. Older `acpx` builds automatically fall back to plain-text mode, which preserves compatibility but cannot expose thought chunks incrementally.

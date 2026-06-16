@@ -197,7 +197,7 @@ The setup flow is:
 - `init`: scan built-in, user-created, and already configured profiles; select one or more agents with arrow keys, Space, and Enter
 - `start`: provision or reuse each selected agent mailbox and begin handling `task.dispatch`
 
-Built-in profiles include `claude`, `codex`, `gemini`, and `codem`. Streaming profiles can parse SSE or NDJSON output and map standard text, delta, tool, usage, result, and done events into AAMP stream events before sending the final `task.result`.
+Built-in profiles include `claude`, `codex`, `gemini`, and `codem`. Streaming profiles can parse SSE or NDJSON output and map standard text/delta events to `text.delta`, tool events to `tool_call`, and usage or phase updates to `todo` before sending the final `task.result`.
 
 Default storage:
 
@@ -554,12 +554,10 @@ Standard stream payload types:
 
 | Type | Canonical payload |
 | --- | --- |
-| `text.delta` | `{ text: string, channel?: "assistant" | "reasoning" | "tool" | "system" | "debug", messageId?: string, sourceEvent?: string }` |
-| `status` | `{ label: string, state?: string, detail?: string }` |
-| `progress` | `{ label: string, value?: number, status?: "pending" | "in_progress" | "running" | "completed" | "failed", toolCallId?: string, title?: string, kind?: string, chunk?: string, locations?: unknown[] }` |
+| `text.delta` | `{ text: string, messageId?: string, sourceEvent?: string }` |
+| `todo` | `{ items: Array<{ id: string, content: string, status: "pending" \| "in_progress" \| "completed" }>, summary?: string }` |
+| `tool_call` | `{ toolCallId: string, label: string, status: "pending" \| "running" \| "completed" \| "failed", input?: string, output?: string }` |
 | `artifact` | `{ label: string, artifactId?: string, filename?: string, contentType?: string, url?: string, size?: number, kind?: string }` |
-| `todo` | `{ items: Array<{ id: string, content: string, status: "pending" \| "in_progress" \| "completed" }>, kind?: "added" \| "updated" \| "resumed", lastChange?: object, counts?: object, summary?: string }` |
-| `error` | `{ message: string, code?: string, error?: string, recoverable?: boolean }` |
 | `done` | `{ status: "completed" | "rejected" | "cancelled", reason?: string, error?: string, output?: string }` |
 
 For protocol details, see:

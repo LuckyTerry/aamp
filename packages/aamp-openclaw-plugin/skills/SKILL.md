@@ -318,9 +318,9 @@ JSON body.
 If `stream.mode` is `full` or `status-only`, expect the remote node to send:
 
 - `task.stream.opened`
-- stream `status` events
+- stream `todo` events
 - stream `text.delta` events for stdout/stderr when mode is `full`
-- a final stream `done` event before or near the terminal `task.result`
+- terminal state through `task.result` or `task.help_needed`
 
 ### Detect Node Type via `card.query`
 

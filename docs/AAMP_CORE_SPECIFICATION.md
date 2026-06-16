@@ -317,7 +317,7 @@ Content-Type: application/json
 | `aamp.mailbox.thread` | Return `{ taskId, events }`. Each event should include `intent`, `from`, `to`, `createdAt`, and may include `status`, `title`, `bodyText`, `output`, `errorMsg`, `question`, `blockedReason`, `attachments`, and `messageId`. |
 | `aamp.stream.create` | Return `TaskStreamState`: `{ streamId, taskId, ownerEmail, peerEmail, status, createdAt, openedAt?, closedAt?, latestEvent? }`, where `status` is `created`, `opened`, or `closed`. |
 | `aamp.stream.append` | Return a `StreamEvent`: `{ id, streamId, taskId, seq, timestamp, type, payload }`. `seq` is monotonically increasing within the stream. |
-| `aamp.stream.close` | Append a final `done` event when practical and return the final `TaskStreamState` with `status: "closed"`. |
+| `aamp.stream.close` | Close the observation stream and return the final `TaskStreamState` with `status: "closed"` without appending terminal stream events. Terminal task state is carried by `task.result` or `task.help_needed`. |
 | `aamp.stream.get` | Return the current `TaskStreamState` by `streamId` or latest stream for `taskId`, or 404 when absent. |
 | SSE subscribe URL | Resolve `capabilities.stream.subscribeUrlTemplate`, replace `{streamId}`, require Basic auth, support `Last-Event-ID` or `lastEventId`, and emit SSE frames with `id: <event.id>`, `event: <event.type>`, and `data:` containing the full `StreamEvent` JSON. |
 | Directory actions | `upsert` returns `{ ok: true, profile: { email, summary, cardText } }`; `list` returns `{ scope, agents: [{ email, summary }] }`; `search` returns `{ scope, query, agents: [{ email, summary, score }] }`. |
@@ -416,7 +416,7 @@ Stream events MUST be append-only and monotonically ordered within a stream. The
   "seq": 1,
   "timestamp": "2026-06-10T10:00:00.000Z",
   "type": "text.delta",
-  "payload": { "text": "Hello", "channel": "assistant" }
+  "payload": { "text": "Hello" }
 }
 ```
 
@@ -424,13 +424,10 @@ The following payload schemas are the standard rendering contract for AAMP-compa
 
 | Event type | Required payload | Optional payload | Rendering expectation |
 | --- | --- | --- | --- |
-| `text.delta` | `text: string` | `channel?: "assistant" \| "reasoning" \| "tool" \| "system" \| "debug" \| string`, `messageId?: string`, `sourceEvent?: string` | Append visible text to the running transcript. |
-| `status` | `label: string` | `state?: string`, `detail?: string` | Render a phase/status line. |
-| `progress` | `label: string` | `value?: number` from 0 to 1, `status?: "pending" \| "in_progress" \| "running" \| "completed" \| "failed" \| string`, `toolCallId?: string`, `title?: string`, `kind?: string`, `chunk?: string`, `locations?: unknown[]` | Render tool or execution progress. |
+| `text.delta` | `text: string` | `messageId?: string`, `sourceEvent?: string` | Append visible text to the running transcript. |
+| `todo` | `items: Array<{ id: string, content: string, status: "pending" \| "in_progress" \| "completed" }>` | `summary?: string` | Replace the current task checklist. Agent cards MAY pin the latest todo list outside the scrollable transcript. |
+| `tool_call` | `toolCallId: string`, `label: string`, `status: "pending" \| "running" \| "completed" \| "failed"` | `input?: string`, `output?: string` | Render a tool call, tool output, or tool activity update. |
 | `artifact` | `label: string` | `artifactId?: string`, `filename?: string`, `contentType?: string`, `url?: string`, `size?: number`, `kind?: string` | Render or link a produced artifact. |
-| `todo` | `items: Array<{ id: string, content: string, status: "pending" \| "in_progress" \| "completed" \| string }>` | `kind?: "added" \| "updated" \| "resumed" \| string`, `lastChange?: { id?: string, previousStatus?: string, status?: string }`, `counts?: { total?: number, pending?: number, inProgress?: number, completed?: number }`, `summary?: string` | Update a task checklist. Agent cards MAY pin the latest todo list outside the scrollable transcript. |
-| `error` | `message: string` | `code?: string`, `error?: string`, `recoverable?: boolean` | Render a stream-level error. |
-| `done` | `status: "completed" \| "rejected" \| "cancelled" \| string` | `reason?: string`, `error?: string`, `output?: string` | Mark the observation stream terminal. The authoritative completion remains the `task.result` mail message. |
 
 Receivers MAY accept legacy or provider-native aliases such as `delta`, `content_delta`, `contentDelta`, `content`, or `message` for text, but new producers SHOULD emit the canonical fields above.
 

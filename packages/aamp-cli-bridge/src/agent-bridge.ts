@@ -530,7 +530,7 @@ export class AgentBridge {
     const pendingStreamWrites = new Set<Promise<void>>()
 
     const queueStreamAppend = (
-      type: 'text.delta' | 'progress' | 'status' | 'error' | 'done',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream) return
@@ -542,7 +542,7 @@ export class AgentBridge {
       let write: Promise<void>
       write = this.client.appendStreamEvent({
         streamId,
-        type,
+        type: type as never,
         payload,
       })
         .then(() => undefined)
@@ -568,7 +568,6 @@ export class AgentBridge {
       if (update.textDelta) {
         queueStreamAppend('text.delta', {
           text: update.textDelta,
-          channel: 'assistant',
           sourceEvent: eventType,
         })
         return
@@ -577,17 +576,15 @@ export class AgentBridge {
       if (update.finalText) {
         queueStreamAppend('text.delta', {
           text: update.finalText,
-          channel: 'assistant',
           sourceEvent: eventType,
         })
         return
       }
 
       if (eventType === 'session') {
-        queueStreamAppend('status', {
-          state: 'running',
-          label: 'CLI session started',
-          data,
+        queueStreamAppend('todo', {
+          items: [{ id: 'cli-session', content: 'CLI session started', status: 'in_progress' }],
+          summary: 'CLI session started',
         })
         return
       }
@@ -596,10 +593,13 @@ export class AgentBridge {
         const record = data && typeof data === 'object' && !Array.isArray(data)
           ? data as Record<string, unknown>
           : {}
-        queueStreamAppend('progress', {
+        const name = typeof record.name === 'string' ? record.name : 'tool'
+        const toolCallId = String(record.toolCallId ?? record.tool_call_id ?? record.call_id ?? record.id ?? name)
+        queueStreamAppend('tool_call', {
+          toolCallId,
           label: `Tool running: ${typeof record.name === 'string' ? record.name : 'tool'}`,
-          status: 'in_progress',
-          ...record,
+          status: 'running',
+          input: stringifyStreamPayload(record),
         })
         return
       }
@@ -609,10 +609,13 @@ export class AgentBridge {
           ? data as Record<string, unknown>
           : {}
         const failed = record.is_error === true || record.status === 'failed'
-        queueStreamAppend('progress', {
+        const name = typeof record.name === 'string' ? record.name : 'tool'
+        const toolCallId = String(record.toolCallId ?? record.tool_call_id ?? record.call_id ?? record.id ?? name)
+        queueStreamAppend('tool_call', {
+          toolCallId,
           label: `Tool ${failed ? 'failed' : 'completed'}: ${typeof record.name === 'string' ? record.name : 'tool'}`,
           status: failed ? 'failed' : 'completed',
-          ...record,
+          output: stringifyStreamPayload(record),
         })
         return
       }
@@ -622,32 +625,29 @@ export class AgentBridge {
           ? data as Record<string, unknown>
           : {}
         const chunk = typeof record.chunk === 'string' ? record.chunk : undefined
-        queueStreamAppend('progress', {
+        const name = typeof record.name === 'string' ? record.name : 'tool'
+        const toolCallId = String(record.toolCallId ?? record.tool_call_id ?? record.call_id ?? record.id ?? name)
+        queueStreamAppend('tool_call', {
+          toolCallId,
           label: 'Tool output',
-          status: 'in_progress',
-          ...record,
-          ...(chunk ? { chunk } : {}),
+          status: 'running',
+          output: chunk ? chunk : stringifyStreamPayload(record),
         })
         return
       }
 
       if (eventType === 'usage') {
-        queueStreamAppend('progress', {
-          label: 'Token usage updated',
-          ...(
-            data && typeof data === 'object' && !Array.isArray(data)
-              ? data as Record<string, unknown>
-              : { data }
-          ),
+        queueStreamAppend('todo', {
+          items: [{ id: 'token-usage', content: 'Token usage updated', status: 'in_progress' }],
+          summary: 'Token usage updated',
         })
         return
       }
 
       if (eventType === 'done') {
-        queueStreamAppend('status', {
-          state: 'running',
-          label: 'CLI stream completed',
-          data,
+        queueStreamAppend('todo', {
+          items: [{ id: 'cli-stream', content: 'CLI stream completed', status: 'completed' }],
+          summary: 'CLI stream completed',
         })
       }
     }
@@ -669,7 +669,10 @@ export class AgentBridge {
             streamId: activeStream.streamId,
             inReplyTo: task.messageId,
           })
-          queueStreamAppend('status', { state: 'running', label: 'CLI task started' })
+          queueStreamAppend('todo', {
+            items: [{ id: 'cli-task', content: 'CLI task started', status: 'in_progress' }],
+            summary: 'CLI task started',
+          })
         } catch (err) {
           activeStream = null
           streamOpenedAt = null

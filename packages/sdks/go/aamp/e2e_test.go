@@ -193,10 +193,6 @@ func (s *mockState) appendStreamEvent(streamID, eventType string, payload map[st
 	}
 	stream.Events = append(stream.Events, event)
 	stream.LatestEvent = event
-	if eventType == "done" {
-		stream.Status = "closed"
-		stream.ClosedAt = event["timestamp"].(string)
-	}
 	return event
 }
 
@@ -206,17 +202,6 @@ func (s *mockState) closeStream(streamID string, payload map[string]any) map[str
 	stream := s.streams[streamID]
 	stream.Status = "closed"
 	stream.ClosedAt = time.Now().UTC().Format(time.RFC3339)
-	if len(payload) > 0 {
-		stream.LatestEvent = map[string]any{
-			"id":        fmt.Sprintf("%s-done", streamID),
-			"streamId":  streamID,
-			"taskId":    stream.TaskID,
-			"seq":       len(stream.Events) + 1,
-			"timestamp": stream.ClosedAt,
-			"type":      "done",
-			"payload":   payload,
-		}
-	}
 	return map[string]any{
 		"streamId":    stream.StreamID,
 		"taskId":      stream.TaskID,
@@ -532,15 +517,18 @@ func TestClientEndToEnd(t *testing.T) {
 		}
 		if _, err := agent.AppendStreamEvent(AppendStreamEventOptions{
 			StreamID: stream.StreamID,
-			Type:     "status",
-			Payload:  map[string]any{"stage": "running"},
+			Type:     "todo",
+			Payload: map[string]any{
+				"items":   []map[string]any{{"id": "integration", "content": "Running integration task", "status": "in_progress"}},
+				"summary": "Running integration task",
+			},
 		}); err != nil {
 			t.Errorf("append stream failed: %v", err)
 			return
 		}
 		if _, err := agent.CloseStream(CloseStreamOptions{
 			StreamID: stream.StreamID,
-			Payload:  map[string]any{"stage": "done"},
+			Payload:  map[string]any{"reason": "task.result"},
 		}); err != nil {
 			t.Errorf("close stream failed: %v", err)
 			return
@@ -642,7 +630,10 @@ func TestClientEndToEnd(t *testing.T) {
 	if streamState.Status != "closed" {
 		t.Fatalf("unexpected stream status: %#v", streamState)
 	}
-	if stage := streamState.LatestEvent.Payload["stage"]; stage != "done" {
+	if streamState.LatestEvent.Type != "todo" {
+		t.Fatalf("unexpected latest event type: %#v", streamState.LatestEvent)
+	}
+	if summary := streamState.LatestEvent.Payload["summary"]; summary != "Running integration task" {
 		t.Fatalf("unexpected latest event payload: %#v", streamState.LatestEvent)
 	}
 }

@@ -1,7 +1,7 @@
-import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import type { AgentConfig, BridgeConfig } from './config.js'
 import { resolveCredentialsFile } from './storage.js'
+import { defaultAcpCommand, detectKnownAgent, missingAgentWarning } from './agent-resolver.js'
 
 export interface AcpBridgeAgentCandidate {
   id: string
@@ -29,10 +29,6 @@ const KNOWN_AGENTS = [
   'hermes',
 ]
 
-function defaultAcpCommand(name: string): string {
-  return name === 'hermes' ? 'hermes acp' : name
-}
-
 function loadPreviousConfig(configPath: string): BridgeConfig | undefined {
   if (!existsSync(configPath)) return undefined
 
@@ -45,22 +41,6 @@ function loadPreviousConfig(configPath: string): BridgeConfig | undefined {
       rejectUnauthorized: raw.rejectUnauthorized === true,
       agents: raw.agents,
     } as BridgeConfig
-  } catch {
-    return undefined
-  }
-}
-
-function detectAgent(command: string): string | undefined {
-  try {
-    execFileSync('which', [command], { stdio: 'pipe', timeout: 3_000 })
-    try {
-      return execFileSync(command, ['--version'], { stdio: 'pipe', timeout: 5_000 })
-        .toString()
-        .trim()
-        .split('\n')[0] || 'installed'
-    } catch {
-      return 'installed'
-    }
   } catch {
     return undefined
   }
@@ -86,11 +66,11 @@ export function discoverAcpBridgeAgents(configPath: string): AcpBridgeDiscovery 
 
   const candidates = names.map((name): AcpBridgeAgentCandidate => {
     const existingAgent = previousAgents.get(name)
-    const command = name
-    const version = detectAgent(command)
-    const detected = Boolean(version)
+    const resolution = detectKnownAgent(name)
+    const command = resolution?.command ?? name
+    const detected = Boolean(resolution)
     const configured = Boolean(existingAgent)
-    const warnings = detected ? [] : [`${command} was not found on PATH.`]
+    const warnings = detected ? [] : [missingAgentWarning(name)]
 
     return {
       id: name,
@@ -100,8 +80,8 @@ export function discoverAcpBridgeAgents(configPath: string): AcpBridgeDiscovery 
       configured,
       confidence: detected ? 'high' : configured ? 'medium' : 'low',
       command,
-      acpCommand: existingAgent?.acpCommand ?? defaultAcpCommand(name),
-      ...(version ? { version } : {}),
+      acpCommand: defaultAcpCommand(name, existingAgent?.acpCommand),
+      ...(resolution?.version ? { version: resolution.version } : {}),
       ...(existingAgent ? { email: loadConfiguredEmail(existingAgent) } : {}),
       warnings,
     }
