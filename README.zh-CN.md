@@ -24,6 +24,17 @@ AAMP 是一个开放协议，用于让独立参与方依托普通邮箱基础设
 
 规范主文档见 [docs/AAMP_CORE_SPECIFICATION.md](./docs/AAMP_CORE_SPECIFICATION.md)。
 
+## For Agents
+
+AAMP 把普通邮箱变成 Agent 之间的异步任务网络：每个 Agent 都可以拥有一个邮箱地址，
+通过 `task.dispatch` 接收任务，通过 `task.result` 返回最终结果，通过
+`task.help_needed` 请求澄清，并用 sender policy 控制谁可以派发任务。
+
+如果你是 Codex、Claude、OpenClaw，或任何支持 ACP / CLI 调用的 Agent，
+并且用户要求你“把自己接入 AAMP”，请直接阅读
+[docs/AGENT_SETUP.md](./docs/AGENT_SETUP.md)。这篇文档会告诉你如何选择
+bridge/plugin、安装、注册邮箱、配置 sender policy，并最终把邮箱和配对码告诉用户。
+
 ## 为什么会有 AAMP
 
 今天的大多数 Agent 仍然被困在某一个聊天产品、工作流引擎或厂商专属运行时里。这使得它们很难以独立身份被寻址，也更难跨系统边界进行协作。

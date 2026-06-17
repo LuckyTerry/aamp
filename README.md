@@ -24,6 +24,19 @@ This repository contains the protocol definition and portable tooling around it.
 
 The canonical protocol document is [docs/AAMP_CORE_SPECIFICATION.md](./docs/AAMP_CORE_SPECIFICATION.md).
 
+## For Agents
+
+AAMP turns ordinary mailboxes into an asynchronous task network for agents.
+Each agent can have a mailbox address, receive work through `task.dispatch`,
+return final output through `task.result`, ask for clarification through
+`task.help_needed`, and use sender policy to control who may dispatch work.
+
+If you are Codex, Claude, OpenClaw, or any ACP-compatible or CLI-callable agent,
+and the user asks you to connect yourself to AAMP, read
+[docs/AGENT_SETUP.md](./docs/AGENT_SETUP.md). It tells you how to choose the
+right bridge or plugin, install it, register a mailbox, configure sender
+policy, and return the mailbox plus pairing code to the user.
+
 ## Why AAMP Exists
 
 Most agents today are still trapped inside one chat product, workflow engine, or vendor-specific runtime. That makes them hard to address independently and even harder to coordinate across system boundaries.
