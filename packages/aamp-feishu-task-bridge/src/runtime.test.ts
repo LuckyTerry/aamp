@@ -935,6 +935,99 @@ test('runtime batches selected stream events until the batch threshold', async (
   }
 })
 
+test('runtime converts ACP todo and tool_call stream events into Feishu task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_stream_acp_contract',
+      taskGuid: 'task_guid_stream_acp_contract',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266154',
+    })
+
+    const aampTaskId = 'feishu-task-task_guid_stream_acp_contract-evt_stream_acp_contract'
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_acp_contract')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_acp_contract)
+    })
+
+    ;[
+      'ACP task started',
+      'Prompt sent to ACP agent',
+      'ACP agent is thinking',
+      'ACP agent is composing the reply',
+      'ACP response received',
+    ].forEach((content, index) => {
+      fakeAamp.emitStreamEvent('stream_acp_contract', {
+        id: `internal_todo_${index}`,
+        taskId: aampTaskId,
+        seq: index + 1,
+        type: 'todo',
+        payload: {
+          items: [{ id: `internal-${index}`, content, status: 'completed' }],
+          summary: content,
+        },
+      })
+    })
+
+    fakeAamp.emitStreamEvent('stream_acp_contract', {
+      id: 'todo_1',
+      taskId: aampTaskId,
+      seq: 10,
+      type: 'todo',
+      payload: {
+        items: [
+          { id: 'plan-1', content: '正在拆解任务', status: 'in_progress' },
+          { id: 'plan-2', content: '正在查询上下文', status: 'pending' },
+        ],
+      },
+    })
+    fakeAamp.emitStreamEvent('stream_acp_contract', {
+      id: 'todo_2',
+      taskId: aampTaskId,
+      seq: 11,
+      type: 'todo',
+      payload: { summary: '正在整理回复' },
+    })
+    fakeAamp.emitStreamEvent('stream_acp_contract', {
+      id: 'tool_1',
+      taskId: aampTaskId,
+      seq: 12,
+      type: 'tool_call',
+      payload: {
+        label: 'Tool completed: lark-cli task +update',
+        status: 'completed',
+      },
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.stepBatches[0], {
+        taskGuid: 'task_guid_stream_acp_contract',
+        contents: [
+          '正在拆解任务',
+          '正在查询上下文',
+          '正在整理回复',
+          'Tool completed: lark-cli task +update',
+        ],
+      })
+    })
+    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.streamStepCount, 4)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime flushes pending stream steps after the flush interval', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()
