@@ -853,7 +853,7 @@ test('runtime converts selected stream events into throttled Feishu task steps',
       type: 'error',
       payload: { message: '工具调用失败' },
     })
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 40; i += 1) {
       fakeAamp.emitStreamEvent('stream_1', {
         id: `s_cap_${i}`,
         taskId: aampTaskId,
@@ -864,22 +864,22 @@ test('runtime converts selected stream events into throttled Feishu task steps',
     }
 
     await waitFor(() => {
-      assert.equal(fakeFeishu.steps.length, 16)
-      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.lastStreamEventId, 's_cap_19')
+      assert.equal(fakeFeishu.steps.length, 32)
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.lastStreamEventId, 's_cap_39')
     })
 
     assert.deepEqual(fakeFeishu.steps.map((step) => step.content), [
       '正在分析需求',
       '正在更新飞书任务',
       '执行遇到错误：工具调用失败',
-      ...Array.from({ length: 13 }, (_, index) => `额外进展 ${index + 1}`),
+      ...Array.from({ length: 29 }, (_, index) => `额外进展 ${index + 1}`),
     ])
     assert.ok(fakeFeishu.steps.every((step) => step.taskGuid === 'task_guid_stream'))
 
     const taskState = runtime.getStateSnapshot().tasks[aampTaskId]
     assert.equal(taskState?.streamId, 'stream_1')
-    assert.equal(taskState?.lastStreamEventId, 's_cap_19')
-    assert.equal(taskState?.streamStepCount, 16)
+    assert.equal(taskState?.lastStreamEventId, 's_cap_39')
+    assert.equal(taskState?.streamStepCount, 32)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -999,10 +999,28 @@ test('runtime converts ACP todo and tool_call stream events into Feishu task ste
       type: 'todo',
       payload: { summary: '正在整理回复' },
     })
+    ;[
+      'Tool running: Read file',
+      'Tool running: tool',
+      'Tool completed: tool',
+      'Tool running: Editing files',
+      'Tool failed: tool',
+    ].forEach((label, index) => {
+      fakeAamp.emitStreamEvent('stream_acp_contract', {
+        id: `ignored_tool_${index}`,
+        taskId: aampTaskId,
+        seq: 12 + index,
+        type: 'tool_call',
+        payload: {
+          label,
+          status: label.includes('failed') ? 'failed' : 'running',
+        },
+      })
+    })
     fakeAamp.emitStreamEvent('stream_acp_contract', {
       id: 'tool_1',
       taskId: aampTaskId,
-      seq: 12,
+      seq: 20,
       type: 'tool_call',
       payload: {
         label: 'Tool completed: lark-cli task +update',
