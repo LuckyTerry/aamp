@@ -10,7 +10,6 @@ import {
   loadBridgeState,
 } from './config.js'
 import { FeishuTaskBridgeRuntime } from './runtime.js'
-import type { FeishuTaskApiVersion } from './types.js'
 
 type CommandName = 'init' | 'start' | 'run' | 'status' | 'help' | 'unknown'
 
@@ -63,19 +62,11 @@ function allArgs(args: ParsedArgs, key: string): string[] | undefined {
   return args.values[key]
 }
 
-function parseTaskApiVersion(raw: string | undefined): FeishuTaskApiVersion | undefined {
-  if (!raw) return undefined
-  if (raw !== 'v1' && raw !== 'v2') {
-    throw new Error('--task-api-version must be v1 or v2')
-  }
-  return raw
-}
-
 function printUsage(): void {
   console.log(`AAMP Feishu Task Bridge
 
 Usage:
-  aamp-feishu-task-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--slug NAME] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--event-name NAME] [--task-api-version v1|v2] [--no-ack-comment] [--no-start]
+  aamp-feishu-task-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--slug NAME] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--event-name NAME] [--no-ack-comment] [--no-start]
   aamp-feishu-task-bridge start [--config-dir DIR] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--force-register-agent]
   aamp-feishu-task-bridge status [--config-dir DIR] [--json]
 
@@ -118,7 +109,6 @@ async function runInit(args: ParsedArgs): Promise<void> {
     env: firstArg(args, 'env'),
     debug: args.booleans.has('debug') ? true : undefined,
     eventNames: allArgs(args, 'event-name'),
-    taskApiVersion: parseTaskApiVersion(firstArg(args, 'task-api-version')),
     ackComment: args.booleans.has('no-ack-comment') ? false : undefined,
   })
   const runtimeConfig = applyFeishuRuntimeOverrides(config, {
@@ -135,7 +125,6 @@ async function runInit(args: ParsedArgs): Promise<void> {
   console.log(`Feishu runtime domain: ${runtimeConfig.feishu.domain ?? 'default'}`)
   console.log(`Feishu runtime env: ${runtimeConfig.feishu.headers?.['x-tt-env'] ?? '(none)'}`)
   console.log(`Debug: ${runtimeConfig.behavior.debug ? 'enabled' : 'disabled'}`)
-  console.log(`Feishu task API: ${config.feishu.taskApiVersion}`)
   console.log(`Feishu events: ${config.feishu.eventNames.join(', ')}`)
   console.log(`ACK comment: ${config.behavior.ackComment ? 'enabled' : 'disabled'}`)
   if (args.booleans.has('no-start')) {
@@ -165,7 +154,6 @@ async function runStatus(args: ParsedArgs): Promise<void> {
   console.log(`Feishu domain: ${config.feishu.domain ?? 'default'}`)
   console.log(`Feishu env: ${config.feishu.headers?.['x-tt-env'] ?? '(none)'}`)
   console.log(`Debug: ${config.behavior.debug ? 'enabled' : 'disabled'}`)
-  console.log(`Feishu task API: ${config.feishu.taskApiVersion}`)
   console.log(`Feishu events: ${config.feishu.eventNames.join(', ')}`)
   console.log(`ACK comment: ${config.behavior.ackComment ? 'enabled' : 'disabled'}`)
   console.log(`Connectivity: feishu=${state.connectivity.feishu} aamp=${state.connectivity.aamp}`)

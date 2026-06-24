@@ -26,6 +26,7 @@ import type {
   BridgeState,
   BridgeTaskState,
   FeishuTaskClient,
+  FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
   FeishuTaskEventKind,
@@ -40,9 +41,14 @@ type FeishuTaskEventIgnoreReason =
   | 'subtask_create_context_only'
   | 'task_create_deferred_to_reminder'
   | 'recurring_task_create_deferred'
+  | 'task_not_active'
+  | 'comment_authored_by_current_app'
+  | 'comment_without_effective_comment'
+  | 'agent_task_status_not_dispatchable'
 const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
+const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
 
 interface PendingStreamStep {
   content: string
@@ -293,6 +299,49 @@ function getTaskCreateIgnoreReason(eventKind: FeishuTaskEventKind, task: FeishuT
   return undefined
 }
 
+function isTaskActiveForExecution(task: FeishuTaskDetails): boolean {
+  return task.status !== 'done'
+}
+
+function isCommentByCurrentApp(comment: FeishuTaskComment, appId: string): boolean {
+  const normalizedAppId = appId.trim()
+  if (!normalizedAppId) return false
+  const authorType = comment.authorType.trim().toLowerCase()
+  const authorId = comment.authorId?.trim()
+  return authorType === 'app' && authorId === normalizedAppId
+}
+
+function getLatestNonEmptyComment(task: FeishuTaskDetails): FeishuTaskComment | undefined {
+  return [...(task.comments ?? [])]
+    .filter((comment) => Boolean(comment.content.trim()))
+    .sort((a, b) => (a.createdAt ?? a.updatedAt ?? '').localeCompare(b.createdAt ?? b.updatedAt ?? ''))
+    .at(-1)
+}
+
+function getExecutionIgnoreReason(
+  eventKind: FeishuTaskEventKind,
+  task: FeishuTaskDetails,
+  appId: string,
+): FeishuTaskEventIgnoreReason | undefined {
+  if (eventKind !== 'task_comment' && !isTaskActiveForExecution(task)) {
+    return 'task_not_active'
+  }
+
+  if (eventKind !== 'task_comment') return undefined
+
+  if (
+    task.agentTaskStatus === undefined
+    || !COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES.has(task.agentTaskStatus)
+  ) {
+    return 'agent_task_status_not_dispatchable'
+  }
+
+  const latestComment = getLatestNonEmptyComment(task)
+  if (!latestComment) return 'comment_without_effective_comment'
+  if (isCommentByCurrentApp(latestComment, appId)) return 'comment_authored_by_current_app'
+  return undefined
+}
+
 function normalizeStepText(content: string): string {
   return content.trim().replace(/\s+/g, ' ').toLowerCase()
 }
@@ -440,7 +489,6 @@ export class FeishuTaskBridgeRuntime {
       `target=${this.config.targetAgentEmail}`,
       `mailbox=${this.config.mailbox.email}`,
       `events=${this.config.feishu.eventNames.join(',')}`,
-      `taskApi=${this.config.feishu.taskApiVersion}`,
       `ackComment=${this.config.behavior.ackComment ? 'on' : 'off'}`,
       `debug=${this.config.behavior.debug ? 'on' : 'off'}`,
     ].join(' '))
@@ -629,7 +677,13 @@ export class FeishuTaskBridgeRuntime {
         await this.ignoreFeishuTaskEvent(event, ignoreReason)
         return
       }
+      const executionIgnoreReason = getExecutionIgnoreReason(eventKind, task, this.config.feishu.appId)
+      if (executionIgnoreReason) {
+        await this.ignoreFeishuTaskEvent(event, executionIgnoreReason)
+        return
+      }
       const dispatch = buildFeishuTaskDispatch(event, task, eventKind, {
+        feishuAppId: this.config.feishu.appId,
         ...buildFeishuTaskDispatchOptions(this.config),
       })
       const now = new Date().toISOString()

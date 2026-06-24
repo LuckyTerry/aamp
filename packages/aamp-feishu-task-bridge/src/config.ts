@@ -6,7 +6,7 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
-import type { BridgeConfig, BridgeState, FeishuTaskApiVersion } from './types.js'
+import type { BridgeConfig, BridgeState } from './types.js'
 
 const CONFIG_FILENAME = 'config.json'
 const STATE_FILENAME = 'state.json'
@@ -116,7 +116,6 @@ export interface InitBridgeOptions {
   env?: string
   eventNames?: string[]
   userIdType?: 'open_id' | 'user_id' | 'union_id'
-  taskApiVersion?: FeishuTaskApiVersion
   ackComment?: boolean
   debug?: boolean
 }
@@ -148,10 +147,6 @@ function normalizeSlug(rawValue: string): string {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 32) || DEFAULT_BRIDGE_SLUG
-}
-
-function normalizeTaskApiVersion(value: string | undefined): FeishuTaskApiVersion {
-  return value === 'v1' ? 'v1' : 'v2'
 }
 
 function normalizeHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
@@ -249,7 +244,6 @@ function normalizeBridgeConfig(config: Partial<BridgeConfig>): BridgeConfig {
       appId: config.feishu.appId,
       appSecret: config.feishu.appSecret,
       userIdType: config.feishu.userIdType ?? 'open_id',
-      taskApiVersion: normalizeTaskApiVersion(config.feishu.taskApiVersion),
       eventNames: normalizeConfiguredEventNames(config.feishu.eventNames),
     },
     mailbox: config.mailbox,
@@ -300,7 +294,6 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
     ? normalizeEventNames(options.eventNames)
     : normalizeConfiguredEventNames(existing?.feishu.eventNames)
   const userIdType = options.userIdType ?? existing?.feishu.userIdType ?? 'open_id'
-  const taskApiVersion = options.taskApiVersion ?? existing?.feishu.taskApiVersion ?? 'v2'
   const ackComment = options.ackComment ?? existing?.behavior.ackComment ?? true
   const debug = false
 
@@ -322,7 +315,6 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
       appId,
       appSecret,
       userIdType,
-      taskApiVersion,
       eventNames,
     },
     mailbox: {

@@ -5,8 +5,6 @@ export interface BridgeMailboxIdentity {
   baseUrl: string
 }
 
-export type FeishuTaskApiVersion = 'v1' | 'v2'
-
 export interface BridgeConfig {
   version: 1
   aampHost: string
@@ -18,7 +16,6 @@ export interface BridgeConfig {
     domain?: string
     headers?: Record<string, string>
     userIdType?: 'open_id' | 'user_id' | 'union_id'
-    taskApiVersion: FeishuTaskApiVersion
     eventNames: string[]
   }
   mailbox: BridgeMailboxIdentity
@@ -110,18 +107,25 @@ export interface FeishuTaskEvent {
   raw?: unknown
 }
 
+export type FeishuTaskStatus = 'todo' | 'done'
+
 export interface FeishuTaskSubtask {
   guid: string
   taskId?: string
   summary: string
   description?: string
-  status?: string
+  status?: FeishuTaskStatus
   url?: string
+  agentTaskStatus?: number
+  parentGuid?: string
+  rrule?: string
+  reminders?: unknown[]
 }
 
 export interface FeishuTaskComment {
   id?: string
-  authorType?: string
+  authorType: 'app' | 'user'
+  authorId?: string
   content: string
   createdAt?: string
   updatedAt?: string
@@ -133,7 +137,8 @@ export interface FeishuTaskDetails {
   summary: string
   description?: string
   url?: string
-  status?: string
+  status?: FeishuTaskStatus
+  agentTaskStatus?: number
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]

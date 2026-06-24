@@ -15,7 +15,6 @@ const legacyConfig: BridgeConfig = {
     appId: 'cli_xxx',
     appSecret: 'secret',
     userIdType: 'open_id',
-    taskApiVersion: 'v2',
     eventNames: ['task.task.updated_v1', 'task.task.update_tenant_v1'],
   },
   mailbox: {

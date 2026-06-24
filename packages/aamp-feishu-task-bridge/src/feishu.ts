@@ -13,6 +13,7 @@ import type {
   FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskStatus,
   FeishuTaskSubtask,
 } from './types.js'
 
@@ -88,6 +89,15 @@ function getString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function getNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim())
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return undefined
+}
+
 function normalizeFeishuWriteText(value: string): string {
   return value
     .replace(/\\r\\n/g, '\n')
@@ -107,89 +117,55 @@ function getArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) && value.length > 0 ? value : undefined
 }
 
-function findStringByKeys(value: unknown, keys: string[], depth = 0): string | undefined {
-  if (depth > 5) return undefined
-  const record = asRecord(value)
-  if (!record) return undefined
-
-  for (const key of keys) {
-    const found = getString(record[key])
-    if (found) return found
-  }
-
-  for (const nested of Object.values(record)) {
-    if (!nested || typeof nested !== 'object') continue
-    const found = findStringByKeys(nested, keys, depth + 1)
-    if (found) return found
-  }
-
-  return undefined
-}
-
-function findStringArrayByKeys(value: unknown, keys: string[], depth = 0): string[] | undefined {
-  if (depth > 5) return undefined
-  const record = asRecord(value)
-  if (!record) return undefined
-
-  for (const key of keys) {
-    const found = getStringArray(record[key])
-    if (found) return found
-  }
-
-  for (const nested of Object.values(record)) {
-    if (!nested || typeof nested !== 'object') continue
-    const found = findStringArrayByKeys(nested, keys, depth + 1)
-    if (found) return found
-  }
-
-  return undefined
-}
-
-function collectEventTypes(raw: unknown, fallbackEventName: string): string[] {
-  const eventTypes = findStringArrayByKeys(raw, ['event_types'])
-  if (eventTypes?.length) return [...new Set(eventTypes)]
-
-  const eventType = findStringByKeys(raw, ['event_type'])
-  const type = findStringByKeys(raw, ['type'])
-  const values = [eventType, fallbackEventName, type]
-    .filter((value): value is string => Boolean(value))
-    .filter((value) => value !== 'event_callback')
-  return [...new Set(values)]
-}
-
-export function normalizeFeishuTaskEvent(raw: unknown, fallbackEventName: string): FeishuTaskEvent | null {
-  const taskGuid = findStringByKeys(raw, ['task_guid', 'guid', 'task_id', 'resource_id', 'object_id'])
+export function normalizeFeishuTaskEvent(raw: unknown, _eventName?: string): FeishuTaskEvent | null {
+  const record = asRecord(raw)
+  const eventId = getString(record?.event_id)
+  const taskGuid = getString(record?.task_guid)
+  if (!eventId) return null
   if (!taskGuid) return null
 
-  const timestamp = findStringByKeys(raw, ['create_time', 'ts', 'timestamp'])
-  const eventId = findStringByKeys(raw, ['event_id'])
-  if (!eventId) return null
+  const timestamp = getString(record?.create_time)
+  const eventTypes = getStringArray(record?.event_types) ?? []
 
   return {
     eventId,
     taskGuid,
-    eventTypes: collectEventTypes(raw, fallbackEventName),
+    eventTypes: [...new Set(eventTypes)],
     ...(timestamp ? { timestamp } : {}),
     raw,
   }
 }
 
-function readOriginUrl(record: JsonRecord): string | undefined {
-  const origin = asRecord(record.origin)
-  const href = asRecord(origin?.href)
-  return getString(href?.url)
+function readCommentRecord(record: JsonRecord): JsonRecord {
+  return asRecord(asRecord(record.data)?.comment)
+    ?? record
+}
+
+function readCommentCreator(record: JsonRecord): JsonRecord | undefined {
+  return asRecord(readCommentRecord(record).creator)
+}
+
+function normalizeTaskStatus(value: unknown): FeishuTaskStatus | undefined {
+  const status = getString(value)
+  if (status === 'todo' || status === 'done') return status
+  return undefined
 }
 
 function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails {
+  const agentTaskStatus = getNumber(record.agent_task_status)
+  const rrule = getString(record.repeat_rule)
+  const status = normalizeTaskStatus(record.status)
+
   return {
     guid: getString(record.guid) ?? fallbackGuid,
     ...(getString(record.task_id) ? { taskId: getString(record.task_id) } : {}),
     summary: getString(record.summary) ?? '(untitled)',
     ...(getString(record.description) ? { description: getString(record.description) } : {}),
-    ...(getString(record.url) ?? readOriginUrl(record) ? { url: getString(record.url) ?? readOriginUrl(record) } : {}),
-    ...(getString(record.status) ? { status: getString(record.status) } : {}),
+    ...(getString(record.url) ? { url: getString(record.url) } : {}),
+    ...(status ? { status } : {}),
+    ...(agentTaskStatus !== undefined ? { agentTaskStatus } : {}),
     ...(getString(record.parent_task_guid) ? { parentGuid: getString(record.parent_task_guid) } : {}),
-    ...(getString(record.rrule) ? { rrule: getString(record.rrule) } : {}),
+    ...(rrule ? { rrule } : {}),
     ...(getArray(record.reminders) ? { reminders: getArray(record.reminders) } : {}),
   }
 }
@@ -197,58 +173,32 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
 function mapV2Subtask(record: JsonRecord): FeishuTaskSubtask | null {
   const guid = getString(record.guid)
   if (!guid) return null
-  return {
-    guid,
-    ...(getString(record.task_id) ? { taskId: getString(record.task_id) } : {}),
-    summary: getString(record.summary) ?? '(untitled)',
-    ...(getString(record.description) ? { description: getString(record.description) } : {}),
-    ...(getString(record.status) ? { status: getString(record.status) } : {}),
-    ...(getString(record.url) ?? readOriginUrl(record) ? { url: getString(record.url) ?? readOriginUrl(record) } : {}),
-  }
+  return mapV2Task(record, guid)
 }
 
-function inferCommentAuthorType(record: JsonRecord, content: string): string {
-  const authorType = getString(record.author_type)
-    ?? getString(record.creator_type)
-    ?? getString(record.operator_type)
-  if (authorType) return authorType
-  const agentCommentMarkers = [
-    '已收到任务派发请求',
-    '已收到您的回复',
-    '智能体执行完成',
-    '智能体执行失败',
-    '智能体需要更多信息',
-    '\n\n交付物：',
-    '失败原因：',
-  ]
-  if (agentCommentMarkers.some((marker) => content.includes(marker))) return 'agent'
-  return 'human'
+function normalizeCommentAuthorType(value: string | undefined): 'app' | 'user' | undefined {
+  const normalized = value?.trim().toLowerCase()
+  if (normalized === 'app' || normalized === 'user') return normalized
+  return undefined
 }
 
 function mapV2Comment(record: JsonRecord): FeishuTaskComment | null {
-  const content = getString(record.content)
-    ?? getString(record.text)
-    ?? getString(record.plain_text)
-    ?? getString(asRecord(record.message)?.content)
-  if (!content) return null
+  const commentRecord = readCommentRecord(record)
+  const creator = readCommentCreator(record)
+  const authorType = normalizeCommentAuthorType(getString(creator?.type))
+  const creatorId = getString(creator?.id)
+  const id = getString(commentRecord.id)
+  const createdAt = getString(commentRecord.created_at)
+  const updatedAt = getString(commentRecord.updated_at)
+  const content = getString(commentRecord.content)
+  if (!content || !authorType || !creatorId) return null
   return {
-    ...(getString(record.comment_id) ?? getString(record.id) ? { id: getString(record.comment_id) ?? getString(record.id) } : {}),
-    authorType: inferCommentAuthorType(record, content),
+    ...(id ? { id } : {}),
+    authorType,
+    authorId: creatorId,
     content,
-    ...(getString(record.create_time) ?? getString(record.created_at) ? { createdAt: getString(record.create_time) ?? getString(record.created_at) } : {}),
-    ...(getString(record.update_time) ?? getString(record.updated_at) ? { updatedAt: getString(record.update_time) ?? getString(record.updated_at) } : {}),
-  }
-}
-
-function mapV1Task(record: JsonRecord, fallbackTaskId: string): FeishuTaskDetails {
-  const taskId = getString(record.id) ?? fallbackTaskId
-  return {
-    guid: taskId,
-    taskId,
-    summary: getString(record.summary) ?? '(untitled)',
-    ...(getString(record.description) ? { description: getString(record.description) } : {}),
-    ...(readOriginUrl(record) ? { url: readOriginUrl(record) } : {}),
-    status: getString(record.complete_time) ? 'completed' : 'todo',
+    ...(createdAt ? { createdAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   }
 }
 
@@ -341,31 +291,14 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
   }
 
   async getTask(taskGuid: string): Promise<FeishuTaskDetails> {
-    if (this.config.taskApiVersion === 'v1') {
-      this.logger.log(`[feishu task ${taskGuid}] get via v1`)
-      return this.getV1Task(taskGuid)
-    }
-
     this.logger.log(`[feishu task ${taskGuid}] get via v2`)
-    return this.getV2Task(taskGuid).catch(async (error: Error) => {
-      this.logger.log(`[feishu task ${taskGuid}] v2 get failed, trying v1 fallback: ${error.message}`)
-      return this.getV1Task(taskGuid)
-    })
+    return this.getV2Task(taskGuid)
   }
 
   async commentTask(taskGuid: string, content: string): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
-    if (this.config.taskApiVersion === 'v1') {
-      this.logger.log(`[feishu task ${taskGuid}] comment via v1`)
-      await this.commentV1Task(taskGuid, normalizedContent)
-      return
-    }
-
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
-    await this.commentV2Task(taskGuid, normalizedContent).catch(async (error: Error) => {
-      this.logger.log(`[feishu task ${taskGuid}] v2 comment failed, trying v1 fallback: ${error.message}`)
-      await this.commentV1Task(taskGuid, normalizedContent)
-    })
+    await this.commentV2Task(taskGuid, normalizedContent)
   }
 
   async appendTaskStep(taskGuid: string, content: string): Promise<void> {
@@ -391,16 +324,6 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认')
   }
 
-  private async getV1Task(taskGuid: string): Promise<FeishuTaskDetails> {
-    const response = await this.client.task.task.get({
-      path: { task_id: taskGuid },
-      params: { user_id_type: this.config.userIdType },
-    })
-    const task = asRecord(response.data?.task)
-    if (!task) throw new Error(`Feishu task ${taskGuid} not found`)
-    return mapV1Task(task, taskGuid)
-  }
-
   private async getV2Task(taskGuid: string): Promise<FeishuTaskDetails> {
     const response = await this.client.task.v2.task.get({
       path: { task_guid: taskGuid },
@@ -416,18 +339,6 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       return []
     })
     return details
-  }
-
-  private async commentV1Task(taskGuid: string, content: string): Promise<void> {
-    await this.client.task.taskComment.create({
-      path: { task_id: taskGuid },
-      params: { user_id_type: this.config.userIdType },
-      data: {
-        content,
-        parent_id: '0',
-        create_milli_time: String(Date.now()),
-      },
-    })
   }
 
   private async commentV2Task(taskGuid: string, content: string): Promise<void> {
@@ -538,31 +449,45 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
   }
 
   private async listV2Subtasks(taskGuid: string): Promise<FeishuTaskSubtask[]> {
-    const response = await this.client.task.v2.taskSubtask.list({
-      path: { task_guid: taskGuid },
-      params: {
-        user_id_type: this.config.userIdType,
-        page_size: 50,
-      },
-    })
-    const items = response.data?.items ?? []
-    return items
-      .map((item) => mapV2Subtask(item as JsonRecord))
-      .filter((item): item is FeishuTaskSubtask => Boolean(item))
+    const subtasks: FeishuTaskSubtask[] = []
+    let pageToken: string | undefined
+    do {
+      const response = await this.client.task.v2.taskSubtask.list({
+        path: { task_guid: taskGuid },
+        params: {
+          user_id_type: this.config.userIdType,
+          page_size: 50,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      })
+      const items = response.data?.items ?? []
+      subtasks.push(...items
+        .map((item) => mapV2Subtask(item as JsonRecord))
+        .filter((item): item is FeishuTaskSubtask => Boolean(item)))
+      pageToken = response.data?.has_more ? getString(response.data.page_token) : undefined
+    } while (pageToken)
+    return subtasks
   }
 
   private async listV2Comments(taskGuid: string): Promise<FeishuTaskComment[]> {
-    const response = await this.client.task.v2.comment.list({
-      params: {
-        user_id_type: this.config.userIdType,
-        resource_type: 'task',
-        resource_id: taskGuid,
-        page_size: 50,
-      },
-    })
-    const items = response.data?.items ?? []
-    return items
-      .map((item) => mapV2Comment(item as JsonRecord))
-      .filter((item): item is FeishuTaskComment => Boolean(item))
+    const comments: FeishuTaskComment[] = []
+    let pageToken: string | undefined
+    do {
+      const response = await this.client.task.v2.comment.list({
+        params: {
+          user_id_type: this.config.userIdType,
+          resource_type: 'task',
+          resource_id: taskGuid,
+          page_size: 50,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      })
+      const items = response.data?.items ?? []
+      comments.push(...items
+        .map((item) => mapV2Comment(item as JsonRecord))
+        .filter((item): item is FeishuTaskComment => Boolean(item)))
+      pageToken = response.data?.has_more ? getString(response.data.page_token) : undefined
+    } while (pageToken)
+    return comments
   }
 }
