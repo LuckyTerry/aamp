@@ -300,6 +300,7 @@ function normalizeStepText(content: string): string {
 const IGNORED_STREAM_STEP_TEXTS = new Set([
   'ACP task started',
   'Prompt sent to ACP agent',
+  'ACP agent is thinking',
   'ACP agent is composing the reply',
   'ACP response received',
 ].map(normalizeStepText))
@@ -312,18 +313,50 @@ function getPayloadText(payload: Record<string, unknown>, keys: string[]): strin
   return undefined
 }
 
-function streamEventToTaskStep(event: AampStreamEvent): string | undefined {
-  if (event.type === 'status') {
-    return getPayloadText(event.payload, ['label', 'stage', 'status', 'message', 'text'])
+function getTodoItemText(value: unknown): string | undefined {
+  const item = asRecord(value)
+  if (!item) return undefined
+  return getPayloadText(item, ['content', 'text', 'title', 'label', 'summary'])
+}
+
+function uniqueStepContents(contents: Array<string | undefined>): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const content of contents) {
+    if (!content) continue
+    const normalized = normalizeStepText(content)
+    if (seen.has(normalized)) continue
+    seen.add(normalized)
+    result.push(content)
   }
-  if (event.type === 'progress') {
-    return getPayloadText(event.payload, ['label', 'stage', 'message', 'text'])
+  return result
+}
+
+function streamEventToTaskSteps(event: AampStreamEvent): string[] {
+  const eventType = String(event.type)
+  if (eventType === 'status') {
+    return uniqueStepContents([getPayloadText(event.payload, ['label', 'stage', 'status', 'message', 'text'])])
   }
-  if (event.type === 'error') {
+  if (eventType === 'progress') {
+    return uniqueStepContents([getPayloadText(event.payload, ['label', 'stage', 'message', 'text'])])
+  }
+  if (eventType === 'todo') {
+    const itemTexts = Array.isArray(event.payload.items)
+      ? event.payload.items.map(getTodoItemText)
+      : []
+    return uniqueStepContents([
+      ...itemTexts,
+      itemTexts.length === 0 ? getPayloadText(event.payload, ['summary', 'label', 'message', 'text']) : undefined,
+    ])
+  }
+  if (eventType === 'tool_call') {
+    return uniqueStepContents([getPayloadText(event.payload, ['label', 'summary', 'message', 'text'])])
+  }
+  if (eventType === 'error') {
     const message = getPayloadText(event.payload, ['message', 'error', 'reason'])
-    return message ? `执行遇到错误：${message}` : '执行遇到错误。'
+    return [message ? `执行遇到错误：${message}` : '执行遇到错误。']
   }
-  return undefined
+  return []
 }
 
 interface AampClientLike {
@@ -722,31 +755,36 @@ export class FeishuTaskBridgeRuntime {
     }
     this.state.tasks[aampTaskId] = baseState
 
-    const stepContent = streamEventToTaskStep(event)
-    if (!stepContent) {
-      await this.persistState()
-      return
-    }
-
-    const normalized = normalizeStepText(stepContent)
-    if (IGNORED_STREAM_STEP_TEXTS.has(normalized)) {
+    const stepContents = streamEventToTaskSteps(event)
+    if (stepContents.length === 0) {
       await this.persistState()
       return
     }
 
     const streamStepTexts = new Set(baseState.streamStepTexts ?? [])
     const buffer = this.getStreamStepBuffer(aampTaskId)
-    const pendingStepCount = buffer.steps.length
-    if (
-      streamStepTexts.has(normalized)
-      || buffer.steps.some((step) => step.normalized === normalized)
-      || (baseState.streamStepCount ?? 0) + pendingStepCount >= MAX_STREAM_STEPS_PER_TASK
-    ) {
+    let addedStep = false
+    for (const stepContent of stepContents) {
+      const normalized = normalizeStepText(stepContent)
+      const pendingStepCount = buffer.steps.length
+      if (
+        IGNORED_STREAM_STEP_TEXTS.has(normalized)
+        || streamStepTexts.has(normalized)
+        || buffer.steps.some((step) => step.normalized === normalized)
+        || (baseState.streamStepCount ?? 0) + pendingStepCount >= MAX_STREAM_STEPS_PER_TASK
+      ) {
+        continue
+      }
+
+      buffer.steps.push({ content: stepContent, normalized })
+      addedStep = true
+    }
+
+    if (!addedStep) {
       await this.persistState()
       return
     }
 
-    buffer.steps.push({ content: stepContent, normalized })
     if (buffer.steps.length >= STREAM_STEP_FLUSH_BATCH_SIZE) {
       await this.enqueueStreamStepFlush(aampTaskId)
       return
