@@ -40,7 +40,7 @@ type FeishuTaskEventIgnoreReason =
   | 'subtask_create_context_only'
   | 'task_create_deferred_to_reminder'
   | 'recurring_task_create_deferred'
-const MAX_STREAM_STEPS_PER_TASK = 16
+const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
 
@@ -303,6 +303,11 @@ const IGNORED_STREAM_STEP_TEXTS = new Set([
   'ACP agent is thinking',
   'ACP agent is composing the reply',
   'ACP response received',
+  'Tool running: Read file',
+  'Tool running: tool',
+  'Tool completed: tool',
+  'Tool running: Editing files',
+  'Tool failed: tool',
 ].map(normalizeStepText))
 
 function getPayloadText(payload: Record<string, unknown>, keys: string[]): string | undefined {
