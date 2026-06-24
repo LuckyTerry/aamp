@@ -255,7 +255,7 @@ function normalizeBridgeConfig(config: Partial<BridgeConfig>): BridgeConfig {
     mailbox: config.mailbox,
     behavior: {
       ackComment: config.behavior?.ackComment ?? true,
-      debug: config.behavior?.debug ?? false,
+      debug: false,
     },
   }
 }
@@ -274,7 +274,7 @@ export function applyFeishuRuntimeOverrides(
   else delete feishu.headers
   const behavior: BridgeConfig['behavior'] = {
     ...config.behavior,
-    ...(overrides.debug ? { debug: true } : {}),
+    debug: overrides.debug === true,
   }
 
   return {
@@ -302,7 +302,7 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
   const userIdType = options.userIdType ?? existing?.feishu.userIdType ?? 'open_id'
   const taskApiVersion = options.taskApiVersion ?? existing?.feishu.taskApiVersion ?? 'v2'
   const ackComment = options.ackComment ?? existing?.behavior.ackComment ?? true
-  const debug = options.debug ?? existing?.behavior.debug ?? false
+  const debug = false
 
   if (!targetAgentEmail) throw new Error('Target AAMP agent email is required.')
   if (!appId || !appSecret) throw new Error('Feishu App ID and App Secret are required.')
