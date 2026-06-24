@@ -23,8 +23,17 @@ The bridge dispatches only trusted task execution triggers from
 - `task_comment_create`
 - `task_comment_reply`
 - `task_comment_update`
+- `task_reminder_fire`
 
 Other task update event types are recorded as ignored and are not dispatched.
+After loading the task, the bridge also owns execution filtering that used to
+live in the event producer: task execution events no longer require current-app
+assignee metadata and do not suppress deleted or hidden tasks. Completed or
+archived task statuses are still ignored. Comment events require a latest
+non-empty comment, skip comments explicitly authored by the configured Feishu
+app (`comment.creator.type=app` and `comment.creator.id` equals the configured
+Feishu app id), and only dispatch when the loaded `agent_task_status` is in an
+execution-relevant state. Comment `author_type` alone is not used as a filter.
 
 The dispatched prompt treats handled Feishu events as execution of an existing
 Feishu task, not as a plain chat question. It carries

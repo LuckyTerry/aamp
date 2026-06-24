@@ -2,8 +2,10 @@ import type { FeishuTaskDetails, FeishuTaskDispatch, FeishuTaskEvent, FeishuTask
 
 const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
+type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 
 export interface FeishuTaskDispatchOptions {
+  feishuAppId?: string
   feishuBoe?: boolean
   feishuEnvMode?: 'boe' | 'pre' | 'ppe'
   feishuEnv?: string
@@ -35,9 +37,18 @@ export function buildFeishuTaskDispatchContext(
   }
 }
 
-function isHumanComment(authorType: string | undefined): boolean {
-  if (!authorType) return true
-  return !['agent', 'assistant', 'bot', 'system'].includes(authorType.trim().toLowerCase())
+function isCurrentAppComment(comment: FeishuTaskComment, appId: string | undefined): boolean {
+  const normalizedAppId = appId?.trim()
+  if (!normalizedAppId) return false
+  const authorType = comment.authorType.trim().toLowerCase()
+  const authorId = comment.authorId?.trim()
+  return authorType === 'app' && authorId === normalizedAppId
+}
+
+function isEffectiveComment(comment: FeishuTaskComment, appId: string | undefined): boolean {
+  const authorType = comment.authorType.trim().toLowerCase()
+  if (authorType === 'app') return !isCurrentAppComment(comment, appId)
+  return true
 }
 
 function renderSubtasks(task: FeishuTaskDetails): string[] {
@@ -67,9 +78,9 @@ function renderComments(task: FeishuTaskDetails): string[] {
   })
 }
 
-function getLatestEffectiveHumanComment(task: FeishuTaskDetails): string | undefined {
+function getLatestEffectiveComment(task: FeishuTaskDetails, appId: string | undefined): string | undefined {
   return [...(task.comments ?? [])]
-    .filter((comment) => isHumanComment(comment.authorType) && Boolean(nonEmpty(comment.content)))
+    .filter((comment) => isEffectiveComment(comment, appId) && Boolean(nonEmpty(comment.content)))
     .sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''))
     .at(-1)
     ?.content.trim()
@@ -153,7 +164,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Treat the Description section as the complete Feishu task context.',
     '- Use normalized_kind as the scenario to execute; raw_event_types are reference metadata only.',
     '- This is an existing Feishu task delegation assigned to the app, not a plain chat message and not an ACP direct-answer shortcut.',
-    '- Infer intent only from the Feishu task summary, description, child tasks, comments, latest effective human comment, and event metadata in the Description section.',
+    '- Infer intent only from the Feishu task summary, description, child tasks, comments, latest effective comment, and event metadata in the Description section.',
     '- Do not reconstruct missing intent from unrelated local files, account state, mailbox, credentials, or remote services.',
     '',
     'Intent Rules:',
@@ -221,11 +232,12 @@ export function buildFeishuTaskContext(
   event: FeishuTaskEvent,
   task: FeishuTaskDetails,
   eventKind: FeishuTaskEventKind,
+  options?: Pick<FeishuTaskDispatchOptions, 'feishuAppId'>,
 ): string {
   const description = nonEmpty(task.description) ?? EMPTY_DESCRIPTION
   const taskUrl = nonEmpty(task.url)
   const taskStatus = nonEmpty(task.status)
-  const latestHumanComment = getLatestEffectiveHumanComment(task)
+  const latestComment = getLatestEffectiveComment(task, options?.feishuAppId)
 
   return [
     'Feishu Task:',
@@ -240,7 +252,7 @@ export function buildFeishuTaskContext(
     ...renderSubtasks(task),
     'Comments:',
     ...renderComments(task),
-    ...(latestHumanComment ? [`- Latest effective human comment: ${latestHumanComment}`] : []),
+    ...(latestComment ? [`- Latest effective comment: ${latestComment}`] : []),
     'Event:',
     `- normalized_kind: ${eventKind}`,
     `- raw_event_types: ${event.eventTypes.join(',') || '(unknown)'}`,
@@ -261,7 +273,7 @@ export function buildFeishuTaskDispatch(
     taskId,
     sessionKey: `feishu-task:${task.guid}`,
     title: `Feishu Task: ${task.summary || task.guid}`,
-    bodyText: buildFeishuTaskContext(event, task, eventKind),
+    bodyText: buildFeishuTaskContext(event, task, eventKind, options),
     dispatchContext: buildFeishuTaskDispatchContext(event, task, eventKind),
     promptRules: buildFeishuTaskPromptRules(options),
   }

@@ -54,13 +54,14 @@ const task: FeishuTaskDetails = {
   comments: [
     {
       id: 'comment_1',
-      authorType: 'human',
+      authorType: 'user',
       content: '请重点补充灰度发布和回滚检查项。',
       createdAt: '1775793266000',
     },
     {
       id: 'comment_2',
-      authorType: 'agent',
+      authorType: 'app',
+      authorId: 'cli_xxx',
       content: '已收到任务派发请求，正在转交智能体处理。',
       createdAt: '1775793266100',
     },
@@ -97,7 +98,7 @@ test('buildFeishuTaskContext includes only task, child, comment, and event facts
   assert.match(context, /child_1/)
   assert.match(context, /需求确认/)
   assert.match(context, /请重点补充灰度发布和回滚检查项/)
-  assert.match(context, /Latest effective human comment:/)
+  assert.match(context, /Latest effective comment:/)
   assert.match(context, /normalized_kind: task_create/)
   assert.match(context, /raw_event_types: task_create/)
   assert.doesNotMatch(context, /Intent Rules/i)
@@ -115,6 +116,37 @@ test('buildFeishuTaskContext includes only task, child, comment, and event facts
   assert.doesNotMatch(context, /required_skill/i)
   assert.doesNotMatch(context, /aily-feishu-task-agent/i)
   assert.doesNotMatch(context, /runtime next_action_specs/i)
+})
+
+test('buildFeishuTaskContext uses user or non-current app comments as effective comments', () => {
+  const context = buildFeishuTaskContext(commentEvent, {
+    ...task,
+    comments: [
+      {
+        id: 'comment_human',
+        authorType: 'user',
+        content: '请继续推进人工补充。',
+        createdAt: '1775793266000',
+      },
+      {
+        id: 'comment_app',
+        authorType: 'app',
+        authorId: 'cli_xxx',
+        content: '已收到任务派发请求，正在转交智能体处理。',
+        createdAt: '1775793266100',
+      },
+      {
+        id: 'comment_other_app',
+        authorType: 'app',
+        authorId: 'cli_other',
+        content: '外部应用补充的有效评论。',
+        createdAt: '1775793266200',
+      },
+    ],
+  }, 'task_comment', { feishuAppId: 'cli_xxx' })
+
+  assert.match(context, /Latest effective comment: 外部应用补充的有效评论。/)
+  assert.doesNotMatch(context, /Latest effective comment: 已收到任务派发请求/)
 })
 
 test('buildFeishuTaskPromptRules includes complete handling and result rules', () => {
@@ -181,10 +213,12 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.ok(rules.includes('lark-cli task +comment --task-id "<task_id>" --as bot --content "$reply"'))
   assert.match(rules, /task_flow_intent=comment_reply, do not mark any task in progress/i)
   assert.match(rules, /only mark child tasks in progress for execution tracking/i)
+  assert.match(rules, /latest effective comment/i)
   assert.equal(countOccurrences(rules, /Feishu Write Contract:/g), 1)
   assert.equal(countOccurrences(rules, /Newline Rules:/g), 1)
   assert.equal(countOccurrences(rules, /Context Compression Contract:/g), 1)
   assert.equal(countOccurrences(rules, /Final Result Contract:/g), 1)
+  assert.doesNotMatch(rules, /latest effective human comment/i)
   assert.doesNotMatch(rules, /task_guid_123/)
   assert.doesNotMatch(rules, /请重点补充灰度发布和回滚检查项/)
   assert.doesNotMatch(rules, /not a direct user question/i)
@@ -257,7 +291,7 @@ test('buildFeishuTaskContext records comment and reminder event facts without ad
   const reminderContext = buildFeishuTaskContext(reminderFireEvent, task, 'task_reminder_fire')
 
   assert.match(commentContext, /normalized_kind: task_comment/)
-  assert.match(commentContext, /Latest effective human comment:/)
+  assert.match(commentContext, /Latest effective comment:/)
   assert.match(commentContext, /请重点补充灰度发布和回滚检查项/)
   assert.match(reminderContext, /normalized_kind: task_reminder_fire/)
   assert.match(reminderContext, /raw_event_types: task_reminder_fire/)
@@ -319,11 +353,14 @@ test('buildFeishuTaskDispatch returns stable title, session key, context, and pr
 
 test('buildFeishuTaskDispatch keeps BOE setup in prompt rules only', () => {
   const dispatch = buildFeishuTaskDispatch(event, task, 'task_create', {
+    feishuAppId: 'cli_xxx',
     feishuEnvMode: 'boe',
     feishuEnv: 'boe_task_event',
   })
 
-  assert.equal(dispatch.bodyText, buildFeishuTaskContext(event, task, 'task_create'))
+  assert.equal(dispatch.bodyText, buildFeishuTaskContext(event, task, 'task_create', {
+    feishuAppId: 'cli_xxx',
+  }))
   assert.equal(dispatch.promptRules, buildFeishuTaskPromptRules({
     feishuEnvMode: 'boe',
     feishuEnv: 'boe_task_event',

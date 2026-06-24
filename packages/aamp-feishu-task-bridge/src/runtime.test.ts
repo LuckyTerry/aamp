@@ -241,7 +241,6 @@ function buildConfig(): BridgeConfig {
       appId: 'cli_xxx',
       appSecret: 'secret',
       userIdType: 'open_id',
-      taskApiVersion: 'v2',
       eventNames: ['task.task.updated_v1'],
     },
     mailbox: {
@@ -644,10 +643,88 @@ test('runtime dispatches reminder fire Feishu task events', async () => {
   }
 })
 
+test('runtime dispatches task execution events without assignment gating', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_other_app = {
+    guid: 'task_guid_other_app',
+    taskId: 't_other_app',
+    summary: '整理上线方案',
+    status: 'todo',
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_other_app',
+      taskGuid: 'task_guid_other_app',
+      eventTypes: ['task_reminder_fire'],
+      timestamp: '1775793266154',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 1)
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_reminder_fire')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime dispatches task execution events for active todo tasks', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_done_event = {
+    guid: 'task_guid_done_event',
+    taskId: 't_done_event',
+    summary: '待执行任务',
+    status: 'todo',
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_done_event',
+      taskGuid: 'task_guid_done_event',
+      eventTypes: ['task_reminder_fire'],
+      timestamp: '1775793266154',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 1)
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_reminder_fire')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime dispatches comment events and writes reply ack comments', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_comment = {
+    guid: 'task_guid_comment',
+    taskId: 't_comment',
+    summary: '整理上线方案',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [
+      { id: 'comment_user', authorType: 'user', content: '请继续执行这个任务', createdAt: '1775793266100' },
+    ],
+  }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
     configDir,
     aampClient: fakeAamp,
@@ -673,6 +750,205 @@ test('runtime dispatches comment events and writes reply ack comments', async ()
 
     assert.equal(fakeFeishu.comments.length, 1)
     assert.equal(fakeFeishu.comments[0]?.content, '已收到您的回复，正在转交智能体处理。')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime dispatches comment events from non-current app authors', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_agent_author_comment = {
+    guid: 'task_guid_agent_author_comment',
+    taskId: 't_agent_author_comment',
+    summary: '整理上线方案',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [
+      {
+        id: 'comment_agent_author',
+        authorType: 'app',
+        authorId: 'cli_other',
+        content: '请继续执行这个任务',
+        createdAt: '1775793266100',
+      },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_agent_author_comment',
+      taskGuid: 'task_guid_agent_author_comment',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 1)
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_comment')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores comment events when latest comment is authored by the current app', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_self_comment = {
+    guid: 'task_guid_self_comment',
+    taskId: 't_self_comment',
+    summary: '整理上线方案',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [
+      {
+        id: 'comment_self',
+        authorType: 'app',
+        authorId: 'cli_xxx',
+        content: '已收到任务派发请求，正在转交智能体处理。',
+        createdAt: '1775793266100',
+      },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_self_comment',
+      taskGuid: 'task_guid_self_comment',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'comment_authored_by_current_app')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores comment events without an effective comment', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_no_comment = {
+    guid: 'task_guid_no_comment',
+    taskId: 't_no_comment',
+    summary: '整理上线方案',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_no_comment',
+      taskGuid: 'task_guid_no_comment',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'comment_without_effective_comment')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores comment events without agent task status', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_missing_agent_status = {
+    guid: 'task_guid_missing_agent_status',
+    taskId: 't_missing_agent_status',
+    summary: '整理上线方案',
+    status: 'todo',
+    comments: [
+      { id: 'comment_user', authorType: 'user', content: '继续执行这个任务', createdAt: '1775793266100' },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_missing_agent_status',
+      taskGuid: 'task_guid_missing_agent_status',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'agent_task_status_not_dispatchable')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores comment events with unsupported agent task status', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_invalid_agent_status = {
+    guid: 'task_guid_invalid_agent_status',
+    taskId: 't_invalid_agent_status',
+    summary: '整理上线方案',
+    status: 'todo',
+    agentTaskStatus: 99,
+    comments: [
+      { id: 'comment_user', authorType: 'user', content: '继续执行这个任务', createdAt: '1775793266100' },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_invalid_agent_status',
+      taskGuid: 'task_guid_invalid_agent_status',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'agent_task_status_not_dispatchable')
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1306,9 +1582,10 @@ test('runtime does not complete or comment comment_reply answered comment events
     guid: 'task_guid_reply_only',
     taskId: 't_reply_only',
     summary: '今天是周几？',
-    status: 'completed',
+    status: 'done',
+    agentTaskStatus: 3,
     comments: [
-      { id: 'comment_question', authorType: 'human', content: '我请求执行了几次？', createdAt: '1775793266100' },
+      { id: 'comment_question', authorType: 'user', content: '我请求执行了几次？', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -1360,8 +1637,9 @@ test('runtime completes complete_task answered comment events', async () => {
     taskId: 't_complete_task',
     summary: '整理恢复执行方案',
     status: 'todo',
+    agentTaskStatus: 3,
     comments: [
-      { id: 'comment_continue', authorType: 'human', content: '继续执行这个任务', createdAt: '1775793266100' },
+      { id: 'comment_continue', authorType: 'user', content: '继续执行这个任务', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -1404,9 +1682,10 @@ test('runtime still treats legacy reply_only comment_intent as comment_reply', a
     guid: 'task_guid_legacy_reply_only',
     taskId: 't_legacy_reply_only',
     summary: '查询执行次数',
-    status: 'completed',
+    status: 'done',
+    agentTaskStatus: 3,
     comments: [
-      { id: 'comment_question', authorType: 'human', content: '我请求执行了几次？', createdAt: '1775793266100' },
+      { id: 'comment_question', authorType: 'user', content: '我请求执行了几次？', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -1548,6 +1827,7 @@ test('runtime comments failed FEISHU_TASK_RESULT_JSON without fixed completion w
     await waitFor(() => {
       assert.equal(fakeFeishu.comments.length, 1)
       assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_error'])
+      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_error-evt_error']?.status, 'failed')
     })
 
     assert.equal(fakeFeishu.comments.length, 1)
