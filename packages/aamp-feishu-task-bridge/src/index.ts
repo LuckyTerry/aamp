@@ -134,7 +134,7 @@ async function runInit(args: ParsedArgs): Promise<void> {
   console.log(`Target agent: ${config.targetAgentEmail}`)
   console.log(`Feishu runtime domain: ${runtimeConfig.feishu.domain ?? 'default'}`)
   console.log(`Feishu runtime env: ${runtimeConfig.feishu.headers?.['x-tt-env'] ?? '(none)'}`)
-  console.log(`Debug: ${config.behavior.debug ? 'enabled' : 'disabled'}`)
+  console.log(`Debug: ${runtimeConfig.behavior.debug ? 'enabled' : 'disabled'}`)
   console.log(`Feishu task API: ${config.feishu.taskApiVersion}`)
   console.log(`Feishu events: ${config.feishu.eventNames.join(', ')}`)
   console.log(`ACK comment: ${config.behavior.ackComment ? 'enabled' : 'disabled'}`)

@@ -81,7 +81,24 @@ test('initializeBridgeConfig does not persist explicit Feishu env routing', asyn
     })
     assert.equal(config.feishu.domain, undefined)
     assert.equal(config.feishu.headers, undefined)
-    assert.equal(config.behavior.debug, true)
+    assert.equal(config.behavior.debug, false)
+  } finally {
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('loadBridgeConfig drops legacy persisted debug mode', async () => {
+  const configDir = await mkdir(path.join(os.tmpdir(), `aamp-feishu-task-bridge-${Date.now()}-debug-`), { recursive: true })
+  try {
+    await writeFile(getConfigPath(configDir), `${JSON.stringify({
+      ...legacyConfig,
+      behavior: {
+        ...legacyConfig.behavior,
+        debug: true,
+      },
+    }, null, 2)}\n`, 'utf8')
+    const config = await loadBridgeConfig(configDir)
+    assert.equal(config?.behavior.debug, false)
   } finally {
     await rm(configDir, { recursive: true, force: true })
   }
@@ -139,6 +156,18 @@ test('applyFeishuRuntimeOverrides drops config routing without explicit runtime 
 
   assert.equal(config.feishu.domain, undefined)
   assert.equal(config.feishu.headers, undefined)
+})
+
+test('applyFeishuRuntimeOverrides drops persisted debug without explicit runtime flag', () => {
+  const config = applyFeishuRuntimeOverrides({
+    ...legacyConfig,
+    behavior: {
+      ...legacyConfig.behavior,
+      debug: true,
+    },
+  }, {})
+
+  assert.equal(config.behavior.debug, false)
 })
 
 test('applyFeishuRuntimeOverrides supports start-time BOE overrides', () => {
