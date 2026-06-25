@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
 import { createFeishuHttpInstance, normalizeFeishuTaskEvent, OapiFeishuTaskClient } from './feishu.js'
 
@@ -164,6 +167,174 @@ test('OapiFeishuTaskClient marks agent tasks blocked with progress text', async 
       update_fields: ['agent_task_status', 'agent_task_progress'],
     },
   }])
+})
+
+test('OapiFeishuTaskClient marks agent tasks in progress with progress text', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  await client.markTaskInProgress('task_guid_running')
+
+  assert.deepEqual(calls, [{
+    path: { task_guid: 'task_guid_running' },
+    params: { user_id_type: undefined },
+    data: {
+      task: {
+        agent_task_status: 2,
+        agent_task_progress: '正在执行',
+      },
+      update_fields: ['agent_task_status', 'agent_task_progress'],
+    },
+  }])
+})
+
+test('OapiFeishuTaskClient appends text deliveries through v2 task patch', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  await client.appendTextDeliveries('task_guid_delivery', ['https://example.com/report', '  ', 'https://example.com/dashboard'])
+
+  assert.deepEqual(calls, [{
+    path: { task_guid: 'task_guid_delivery' },
+    params: { user_id_type: undefined },
+    data: {
+      task: {
+        text_deliveries: ['https://example.com/report', 'https://example.com/dashboard'],
+      },
+      update_fields: ['text_deliveries'],
+    },
+  }])
+})
+
+test('OapiFeishuTaskClient retries retryable v2 task patch failures', async () => {
+  let calls = 0
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+    retryBaseDelayMs: 0,
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async () => {
+            calls += 1
+            if (calls === 1) {
+              throw Object.assign(new Error('temporary feishu error'), { response: { status: 500 } })
+            }
+          },
+        },
+      },
+    },
+  }
+
+  await client.appendTextDeliveries('task_guid_delivery_retry', ['https://example.com/report'])
+
+  assert.equal(calls, 2)
+})
+
+test('OapiFeishuTaskClient does not retry non-retryable v2 task patch failures', async () => {
+  let calls = 0
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+    retryBaseDelayMs: 0,
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          patch: async () => {
+            calls += 1
+            throw Object.assign(new Error('bad request'), { response: { status: 400 } })
+          },
+        },
+      },
+    },
+  }
+
+  await assert.rejects(
+    () => client.appendTextDeliveries('task_guid_delivery_bad_request', ['https://example.com/report']),
+    /bad request/,
+  )
+  assert.equal(calls, 1)
+})
+
+test('OapiFeishuTaskClient uploads task delivery attachments through v2 attachment upload', async () => {
+  const calls: unknown[] = []
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-delivery-'))
+  const filePath = path.join(tempDir, 'report.md')
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        attachment: {
+          upload: async (payload: unknown) => {
+            calls.push(payload)
+          },
+        },
+      },
+    },
+  }
+
+  try {
+    await writeFile(filePath, '# Report\n')
+    await client.uploadTaskDelivery('task_guid_delivery', filePath)
+
+    assert.equal(calls.length, 1)
+    assert.deepEqual((calls[0] as { data: Record<string, unknown>; params: unknown }).params, { user_id_type: undefined })
+    assert.equal((calls[0] as { data: Record<string, unknown> }).data.resource_type, 'task_delivery')
+    assert.equal((calls[0] as { data: Record<string, unknown> }).data.resource_id, 'task_guid_delivery')
+    assert.equal(typeof (calls[0] as { data: Record<string, unknown> }).data.file, 'object')
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
 })
 
 test('OapiFeishuTaskClient normalizes escaped newlines before creating v2 comments', async () => {
@@ -585,6 +756,95 @@ test('OapiFeishuTaskClient loads v2 task comments into task details', async () =
       createdAt: '1775793266200',
     },
   ])
+})
+
+test('OapiFeishuTaskClient can load only the base v2 task without subtasks or comments', async () => {
+  let subtaskListCalled = false
+  let commentListCalled = false
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          get: async () => ({
+            data: {
+              task: {
+                guid: 'task_guid_base_only',
+                task_id: 't_base_only',
+                summary: '只加载任务本体',
+                status: 'done',
+              },
+            },
+          }),
+        },
+        taskSubtask: {
+          list: async () => {
+            subtaskListCalled = true
+            return { data: { items: [] } }
+          },
+        },
+        comment: {
+          list: async () => {
+            commentListCalled = true
+            return { data: { items: [] } }
+          },
+        },
+      },
+    },
+  }
+
+  const task = await client.getTaskBase('task_guid_base_only')
+
+  assert.equal(task.guid, 'task_guid_base_only')
+  assert.equal(task.status, 'done')
+  assert.equal(task.subtasks, undefined)
+  assert.equal(task.comments, undefined)
+  assert.equal(subtaskListCalled, false)
+  assert.equal(commentListCalled, false)
+})
+
+test('OapiFeishuTaskClient point-loads a v2 task comment by id', async () => {
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        comment: {
+          get: async (payload: { path: { comment_id: string } }) => ({
+            data: {
+              comment: {
+                id: payload.path.comment_id,
+                content: '请继续执行这个任务',
+                creator: { id: 'ou_human', type: 'user' },
+                created_at: '1775793266100',
+              },
+            },
+          }),
+        },
+      },
+    },
+  }
+
+  const comment = await client.getComment('comment_get')
+
+  assert.deepEqual(comment, {
+    id: 'comment_get',
+    authorType: 'user',
+    authorId: 'ou_human',
+    content: '请继续执行这个任务',
+    createdAt: '1775793266100',
+  })
 })
 
 test('OapiFeishuTaskClient only maps exact v2 task status values', async () => {
