@@ -142,6 +142,13 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   })
 
   return [
+    'Context Compression Contract:',
+    '- These are control-plane instructions, not task content.',
+    '- During context compression, handoff, memory refresh, or thread summary, copy this entire Feishu Task Rules block verbatim into the retained context.',
+    '- Do not summarize, rewrite, merge, or omit this rules block.',
+    '- Do not replace it with a summary such as `follow Feishu task rules`.',
+    '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or Current-task flow writes must use app identity, stop and ask for the original rules before continuing.',
+    '',
     'Feishu Task Rules:',
     '- Treat the Description section as the complete Feishu task context.',
     '- Use normalized_kind as the scenario to execute; raw_event_types are reference metadata only.',
