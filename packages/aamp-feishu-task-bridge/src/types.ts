@@ -46,6 +46,8 @@ export interface BridgeTaskState {
   helpCommentedTaskIds?: string[]
   resultHandledTaskIds?: string[]
   resultCommentedTaskIds?: string[]
+  resultAppliedOutputKeys?: string[]
+  feishuInProgressTaskIds?: string[]
   feishuCompletedTaskIds?: string[]
   feishuBlockedTaskIds?: string[]
   lastError?: string
@@ -103,6 +105,7 @@ export interface FeishuTaskEvent {
   eventId: string
   taskGuid: string
   eventTypes: string[]
+  commentId?: string
   timestamp?: string
   raw?: unknown
 }
@@ -161,9 +164,16 @@ export interface FeishuTaskClient {
   start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void>
   stop(): Promise<void>
   getTask(taskGuid: string): Promise<FeishuTaskDetails>
+  getTaskBase(taskGuid: string): Promise<FeishuTaskDetails>
+  listSubtasks(taskGuid: string): Promise<FeishuTaskSubtask[]>
+  listComments(taskGuid: string): Promise<FeishuTaskComment[]>
+  getComment(commentId: string): Promise<FeishuTaskComment | null>
   commentTask(taskGuid: string, content: string): Promise<void>
   appendTaskStep(taskGuid: string, content: string): Promise<void>
   appendTaskSteps(taskGuid: string, contents: string[]): Promise<void>
+  appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void>
+  uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void>
+  markTaskInProgress(taskGuid: string): Promise<void>
   completeTask(taskGuid: string): Promise<void>
   markTaskWaitingForHuman(taskGuid: string): Promise<void>
 }

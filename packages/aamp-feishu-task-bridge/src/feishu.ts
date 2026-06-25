@@ -7,6 +7,7 @@ import {
   type HttpInstance,
   type HttpRequestOptions,
 } from '@larksuiteoapi/node-sdk'
+import { createReadStream } from 'node:fs'
 import type {
   BridgeConfig,
   FeishuTaskClient,
@@ -51,6 +52,13 @@ type RawClient = Client & {
 
 interface OapiFeishuTaskClientOptions {
   logger?: Logger
+  retryBaseDelayMs?: number
+  retryMaxAttempts?: number
+}
+
+interface RetryOptions {
+  maxAttempts: number
+  baseDelayMs: number
 }
 
 function mergeHeaders<D>(
@@ -117,6 +125,66 @@ function getArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) && value.length > 0 ? value : undefined
 }
 
+function getErrorStatus(error: unknown): number | undefined {
+  const record = asRecord(error)
+  const response = asRecord(record?.response)
+  const status = getNumber(response?.status) ?? getNumber(record?.status) ?? getNumber(record?.statusCode)
+  return status && status > 0 ? status : undefined
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  const record = asRecord(error)
+  return getString(record?.code)
+}
+
+export function isRetryableFeishuError(error: unknown): boolean {
+  const status = getErrorStatus(error)
+  if (status !== undefined) {
+    return status === 408 || status === 429 || status >= 500
+  }
+
+  const code = getErrorCode(error)
+  return Boolean(code && [
+    'ECONNABORTED',
+    'ECONNRESET',
+    'ENETDOWN',
+    'ENETRESET',
+    'ENETUNREACH',
+    'ETIMEDOUT',
+    'EAI_AGAIN',
+  ].includes(code))
+}
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return
+  await new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function withRetry<T>(
+  operation: () => Promise<T>,
+  options: RetryOptions,
+  logger: Logger,
+  label: string,
+): Promise<T> {
+  let attempt = 0
+  let lastError: unknown
+  while (attempt < options.maxAttempts) {
+    attempt += 1
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error
+      if (attempt >= options.maxAttempts || !isRetryableFeishuError(error)) {
+        throw error
+      }
+      const delayMs = options.baseDelayMs * 2 ** (attempt - 1)
+      logger.log(`[feishu retry] ${label} attempt=${attempt} next_delay_ms=${delayMs} error=${error instanceof Error ? error.message : String(error)}`)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
+
 export function normalizeFeishuTaskEvent(raw: unknown, _eventName?: string): FeishuTaskEvent | null {
   const record = asRecord(raw)
   const eventId = getString(record?.event_id)
@@ -126,11 +194,13 @@ export function normalizeFeishuTaskEvent(raw: unknown, _eventName?: string): Fei
 
   const timestamp = getString(record?.create_time)
   const eventTypes = getStringArray(record?.event_types) ?? []
+  const commentId = getString(record?.comment_id) ?? getString(record?.commentId)
 
   return {
     eventId,
     taskGuid,
     eventTypes: [...new Set(eventTypes)],
+    ...(commentId ? { commentId } : {}),
     ...(timestamp ? { timestamp } : {}),
     raw,
   }
@@ -207,11 +277,16 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
   private readonly config: FeishuConfig
   private readonly httpInstance?: HttpInstance
   private readonly logger: Logger
+  private readonly retry: RetryOptions
   private wsClient?: WSClient
 
   constructor(config: FeishuConfig, options: OapiFeishuTaskClientOptions = {}) {
     this.config = config
     this.logger = options.logger ?? console
+    this.retry = {
+      maxAttempts: options.retryMaxAttempts ?? 3,
+      baseDelayMs: options.retryBaseDelayMs ?? 300,
+    }
     this.httpInstance = createFeishuHttpInstance(config.headers)
     this.client = new Client({
       appId: config.appId,
@@ -295,6 +370,26 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     return this.getV2Task(taskGuid)
   }
 
+  async getTaskBase(taskGuid: string): Promise<FeishuTaskDetails> {
+    this.logger.log(`[feishu task ${taskGuid}] get base via v2`)
+    return this.getV2TaskBase(taskGuid)
+  }
+
+  async listSubtasks(taskGuid: string): Promise<FeishuTaskSubtask[]> {
+    this.logger.log(`[feishu task ${taskGuid}] list subtasks via v2`)
+    return this.listV2Subtasks(taskGuid)
+  }
+
+  async listComments(taskGuid: string): Promise<FeishuTaskComment[]> {
+    this.logger.log(`[feishu task ${taskGuid}] list comments via v2`)
+    return this.listV2Comments(taskGuid)
+  }
+
+  async getComment(commentId: string): Promise<FeishuTaskComment | null> {
+    this.logger.log(`[feishu comment ${commentId}] get via v2`)
+    return this.getV2Comment(commentId)
+  }
+
   async commentTask(taskGuid: string, content: string): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
@@ -319,37 +414,70 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     await this.completeV2AgentTask(taskGuid)
   }
 
+  async markTaskInProgress(taskGuid: string): Promise<void> {
+    this.logger.log(`[feishu task ${taskGuid}] mark in progress via v2 agent_task_status`)
+    await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行')
+  }
+
   async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] block via v2 agent_task_status`)
     await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认')
   }
 
-  private async getV2Task(taskGuid: string): Promise<FeishuTaskDetails> {
-    const response = await this.client.task.v2.task.get({
+  async appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void> {
+    const textDeliveries = urls
+      .map((url) => normalizeFeishuWriteText(url).trim())
+      .filter(Boolean)
+    if (textDeliveries.length === 0) return
+    this.logger.log(`[feishu task ${taskGuid}] append ${textDeliveries.length} text deliverie(s) via v2 task patch`)
+    await withRetry(() => this.client.task.v2.task.patch({
       path: { task_guid: taskGuid },
       params: { user_id_type: this.config.userIdType },
-    })
-    const task = asRecord(response.data?.task)
-    if (!task) throw new Error(`Feishu task ${taskGuid} not found`)
+      data: {
+        task: { text_deliveries: textDeliveries },
+        update_fields: ['text_deliveries'],
+      },
+    }), this.retry, this.logger, `task.patch text_deliveries task=${taskGuid}`)
+  }
 
-    const details = mapV2Task(task, taskGuid)
+  async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
+    this.logger.log(`[feishu task ${taskGuid}] upload task delivery via v2 attachment`)
+    await withRetry(() => this.client.task.v2.attachment.upload({
+      params: { user_id_type: this.config.userIdType },
+      data: {
+        resource_type: 'task_delivery',
+        resource_id: taskGuid,
+        file: createReadStream(filePath),
+      },
+    }), this.retry, this.logger, `attachment.upload task=${taskGuid}`)
+  }
+
+  private async getV2Task(taskGuid: string): Promise<FeishuTaskDetails> {
+    const details = await this.getV2TaskBase(taskGuid)
     details.subtasks = await this.listV2Subtasks(details.guid)
-    details.comments = await this.listV2Comments(details.guid).catch((error: Error) => {
-      this.logger.log(`[feishu task ${taskGuid}] list comments failed: ${error.message}`)
-      return []
-    })
+    details.comments = await this.listV2Comments(details.guid)
     return details
   }
 
+  private async getV2TaskBase(taskGuid: string): Promise<FeishuTaskDetails> {
+    const response = await withRetry(() => this.client.task.v2.task.get({
+      path: { task_guid: taskGuid },
+      params: { user_id_type: this.config.userIdType },
+    }), this.retry, this.logger, `task.get task=${taskGuid}`)
+    const task = asRecord(response.data?.task)
+    if (!task) throw new Error(`Feishu task ${taskGuid} not found`)
+    return mapV2Task(task, taskGuid)
+  }
+
   private async commentV2Task(taskGuid: string, content: string): Promise<void> {
-    await this.client.task.v2.comment.create({
+    await withRetry(() => this.client.task.v2.comment.create({
       params: { user_id_type: this.config.userIdType },
       data: {
         content,
         resource_type: 'task',
         resource_id: taskGuid,
       },
-    })
+    }), this.retry, this.logger, `comment.create task=${taskGuid}`)
   }
 
   private async appendV2TaskSteps(taskGuid: string, contents: string[]): Promise<void> {
@@ -378,13 +506,13 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await rawClient.httpInstance.request({
+    await withRetry(() => rawClient.httpInstance.request({
       method: 'POST',
       url: `${rawClient.domain}/open-apis/task/v2/agent_task_step_info/append_task_steps`,
       params: formatted.params,
       data: formatted.data,
       headers: formatted.headers,
-    })
+    }), this.retry, this.logger, `append_task_steps task=${taskGuid}`)
   }
 
   private async registerV2AgentWithRawRequest(payload: RegisterAgentPayload): Promise<void> {
@@ -397,13 +525,13 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await rawClient.httpInstance.request({
+    await withRetry(() => rawClient.httpInstance.request({
       method: 'POST',
       url: `${rawClient.domain}/open-apis/task/v2/agent/register_agent`,
       params: formatted.params,
       data: formatted.data,
       headers: formatted.headers,
-    })
+    }), this.retry, this.logger, 'agent.register_agent')
   }
 
   private async subscribeV2TaskEventsWithRawRequest(payload: TaskSubscriptionPayload): Promise<void> {
@@ -416,13 +544,13 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await rawClient.httpInstance.request({
+    await withRetry(() => rawClient.httpInstance.request({
       method: 'POST',
       url: `${rawClient.domain}/open-apis/task/v2/task_v2/task_subscription`,
       params: formatted.params,
       data: formatted.data,
       headers: formatted.headers,
-    })
+    }), this.retry, this.logger, 'task_subscription')
   }
 
   private async completeV2AgentTask(taskGuid: string): Promise<void> {
@@ -438,28 +566,28 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       'agent_task_status',
       ...(agentTaskProgress ? ['agent_task_progress'] : []),
     ]
-    await this.client.task.v2.task.patch({
+    await withRetry(() => this.client.task.v2.task.patch({
       path: { task_guid: taskGuid },
       params: { user_id_type: this.config.userIdType },
       data: {
         task,
         update_fields: updateFields,
       },
-    })
+    }), this.retry, this.logger, `task.patch agent_task_status task=${taskGuid}`)
   }
 
   private async listV2Subtasks(taskGuid: string): Promise<FeishuTaskSubtask[]> {
     const subtasks: FeishuTaskSubtask[] = []
     let pageToken: string | undefined
     do {
-      const response = await this.client.task.v2.taskSubtask.list({
+      const response = await withRetry(() => this.client.task.v2.taskSubtask.list({
         path: { task_guid: taskGuid },
         params: {
           user_id_type: this.config.userIdType,
           page_size: 50,
           ...(pageToken ? { page_token: pageToken } : {}),
         },
-      })
+      }), this.retry, this.logger, `taskSubtask.list task=${taskGuid}`)
       const items = response.data?.items ?? []
       subtasks.push(...items
         .map((item) => mapV2Subtask(item as JsonRecord))
@@ -473,7 +601,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     const comments: FeishuTaskComment[] = []
     let pageToken: string | undefined
     do {
-      const response = await this.client.task.v2.comment.list({
+      const response = await withRetry(() => this.client.task.v2.comment.list({
         params: {
           user_id_type: this.config.userIdType,
           resource_type: 'task',
@@ -481,7 +609,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
           page_size: 50,
           ...(pageToken ? { page_token: pageToken } : {}),
         },
-      })
+      }), this.retry, this.logger, `comment.list task=${taskGuid}`)
       const items = response.data?.items ?? []
       comments.push(...items
         .map((item) => mapV2Comment(item as JsonRecord))
@@ -489,5 +617,14 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       pageToken = response.data?.has_more ? getString(response.data.page_token) : undefined
     } while (pageToken)
     return comments
+  }
+
+  private async getV2Comment(commentId: string): Promise<FeishuTaskComment | null> {
+    const response = await withRetry(() => this.client.task.v2.comment.get({
+      path: { comment_id: commentId },
+      params: { user_id_type: this.config.userIdType },
+    }), this.retry, this.logger, `comment.get comment=${commentId}`)
+    const comment = asRecord(response.data?.comment)
+    return comment ? mapV2Comment(comment) : null
   }
 }

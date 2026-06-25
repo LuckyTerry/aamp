@@ -85,9 +85,9 @@ Modes:
 Defaults:
   task.dispatch source: feishu-task
   task.ack: writes one default Feishu task comment
-  task.help_needed: writes the help question as one Feishu task comment, then marks the Feishu task blocked
-  task.stream.opened: selected status/progress/error events are throttled into Feishu task steps
-  task.result: FEISHU_TASK_RESULT_JSON is summarized and completed by the bridge; rejected/malformed results close as failures
+  task.help_needed: writes the help question as one Feishu task comment, then marks the Feishu task flow blocked
+  task.stream.opened: marks tasks in progress on the first effective stream event; selected status/progress/error events are throttled into Feishu task steps
+  task.result: applies v2 FEISHU_TASK_RESULT_JSON outputs, then completes or blocks the Feishu task flow; rejected/malformed results close as failures
   card.*: not consumed by this bridge
 `)
 }

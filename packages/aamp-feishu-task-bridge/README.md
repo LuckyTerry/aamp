@@ -9,11 +9,13 @@ This package is intentionally thin:
 - Feishu task event -> AAMP `task.dispatch` -> target Agent
 - AAMP `task.ack` -> one default Feishu task comment
 - AAMP `task.help_needed` -> one Feishu task comment with the help question,
-  then mark the Feishu task blocked/waiting for human input
-- AAMP `task.stream.opened` + selected stream events -> throttled Feishu task
-  steps on the parent task
-- AAMP `task.result` -> parse `FEISHU_TASK_RESULT_JSON`, write a summary
-  comment, and complete child tasks before the parent task for success/failure
+  then mark the Feishu task and child tasks blocked/waiting for human input
+- AAMP `task.stream.opened` + stream events -> mark the Feishu task and child
+  tasks in progress on the first effective event; selected stream events are
+  throttled into Feishu task steps on the parent task
+- AAMP `task.result` -> parse `FEISHU_TASK_RESULT_JSON`, write result outputs
+  as comments, text deliveries, or task_delivery attachments, then complete or
+  block child tasks before the parent task
 - `card.*`, cancel, and delete are not consumed by this bridge
 
 The bridge dispatches only trusted task execution triggers from
@@ -40,7 +42,7 @@ Feishu task, not as a plain chat question. It carries
 `source=feishu-task`, task guid/id/status, event id/types, event kind, and
 whether the task has children in dispatch context. The dispatched `bodyText`
 is also sent as `rawBodyText`; it contains only Feishu task context facts: the
-parent task text, child task text, loaded task comments, latest effective human
+parent task text, child task text, loaded task comments, latest effective
 comment, and event metadata. This lets the target Agent infer intent directly
 without installing a Feishu task skill.
 
@@ -49,30 +51,36 @@ For ACP agents, the bridge also sends `promptRules` on `task.dispatch` so
 rule prompt. Feishu execution constraints, environment-switch commands, result
 schema, and deliverable rules live in `promptRules`, not in `bodyText`. This
 keeps task context focused while preventing Feishu task events from being
-treated as simple direct-answer questions. The target Agent should use local
-`lark-cli` or `larksuite-cli` for direct Feishu task writes requested by those
-rules:
+treated as simple direct-answer questions. Current-task flow writes are owned by
+the bridge:
 
-- Write delivery only to the parent task when there is a concrete deliverable.
-- For task execution, mark the parent task in progress before material work; child
-  tasks are context-tracking only and never receive steps or deliverables.
-- Do not write steps directly; selected `status` / `progress` / `error` stream
-  events are converted by this bridge into Feishu task steps.
-- Do not complete tasks directly; the bridge completes child tasks before the
-  parent after parsing the final result.
+- Do not write current-task comments, status, steps, or deliverables directly.
+- The bridge marks parent and child tasks in progress from stream events.
+- The bridge writes `reply_comment`, `link_delivery`, `file_delivery`, and
+  `text_delivery` outputs to the parent task.
+- The bridge completes or blocks parent and child tasks after parsing the final
+  result.
 
 The final result must be an `AAMP_RESULT_JSON` object containing only `output`,
 and `output` must start with `FEISHU_TASK_RESULT_JSON:` followed by compact JSON:
 
 ```text
-AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\"status\":\"success\",\"summary\":\"...\",\"deliverable_written\":true,\"deliverable_summary\":\"...\"}"}
+AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\"schema\":\"feishu_task_result.v2\",\"status\":\"succeeded\",\"summary\":\"...\",\"outputs\":[{\"kind\":\"reply_comment\",\"content\":\"...\"}]}"}
 ```
 
-Use `status=answered` when the agent already wrote a normal Feishu comment and
-there is no separate deliverable. Use `status=success` for completed work with
-a concrete deliverable, `status=failed` for execution that
-ended with a blocker but should still close the Feishu task, and
-`status=need_help` when human input is required before continuing.
+Use `status=succeeded` when the bridge should write one or more outputs and
+complete the Feishu task flow. Supported outputs are:
+
+- `reply_comment`: write a Feishu task comment with `content`.
+- `link_delivery`: append `url` to parent task `text_deliveries`.
+- `file_delivery`: upload an absolute local `path` as a `task_delivery`
+  attachment.
+- `text_delivery`: write `content` with `format=markdown` or
+  `format=plain_text` to a temporary file and upload it as `task_delivery`.
+
+Use `status=need_help` when human input is required before continuing. Use
+`status=failed` for exceptional execution failures; the bridge still completes
+the Feishu task flow after writing the failure comment.
 
 Default ACK comments are scenario-specific:
 
@@ -81,11 +89,11 @@ Default ACK comments are scenario-specific:
 
 When the target Agent returns a `HELP:` response, `aamp-acp-bridge` converts it
 to `task.help_needed`. This bridge writes the help `question` body back to the
-Feishu task exactly once for the corresponding AAMP task id, then marks the
-task blocked/waiting for human input. When the target Agent returns
-`task.result`, successful and failed `FEISHU_TASK_RESULT_JSON` payloads are
-summarized as a Feishu comment and completed by the bridge. Rejected or malformed
-results are treated as failures and completed with an error summary.
+Feishu task exactly once for the corresponding AAMP task id, then marks the task
+and child tasks blocked/waiting for human input. When the target Agent returns
+`task.result`, the bridge applies v2 `FEISHU_TASK_RESULT_JSON` outputs and then
+completes or blocks the Feishu task flow. Rejected or malformed results are
+treated as failures and completed with an error summary.
 
 ## Usage
 
