@@ -27,6 +27,9 @@ import {
 import type { ParsedCliStreamUpdate } from './stream-parser.js'
 import type { BridgeRuntimeEvent } from './bridge.js'
 
+const IDENTITY_AUTH_RETRY_COUNT = 5
+const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
+
 export interface AgentIdentity {
   email: string
   mailboxToken: string
@@ -114,6 +117,14 @@ function matchCombinedSenderPolicy(
   if (pairedDecision.allowed) return pairedDecision
   if (configuredDecision.allowed) return configuredDecision
   return configuredDecision.reason ? configuredDecision : pairedDecision
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function toBasicAuth(email: string, password: string): string {
+  return `Basic ${Buffer.from(`${email}:${password}`).toString('base64')}`
 }
 
 export interface AgentBridgeStartOptions {
@@ -941,15 +952,24 @@ export class AgentBridge {
       try {
         const data = JSON.parse(readFileSync(credFile, 'utf-8'))
         if (data.email && data.mailboxToken && data.smtpPassword) {
-          return {
+          const identity = {
             email: data.email,
             mailboxToken: data.mailboxToken,
             smtpPassword: data.smtpPassword,
           }
+          const authState = await this.checkIdentityAuthorization(identity)
+          if (authState === 'authorized' || authState === 'unknown') {
+            return identity
+          }
+          console.warn(`[${this.name}] Stored AAMP credentials are unauthorized; re-registering mailbox`)
         }
       } catch { /* re-register */ }
     }
 
+    return this.registerIdentity(credFile)
+  }
+
+  private async registerIdentity(credFile: string): Promise<AgentIdentity> {
     const slug = this.agentConfig.slug ?? `${this.agentConfig.name}-cli-bridge`
     const description = this.agentConfig.description ?? `${this.agentConfig.name} via CLI bridge`
     const creds = await AampClient.registerMailbox({
@@ -965,6 +985,33 @@ export class AgentBridge {
       smtpPassword: creds.smtpPassword,
     }, null, 2))
 
+    await this.waitForIdentityAuthorization(creds)
     return creds
+  }
+
+  private async checkIdentityAuthorization(identity: AgentIdentity): Promise<'authorized' | 'unauthorized' | 'unknown'> {
+    try {
+      const base = this.aampHost.replace(/\/$/, '')
+      const res = await fetch(`${base}/.well-known/jmap`, {
+        headers: { Authorization: toBasicAuth(identity.email, identity.smtpPassword) },
+      })
+      if (res.ok) return 'authorized'
+      if (res.status === 401 || res.status === 403) return 'unauthorized'
+      return 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  private async waitForIdentityAuthorization(identity: AgentIdentity): Promise<void> {
+    for (let attempt = 1; attempt <= IDENTITY_AUTH_RETRY_COUNT; attempt += 1) {
+      const authState = await this.checkIdentityAuthorization(identity)
+      if (authState === 'authorized' || authState === 'unknown') return
+      if (attempt < IDENTITY_AUTH_RETRY_COUNT) {
+        await sleep(IDENTITY_AUTH_RETRY_DELAY_MS)
+      }
+    }
+
+    throw new Error(`Registered AAMP credentials for ${identity.email} are not authorized by JMAP`)
   }
 }

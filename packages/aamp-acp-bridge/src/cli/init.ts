@@ -46,6 +46,12 @@ interface SelectItem<T extends string> {
 
 type ConnectionSetupMethod = 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later'
 
+interface RunInitOptions {
+  agent?: string
+  aampHost?: string
+  connectionSetup?: ConnectionSetupMethod
+}
+
 async function multiSelect<T extends string>(
   rl: ReturnType<typeof createInterface>,
   prompt: string,
@@ -475,13 +481,15 @@ export function renderPairingCode(name: string, mailbox: string, pairingFile: st
   console.log(`  Pairing URL: ${pairing.connectUrl}`)
 }
 
-export async function runInit(configPath: string, opts: { agent?: string } = {}): Promise<boolean> {
+export async function runInit(configPath: string, opts: RunInitOptions = {}): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
 
   console.log('\nAAMP ACP Bridge Setup\n')
 
   // 1. AAMP host
-  const aampHostInput = (await ask(rl, '? AAMP Service URL (default: https://meshmail.ai): ')).trim()
+  const aampHostInput = opts.aampHost
+    ? opts.aampHost
+    : (await ask(rl, '? AAMP Service URL (default: https://meshmail.ai): ')).trim()
   const aampHost = aampHostInput || 'https://meshmail.ai'
   if (!aampHost) { rl.close(); throw new Error('AAMP host is required') }
 
@@ -558,7 +566,12 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
     const senderPoliciesFile = defaultSenderPoliciesFile(name)
     const previousPolicies = previousSenderPolicies.get(name)
     const canReuseSenderPolicy = getReusableSenderPolicies(name, previousPolicies, previousSenderPolicies).length > 0
-    const connectionSetup = await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    const connectionSetup = opts.connectionSetup
+      ?? await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    if (connectionSetup === 'reuse-sender-policy' && !canReuseSenderPolicy) {
+      rl.close()
+      throw new Error(`Cannot reuse sender policy for ${name}: no existing sender policies found`)
+    }
     const senderPolicies = connectionSetup === 'manual-sender-policy' || connectionSetup === 'reuse-sender-policy'
       ? await promptSenderPolicies(
           rl,

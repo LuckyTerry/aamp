@@ -340,11 +340,17 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
       smtpPassword: config.mailbox.smtpPassword,
       baseUrl: config.mailbox.baseUrl,
     })
-    await client.sendPairRequest({
-      to: pairing.mailbox,
-      pairCode: pairing.pairCode,
-      dispatchContextRules: pairing.dispatchContextRules ?? { source: ['feishu-task'] },
-    })
+    try {
+      await client.sendPairRequest({
+        to: pairing.mailbox,
+        pairCode: pairing.pairCode,
+        dispatchContextRules: pairing.dispatchContextRules ?? { source: ['feishu-task'] },
+      })
+    } catch (error) {
+      throw new Error(`AAMP pair request failed for ${pairing.mailbox}: ${(error as Error).message}`, {
+        cause: error,
+      })
+    }
   }
 
   return config

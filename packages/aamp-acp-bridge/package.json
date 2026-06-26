@@ -1,10 +1,10 @@
 {
-  "name": "@luckyterry/aamp-acp-bridge",
+  "name": "@zengxingyuan/aamp-acp-bridge",
   "files": [
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.28-dev.7",
+  "version": "0.1.28-dev.11",
   "description": "Bridge ACP-compatible agents (Claude, Codex, Gemini, etc.) into the AAMP email network — zero code, config-driven",
   "type": "module",
   "main": "dist/index.js",

@@ -141,6 +141,12 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
       },
     ],
   })
+  const answeredBridgeCommentExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'answered',
+    summary: 'The direct reply text that the bridge should write as a Feishu task comment.',
+    reply_written: false,
+  })
   const deliveryExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
@@ -205,7 +211,8 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '',
     'Outcome Rules:',
     '- Normal successful outcomes use status=succeeded with one or more outputs.',
-    '- Use reply_comment output when the user-visible result is just a normal direct answer.',
+    '- Use status=answered when the user-visible result is just a normal direct reply. If you wrote the reply as a normal Feishu task comment yourself, set reply_written=true and the bridge will not add another result comment. If you cannot write the Feishu comment, set reply_written=false and put the exact reply text in summary; the bridge will comment summary.',
+    '- Use reply_comment output only for backward compatibility when returning status=succeeded.',
     '- Use file_delivery, link_delivery, or text_delivery outputs for concrete deliverables: file, image, document link, long-form text, or rich text.',
     '- Use status=need_help when user input is required before continuing. Do not write the help comment yourself; the bridge will comment the question field.',
     '- Use status=failed only for exceptional execution failures. Do not write the failure comment yourself; the bridge will comment it.',
@@ -224,6 +231,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Inside JSON text, JSON strings must escape line breaks as `\\n`; after parsing, those escapes become actual LF newlines in user-visible fields.',
     '- Before finalizing, validate that JSON.parse(<outer-json>).output starts with `FEISHU_TASK_RESULT_JSON:`, and JSON.parse(output.slice(marker.length)) succeeds.',
     '- Use schema=feishu_task_result.v2.',
+    '- Use status=answered when there is no separate deliverable. Include reply_written=true if you already wrote a Feishu comment, or reply_written=false if the bridge should comment summary.',
     '- Use status=succeeded when the task result is ready for the bridge to write.',
     '- Use status=need_help when you need human input before continuing.',
     '- Use status=failed only for exceptional execution failures.',
@@ -238,6 +246,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Do not include structuredResult.',
     '- Do not include ACP attachments or FILE references; if a deliverable is needed, return file_delivery, link_delivery, or text_delivery.',
     `- Example reply_comment: ${replyCommentExample}`,
+    `- Example answered bridge-comment: ${answeredBridgeCommentExample}`,
     `- Example delivery: ${deliveryExample}`,
     `- Example failure: ${failureExample}`,
     `- Example need_help: ${helpExample}`,

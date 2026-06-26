@@ -14,17 +14,6 @@ type StructuredPayload = {
   attachments?: ResultAttachmentRef[]
 }
 
-function isConversationalTask(task: TaskDispatch): boolean {
-  const source = task.dispatchContext?.source?.trim().toLowerCase()
-  return source === 'feishu' || source === 'wechat' || source === 'ios'
-}
-
-function displayAgentName(task: TaskDispatch, agentName?: string): string {
-  const trimmed = agentName?.trim()
-  if (trimmed) return trimmed
-  return task.to.split('@')[0] || 'the connected agent'
-}
-
 function isCliTranscriptHeader(line: string): boolean {
   return /^\[(acpx|client|tool|done|error|warning)\](?:\s|$)/i.test(line)
 }
@@ -170,10 +159,9 @@ function parseStructuredPayload(value: unknown): StructuredPayload | null {
     ? normalizeStructuredResult(value)
     : normalizeStructuredResult(record?.structuredResult ?? record?.structured_result)
   const attachments = normalizeAttachments(record?.attachments ?? record?.attachment)
-
-  if (!structuredResult?.length && !attachments?.length) return null
-
   const output = asString(record?.output)
+
+  if (!output && !structuredResult?.length && !attachments?.length) return null
 
   return {
     ...(output ? { output } : {}),
@@ -348,6 +336,46 @@ function extractResultPayload(text: string): {
   return { output: text.trim() }
 }
 
+function hasPromptRules(task: TaskDispatch): boolean {
+  return Boolean(task.promptRules?.trim())
+}
+
+function isConversationalTask(task: TaskDispatch): boolean {
+  if (hasPromptRules(task)) return false
+  const source = task.dispatchContext?.source?.trim().toLowerCase()
+  return source === 'feishu' || source === 'wechat' || source === 'ios'
+}
+
+function displayAgentName(task: TaskDispatch, agentName?: string): string {
+  const trimmed = agentName?.trim()
+  if (trimmed) return trimmed
+  return task.to.split('@')[0] || 'the connected agent'
+}
+
+function renderTaskPromptRules(promptRules: string | undefined): string[] {
+  const override = promptRules?.trim()
+  if (override) return [override]
+
+  return [
+    `Execution rules:`,
+    `- Treat the Description section and any prior thread context below as the only task context you were given.`,
+    `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct the task from local files, account state, or remote services.`,
+    `- Do not search outside the current working directory unless the task explicitly asks you to inspect a specific external path.`,
+    `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to figure out what the task probably meant.`,
+    `- For simple chat messages that are fully present in the prompt, answer them directly without workspace exploration.`,
+    ``,
+    `Please complete this task and output your result directly.`,
+    `Keep your final reply limited to the final user-facing result.`,
+    `Do not include planning notes, thought process, tool logs, or intermediate progress updates in the final reply.`,
+    `If you cannot complete the task and need more information, start your response with "HELP:" followed by your question.`,
+    ``,
+    buildStructuredResultInstructions(),
+    ``,
+    `If you create any files as part of this task, list each file path at the end of your response in this exact format:`,
+    `FILE:/absolute/path/to/file`,
+  ]
+}
+
 export function buildPrompt(task: TaskDispatch, threadContextText?: string, agentName?: string): string {
   const agentDisplayName = displayAgentName(task, agentName)
   const dispatchContextLines = task.dispatchContext && Object.keys(task.dispatchContext).length > 0
@@ -404,16 +432,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
-        `Execution rules:`,
-        `- Treat the Description section and prior thread context as the only task context.`,
-        `- If you need more information, start your response with "HELP:" followed by your question.`,
-        `- Keep your final reply limited to the final user-facing result.`,
-        `- Do not include tool logs or intermediate progress updates in the final reply.`,
-        ``,
-        buildStructuredResultInstructions(),
-        ``,
-        `If you create files, list each file path at the end in this exact format:`,
-        `FILE:/absolute/path/to/file`,
+        ...renderTaskPromptRules(task.promptRules),
       ]
 
   return parts.filter(Boolean).join('\n')

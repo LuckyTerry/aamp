@@ -71,6 +71,20 @@ function getAgent(config: BridgeConfig, agentName: string): AgentConfig {
   return agent
 }
 
+function getConnectionSetupOption(): 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later' | undefined {
+  const value = getOptionValue('--connection-setup')
+  if (!value) return undefined
+  if (
+    value === 'pairing-code'
+    || value === 'manual-sender-policy'
+    || value === 'reuse-sender-policy'
+    || value === 'later'
+  ) {
+    return value
+  }
+  throw new Error('--connection-setup must be one of pairing-code, manual-sender-policy, reuse-sender-policy, later')
+}
+
 function loadAgentCredentials(agent: AgentConfig): { email: string; smtpPassword: string } {
   const credFile = resolveCredentialsFile(agent.credentialsFile, agent.name)
   const creds = JSON.parse(readFileSync(credFile, 'utf-8')) as {
@@ -180,14 +194,18 @@ async function main() {
         console.log(JSON.stringify(result, null, 2))
         break
       }
-      const initialized = await runInit(configPath)
+      const initialized = await runInit(configPath, {
+        agent: getOptionValue('--agent'),
+        aampHost: getOptionValue('--aamp-host'),
+        connectionSetup: getConnectionSetupOption(),
+      })
       if (!initialized) break
       if (args.includes('--no-start')) {
         console.log(`CLI bridge not started because --no-start was provided.`)
         console.log(`Run: npx aamp-cli-bridge start\n`)
         break
       }
-      await startBridge(configPath, { quiet: true })
+      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent') })
       break
     }
 
@@ -378,7 +396,7 @@ async function main() {
 AAMP CLI Bridge -- Connect direct CLI agents to the AAMP email network
 
 Usage:
-  aamp-cli-bridge init [--no-start]    Interactive setup wizard, then start bridge
+  aamp-cli-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start]
   aamp-cli-bridge init --json --input -  Non-interactive setup for desktop clients
   aamp-cli-bridge start [--agent NAME] [--config X] [--json]  Start the bridge (default: ~/.aamp/cli-bridge/config.json)
   aamp-cli-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
@@ -397,6 +415,7 @@ Usage:
 Examples:
   npx aamp-cli-bridge profile-maker
   npx aamp-cli-bridge init
+  npx aamp-cli-bridge init --agent codem --aamp-host https://meshmail.ai --connection-setup pairing-code
   npx aamp-cli-bridge init --no-start
   npx aamp-cli-bridge pair --agent codex
   npx aamp-cli-bridge start

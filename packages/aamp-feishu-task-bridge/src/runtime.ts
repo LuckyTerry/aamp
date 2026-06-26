@@ -265,6 +265,7 @@ function describeFeishuTaskSubscription(
 
 type TaskResultDisposition =
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
+  | { kind: 'answered'; summary?: string; replyWritten?: boolean }
   | { kind: 'failure'; summary?: string; message: string }
   | { kind: 'help_needed'; message: string }
 
@@ -292,6 +293,10 @@ function getString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const normalized = normalizeResultText(value).trim()
   return normalized ? normalized : undefined
+}
+
+function getBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function sanitizeDeliveryFileName(value: string): string {
@@ -415,6 +420,15 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     const question = getString(payload.question)
     if (schema !== 'feishu_task_result.v2') {
       return { kind: 'failure', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
+    }
+
+    const replyWritten = getBoolean(payload.reply_written)
+    if (status === 'answered') {
+      return {
+        kind: 'answered',
+        ...(summary ? { summary } : {}),
+        ...(replyWritten != null ? { replyWritten } : {}),
+      }
     }
 
     if (status === 'succeeded') {
@@ -1471,6 +1485,31 @@ export class FeishuTaskBridgeRuntime {
       }
 
       const disposition = classifyTaskResult(result)
+      if (disposition.kind === 'answered') {
+        if (disposition.replyWritten === false && disposition.summary) {
+          await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
+        }
+
+        const shouldCompleteFeishuTask = flushedTaskState.feishuEventKind !== 'task_comment'
+        if (shouldCompleteFeishuTask) {
+          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+        }
+
+        const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
+        const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
+        resultHandledTaskIds.add(result.taskId)
+        this.state.tasks[result.taskId] = {
+          ...latestTaskState,
+          status: 'completed',
+          resultHandledTaskIds: [...resultHandledTaskIds],
+          lastError: undefined,
+          updatedAt: new Date().toISOString(),
+        }
+        await this.persistState()
+        this.logger.log(`[aamp result] answered task=${result.taskId}`)
+        return
+      }
+
       if (disposition.kind === 'help_needed') {
         await this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message)
         await this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
@@ -1743,6 +1782,27 @@ export class FeishuTaskBridgeRuntime {
     }
     await this.persistState()
     this.debugLog(`[aamp result ${aampTaskId}] commented help-needed on Feishu task ${latestTaskState.taskGuid}`)
+  }
+
+  private async commentAnsweredResultOnce(aampTaskId: string, taskState: BridgeTaskState, summary: string): Promise<void> {
+    const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
+    if ((latestTaskState.resultCommentedTaskIds ?? []).includes(aampTaskId)) {
+      this.logger.log(`[aamp result ${aampTaskId}] answered comment already recorded`)
+      return
+    }
+
+    this.debugLog(`[aamp result ${aampTaskId}] commenting answered result on Feishu task ${latestTaskState.taskGuid}`)
+    await this.feishu.commentTask(latestTaskState.taskGuid, summary)
+
+    const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
+    resultCommentedTaskIds.add(aampTaskId)
+    this.state.tasks[aampTaskId] = {
+      ...latestTaskState,
+      resultCommentedTaskIds: [...resultCommentedTaskIds],
+      updatedAt: new Date().toISOString(),
+    }
+    await this.persistState()
+    this.debugLog(`[aamp result ${aampTaskId}] commented answered result on Feishu task ${latestTaskState.taskGuid}`)
   }
 
   private async commentTaskResultOnce(

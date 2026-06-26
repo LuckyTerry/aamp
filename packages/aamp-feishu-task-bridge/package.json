@@ -1,10 +1,10 @@
 {
-  "name": "@luckyterry/aamp-feishu-task-bridge",
+  "name": "@zengxingyuan/aamp-feishu-task-bridge",
   "files": [
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.1-dev.7",
+  "version": "0.1.1-dev.10",
   "description": "Local Feishu task event bridge for dispatching task execution to an AAMP agent.",
   "type": "module",
   "main": "dist/index.js",
@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.63.1",
+    "@luckyterry/aamp-sdk": "^0.1.24-dev.1",
     "aamp-sdk": "npm:@luckyterry/aamp-sdk@0.1.24-dev.1"
   },
   "devDependencies": {

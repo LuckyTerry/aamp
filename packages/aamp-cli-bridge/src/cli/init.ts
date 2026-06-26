@@ -41,6 +41,12 @@ interface SelectItem<T extends string> {
 
 type ConnectionSetupMethod = 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later'
 
+interface RunInitOptions {
+  agent?: string
+  aampHost?: string
+  connectionSetup?: ConnectionSetupMethod
+}
+
 async function multiSelect<T extends string>(
   rl: ReturnType<typeof createInterface>,
   prompt: string,
@@ -648,7 +654,7 @@ export function renderPairingCode(name: string, mailbox: string, pairingFile: st
   console.log(`  Pairing URL: ${pairing.connectUrl}`)
 }
 
-export async function runInit(configPath: string): Promise<boolean> {
+export async function runInit(configPath: string, opts: RunInitOptions = {}): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   const previousConfig = loadPreviousConfig(configPath)
   const previousAgents = new Map((previousConfig?.agents ?? []).map((agent) => [agent.name, agent]))
@@ -656,7 +662,9 @@ export async function runInit(configPath: string): Promise<boolean> {
   console.log('\nAAMP CLI Bridge Setup\n')
 
   const defaultAampHost = previousConfig?.aampHost ?? 'https://meshmail.ai'
-  const aampHostInput = (await ask(rl, `? AAMP Service URL (default: ${defaultAampHost}): `)).trim()
+  const aampHostInput = opts.aampHost
+    ? opts.aampHost
+    : (await ask(rl, `? AAMP Service URL (default: ${defaultAampHost}): `)).trim()
   const aampHost = aampHostInput || defaultAampHost
 
   try {
@@ -671,9 +679,14 @@ export async function runInit(configPath: string): Promise<boolean> {
     console.log(`  Warning: Could not reach ${aampHost} -- continuing anyway\n`)
   }
 
-  console.log('? Scanning CLI profiles...')
+  console.log(opts.agent ? `? Scanning CLI profile: ${opts.agent}` : '? Scanning CLI profiles...')
   const detected: ProfileCandidate[] = []
   const candidates = collectProfileCandidates(previousConfig)
+    .filter((candidate) => !opts.agent || candidate.name === opts.agent)
+  if (opts.agent && candidates.length === 0) {
+    rl.close()
+    throw new Error(`Unknown CLI profile "${opts.agent}". Built-in profiles: ${getBuiltinCliProfileNames().join(', ')}`)
+  }
   for (const [index, candidate] of candidates.entries()) {
     renderScanProgress(index + 1, candidates.length, candidate)
     const scanned = detectProfileCandidate(candidate)
@@ -683,18 +696,20 @@ export async function runInit(configPath: string): Promise<boolean> {
   }
   console.log()
 
-  const selected = await multiSelect(
-    rl,
-    '? Select CLI profiles to bridge',
-    detected.map((candidate) => ({
-      value: candidate.name,
-      label: `${candidate.name} [${candidate.source}]`,
-      description: candidate.command
-        ? `${candidate.command} (${candidate.version ?? 'detected'})`
-        : `${profileLabel(candidate.cliProfile)}${candidate.existingAgent ? ' (already configured)' : ''}`,
-      selected: Boolean(candidate.existingAgent),
-    })),
-  )
+  const selected = opts.agent
+    ? detected.map((candidate) => candidate.name)
+    : await multiSelect(
+        rl,
+        '? Select CLI profiles to bridge',
+        detected.map((candidate) => ({
+          value: candidate.name,
+          label: `${candidate.name} [${candidate.source}]`,
+          description: candidate.command
+            ? `${candidate.command} (${candidate.version ?? 'detected'})`
+            : `${profileLabel(candidate.cliProfile)}${candidate.existingAgent ? ' (already configured)' : ''}`,
+          selected: Boolean(candidate.existingAgent),
+        })),
+      )
 
   const selectedSet = new Set(selected)
   const agents: AgentConfig[] = []
@@ -708,7 +723,12 @@ export async function runInit(configPath: string): Promise<boolean> {
     const senderPoliciesFile = previousAgent?.senderPoliciesFile ?? defaultSenderPoliciesFile(name)
     const previousPolicies = previousSenderPolicies.get(name)
     const canReuseSenderPolicy = getReusableSenderPolicies(name, previousPolicies, previousSenderPolicies).length > 0
-    const connectionSetup = await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    const connectionSetup = opts.connectionSetup
+      ?? await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    if (connectionSetup === 'reuse-sender-policy' && !canReuseSenderPolicy) {
+      rl.close()
+      throw new Error(`Cannot reuse sender policy for ${name}: no existing sender policies found`)
+    }
     const senderPolicies = connectionSetup === 'manual-sender-policy' || connectionSetup === 'reuse-sender-policy'
       ? await promptSenderPolicies(
           rl,

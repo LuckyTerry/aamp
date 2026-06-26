@@ -61,6 +61,20 @@ async function readJsonInput(): Promise<unknown> {
   return JSON.parse(raw)
 }
 
+function getConnectionSetupOption(): 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later' | undefined {
+  const value = getOptionValue('--connection-setup')
+  if (!value) return undefined
+  if (
+    value === 'pairing-code'
+    || value === 'manual-sender-policy'
+    || value === 'reuse-sender-policy'
+    || value === 'later'
+  ) {
+    return value
+  }
+  throw new Error('--connection-setup must be one of pairing-code, manual-sender-policy, reuse-sender-policy, later')
+}
+
 function getAgent(config: BridgeConfig, agentName: string): AgentConfig {
   const agent = config.agents.find((item) => item.name === agentName)
   if (!agent) {
@@ -185,7 +199,11 @@ async function main() {
         console.log(JSON.stringify(result, null, 2))
         break
       }
-      const initialized = await runInit(configPath, { agent: getOptionValue('--agent') })
+      const initialized = await runInit(configPath, {
+        agent: getOptionValue('--agent'),
+        aampHost: getOptionValue('--aamp-host'),
+        connectionSetup: getConnectionSetupOption(),
+      })
       if (!initialized) break
       if (args.includes('--no-start')) {
         console.log(`Bridge not started because --no-start was provided.`)
@@ -360,7 +378,7 @@ async function main() {
 AAMP ACP Bridge -- Connect ACP agents to the AAMP email network
 
 Usage:
-  aamp-acp-bridge init [--agent NAME] [--no-start] [--debug]  Interactive setup wizard, then start bridge
+  aamp-acp-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]  Interactive setup wizard, then start bridge
   aamp-acp-bridge init --json --input -  Non-interactive setup for desktop clients
   aamp-acp-bridge start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ~/.aamp/acp-bridge/config.json)
   aamp-acp-bridge pair --agent NAME [--config X] [--no-start] [--json] [--debug]  Show a pairing QR code, then start that agent
@@ -374,6 +392,7 @@ Usage:
 
 Examples:
   npx aamp-acp-bridge init --agent claude
+  npx aamp-acp-bridge init --agent codex --aamp-host https://meshmail.ai --connection-setup pairing-code
   npx aamp-acp-bridge init --agent claude --no-start
   npx aamp-acp-bridge pair --agent claude
   npx aamp-acp-bridge start

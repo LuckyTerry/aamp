@@ -62,6 +62,22 @@ function allArgs(args: ParsedArgs, key: string): string[] | undefined {
   return args.values[key]
 }
 
+function formatError(error: unknown): string {
+  if (!(error instanceof Error)) return inspect(error)
+  const lines = [error.stack || error.message]
+  let cause: unknown = error.cause
+  while (cause) {
+    if (cause instanceof Error) {
+      lines.push(`Caused by: ${cause.stack || cause.message}`)
+      cause = cause.cause
+    } else {
+      lines.push(`Caused by: ${inspect(cause)}`)
+      break
+    }
+  }
+  return lines.join('\n')
+}
+
 function printUsage(): void {
   console.log(`AAMP Feishu Task Bridge
 
@@ -258,6 +274,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : inspect(error))
+  console.error(formatError(error))
   process.exitCode = 1
 })

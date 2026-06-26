@@ -2418,6 +2418,49 @@ test('runtime handles v2 delivery outputs and completes child tasks before paren
   }
 })
 
+test('runtime comments answered result when reply was not written by agent', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_answered_bridge_comment',
+      taskGuid: 'task_guid_answered_bridge_comment',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_answered_bridge_comment-evt_answered_bridge_comment', {
+      output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"明天是 2026-06-26。","reply_written":false}',
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_answered_bridge_comment'])
+      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_bridge_comment-evt_answered_bridge_comment']?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_answered_bridge_comment',
+      content: '明天是 2026-06-26。',
+    }])
+    assert.deepEqual(
+      runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_bridge_comment-evt_answered_bridge_comment']?.resultCommentedTaskIds,
+      ['feishu-task-task_guid_answered_bridge_comment-evt_answered_bridge_comment'],
+    )
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime retries completion without duplicating already applied v2 delivery outputs', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const deliveryFilePath = path.join(configDir, 'retry-report.md')

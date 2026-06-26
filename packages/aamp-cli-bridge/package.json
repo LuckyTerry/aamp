@@ -1,10 +1,10 @@
 {
-  "name": "aamp-cli-bridge",
+  "name": "@zengxingyuan/aamp-cli-bridge",
   "files": [
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.7",
+  "version": "0.1.7-dev.3",
   "description": "Bridge direct CLI agents into the AAMP email network with profile-driven command invocation",
   "type": "module",
   "main": "dist/index.js",
@@ -19,7 +19,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
-    "aamp-sdk": "file:../sdks/nodejs",
+    "aamp-sdk": "npm:@luckyterry/aamp-sdk@0.1.24-dev.1",
     "qrcode-terminal": "^0.12.0",
     "zod": "^3.22.4"
   },
