@@ -11,9 +11,9 @@ NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
 CODEM_RD_NETWORK_URL="https://netsegment.bytedance.net/apply/rd-network"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.11}"
-CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.3}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.10}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.12}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.4}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.11}"
 
 ACP_PID=""
 CLI_PID=""
@@ -618,6 +618,41 @@ find_cursor_agent_cli() {
   return 1
 }
 
+find_cursor_acp_cli() {
+  ensure_cursor_local_bin_on_path
+  if command -v cursor >/dev/null 2>&1; then
+    command -v cursor
+    return 0
+  fi
+  if [ -x "$CURSOR_LOCAL_BIN/cursor" ]; then
+    printf '%s\n' "$CURSOR_LOCAL_BIN/cursor"
+    return 0
+  fi
+  return 1
+}
+
+ensure_cursor_acp_command() {
+  local cursor_agent
+  local cursor_wrapper
+
+  if find_cursor_acp_cli >/dev/null 2>&1; then
+    return 0
+  fi
+
+  cursor_agent="$(find_cursor_agent_cli)" || return 1
+  mkdir -p "$NPM_GLOBAL_PREFIX/bin"
+  cursor_wrapper="$NPM_GLOBAL_PREFIX/bin/cursor"
+  agent_log "creating cursor command wrapper for ACP bridge: $cursor_wrapper -> $cursor_agent"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'cursor_agent=%q\n' "$cursor_agent"
+    printf 'exec "$cursor_agent" "$@"\n'
+  } > "$cursor_wrapper"
+  chmod +x "$cursor_wrapper"
+  hash -r 2>/dev/null || true
+  find_cursor_acp_cli >/dev/null 2>&1
+}
+
 install_cursor_agent_cli() {
   command -v curl >/dev/null 2>&1 || {
     agent_log "curl not found; cannot install Cursor CLI automatically"
@@ -636,15 +671,14 @@ ensure_agent_cli() {
   fi
 
   if [ "$AGENT" = "cursor" ]; then
-    if find_cursor_agent_cli >/dev/null 2>&1; then
-      return 0
+    if ! find_cursor_agent_cli >/dev/null 2>&1; then
+      agent_log "Cursor agent CLI not found"
+      agent_log "installing cursor CLI"
+      install_agent_cli || agent_fail "failed to install cursor CLI; install it manually with: curl https://cursor.com/install -fsS | bash"
     fi
 
-    agent_log "ACP agent CLI not found: cursor"
-    agent_log "installing cursor CLI"
-    install_agent_cli || agent_fail "failed to install cursor CLI; install it manually with: curl https://cursor.com/install -fsS | bash"
-
     find_cursor_agent_cli >/dev/null 2>&1 || agent_fail "cursor CLI is still unavailable; check PATH for $CURSOR_LOCAL_BIN/agent"
+    ensure_cursor_acp_command || agent_fail "cursor ACP command is still unavailable; check PATH for $NPM_GLOBAL_PREFIX/bin/cursor"
     return 0
   fi
 

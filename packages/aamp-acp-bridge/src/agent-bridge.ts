@@ -850,7 +850,7 @@ export class AgentBridge {
     } | null = null
 
     const queueStreamAppend = (
-      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return
@@ -951,7 +951,7 @@ export class AgentBridge {
     }
 
     const appendStreamEvent = async (
-      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact',
+      type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
       if (!this.client || !activeStream || streamClosed) return

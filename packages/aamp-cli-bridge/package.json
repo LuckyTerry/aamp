@@ -4,7 +4,7 @@
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.7-dev.3",
+  "version": "0.1.7-dev.4",
   "description": "Bridge direct CLI agents into the AAMP email network with profile-driven command invocation",
   "type": "module",
   "main": "dist/index.js",
