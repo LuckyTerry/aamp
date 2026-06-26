@@ -27,6 +27,7 @@ import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
   BridgeConfig,
   FeishuAgentRegistrationState,
+  FeishuAppOwnerState,
   BridgeState,
   BridgeTaskState,
   FeishuTaskClient,
@@ -48,6 +49,7 @@ type FeishuTaskEventIgnoreReason =
   | 'recurring_task_create_deferred'
   | 'task_not_active'
   | 'comment_authored_by_current_app'
+  | 'comment_author_not_app_owner'
   | 'comment_without_effective_comment'
   | 'agent_task_status_not_dispatchable'
 const MAX_STREAM_STEPS_PER_TASK = 32
@@ -58,6 +60,10 @@ const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
 const TERMINAL_TASK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const HELP_NEEDED_TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 const MAX_RETAINED_TERMINAL_TASKS = 2000
+const APP_OWNER_CACHE_TTL_MS = 60 * 60 * 1000
+const PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS = 1000
+const PERMISSION_DENIED_COMMENT_REPLY = '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。'
 
 interface PendingStreamStep {
   content: string
@@ -192,6 +198,18 @@ function buildFeishuTaskSubscriptionIdentity(
   }
 }
 
+function buildFeishuAppOwnerIdentity(
+  config: BridgeConfig,
+): Omit<FeishuAppOwnerState, 'fetchedAt' | 'ownerId'> {
+  const env = getFeishuEnvHeader(config.feishu.headers)
+  return {
+    appId: config.feishu.appId,
+    domain: normalizeDomain(config.feishu.domain) ?? 'default',
+    ...(env ? { env } : {}),
+    userIdType: config.feishu.userIdType ?? 'open_id',
+  }
+}
+
 function hasMatchingFeishuAgentRegistration(
   current: FeishuAgentRegistrationState | undefined,
   expected: Omit<FeishuAgentRegistrationState, 'registeredAt'>,
@@ -207,6 +225,17 @@ function hasMatchingFeishuTaskSubscription(
   expected: Omit<FeishuTaskSubscriptionState, 'subscribedAt'>,
 ): boolean {
   return Boolean(current)
+    && current?.appId === expected.appId
+    && current?.domain === expected.domain
+    && (current?.env ?? undefined) === (expected.env ?? undefined)
+    && current?.userIdType === expected.userIdType
+}
+
+function hasMatchingFeishuAppOwner(
+  current: FeishuAppOwnerState | undefined,
+  expected: Omit<FeishuAppOwnerState, 'fetchedAt' | 'ownerId'>,
+): boolean {
+  return Boolean(current?.ownerId)
     && current?.appId === expected.appId
     && current?.domain === expected.domain
     && (current?.env ?? undefined) === (expected.env ?? undefined)
@@ -452,6 +481,11 @@ function getEventCommentId(event: FeishuTaskEvent): string | undefined {
     ?? getString(rawComment?.id)
 }
 
+function getPermissionDeniedCommentNoticeKey(event: FeishuTaskEvent, comment: FeishuTaskComment): string {
+  const commentId = comment.id?.trim()
+  return commentId ? `comment:${event.taskGuid}:${commentId}` : `event:${event.eventId}`
+}
+
 function mergeComments(
   comments: FeishuTaskComment[],
   comment: FeishuTaskComment | undefined,
@@ -494,6 +528,12 @@ function getCommentExecutionIgnoreReason(
   if (!latestComment) return 'comment_without_effective_comment'
   if (isCommentByCurrentApp(latestComment, appId)) return 'comment_authored_by_current_app'
   return undefined
+}
+
+function isFreshTimestamp(value: string | undefined, ttlMs: number): boolean {
+  if (!value) return false
+  const timestamp = Date.parse(value)
+  return Number.isFinite(timestamp) && Date.now() - timestamp <= ttlMs
 }
 
 function normalizeStepText(content: string): string {
@@ -619,6 +659,7 @@ export class FeishuTaskBridgeRuntime {
   private readonly feishuInProgressInFlight = new Set<string>()
   private readonly feishuCompleteInFlight = new Set<string>()
   private readonly feishuBlockInFlight = new Set<string>()
+  private readonly permissionDeniedCommentNoticeInFlight = new Map<string, Promise<void>>()
   private readonly activeStreamSubscriptions = new Map<string, StreamSubscription>()
   private readonly streamEventQueues = new Map<string, Promise<void>>()
   private readonly streamStepBuffers = new Map<string, StreamStepBuffer>()
@@ -646,6 +687,7 @@ export class FeishuTaskBridgeRuntime {
   async start(): Promise<void> {
     this.state = await loadBridgeState(this.configDir)
     const prunedTaskCount = this.pruneTaskState()
+    this.prunePermissionDeniedCommentNotices()
     this.state.lastStartedAt = new Date().toISOString()
     this.state.lastError = undefined
     this.setConnectivity('aamp', 'connecting')
@@ -895,6 +937,11 @@ export class FeishuTaskBridgeRuntime {
       if (isCommentByCurrentApp(changedComment, this.config.feishu.appId)) {
         return { ignoreReason: 'comment_authored_by_current_app' }
       }
+      const ownerIgnoreReason = await this.getHumanCommentOwnerIgnoreReason(changedComment)
+      if (ownerIgnoreReason) {
+        await this.commentPermissionDeniedOnce(event, changedComment)
+        return { ignoreReason: ownerIgnoreReason }
+      }
     } else {
       this.debugLog(`[feishu event ${event.eventId}] comment_id missing fallback=list_comments task=${event.taskGuid}`)
       loadedComments = await this.feishu.listComments(event.taskGuid)
@@ -906,6 +953,11 @@ export class FeishuTaskBridgeRuntime {
       if (!changedComment) return { ignoreReason: 'comment_without_effective_comment' }
       if (isCommentByCurrentApp(changedComment, this.config.feishu.appId)) {
         return { ignoreReason: 'comment_authored_by_current_app' }
+      }
+      const ownerIgnoreReason = await this.getHumanCommentOwnerIgnoreReason(changedComment)
+      if (ownerIgnoreReason) {
+        await this.commentPermissionDeniedOnce(event, changedComment)
+        return { ignoreReason: ownerIgnoreReason }
       }
     }
 
@@ -921,6 +973,79 @@ export class FeishuTaskBridgeRuntime {
         changedComment,
       }),
     }
+  }
+
+  private async getHumanCommentOwnerIgnoreReason(
+    comment: FeishuTaskComment,
+  ): Promise<FeishuTaskEventIgnoreReason | undefined> {
+    if (comment.authorType !== 'user') return undefined
+
+    const commentAuthorId = comment.authorId?.trim()
+    if (!commentAuthorId) return 'comment_author_not_app_owner'
+
+    const appOwnerId = await this.getAppOwnerId()
+    return commentAuthorId === appOwnerId ? undefined : 'comment_author_not_app_owner'
+  }
+
+  private async commentPermissionDeniedOnce(event: FeishuTaskEvent, comment: FeishuTaskComment): Promise<void> {
+    const noticeKey = getPermissionDeniedCommentNoticeKey(event, comment)
+    if (this.state.permissionDeniedCommentNoticeKeys[noticeKey]) {
+      this.debugLog(`[feishu event ${event.eventId}] permission denied notice already commented key=${noticeKey}`)
+      return
+    }
+
+    const inFlight = this.permissionDeniedCommentNoticeInFlight.get(noticeKey)
+    if (inFlight) {
+      await inFlight
+      return
+    }
+
+    const task = this.writePermissionDeniedCommentNotice(event, noticeKey)
+    this.permissionDeniedCommentNoticeInFlight.set(noticeKey, task)
+    try {
+      await task
+    } finally {
+      if (this.permissionDeniedCommentNoticeInFlight.get(noticeKey) === task) {
+        this.permissionDeniedCommentNoticeInFlight.delete(noticeKey)
+      }
+    }
+  }
+
+  private async writePermissionDeniedCommentNotice(event: FeishuTaskEvent, noticeKey: string): Promise<void> {
+    if (this.state.permissionDeniedCommentNoticeKeys[noticeKey]) return
+    await this.feishu.commentTask(event.taskGuid, PERMISSION_DENIED_COMMENT_REPLY)
+    this.state.permissionDeniedCommentNoticeKeys[noticeKey] = new Date().toISOString()
+    this.prunePermissionDeniedCommentNotices()
+    await this.persistState()
+    this.debugLog(`[feishu event ${event.eventId}] permission denied notice commented key=${noticeKey}`)
+  }
+
+  private async getAppOwnerId(): Promise<string> {
+    const expected = buildFeishuAppOwnerIdentity(this.config)
+    const cached = this.state.appOwner
+    if (
+      cached
+      && hasMatchingFeishuAppOwner(cached, expected)
+      && isFreshTimestamp(cached.fetchedAt, APP_OWNER_CACHE_TTL_MS)
+    ) {
+      return cached.ownerId
+    }
+
+    this.debugLog(`[feishu app ${expected.appId}] loading owner user_id_type=${expected.userIdType}`)
+    const owner = await this.feishu.getAppOwner()
+    const ownerId = owner.ownerId.trim()
+    if (!ownerId) {
+      throw new Error(`Feishu app ${expected.appId} owner id is empty.`)
+    }
+
+    this.state.appOwner = {
+      ...expected,
+      ownerId,
+      fetchedAt: new Date().toISOString(),
+    }
+    await this.persistState()
+    this.debugLog(`[feishu app ${expected.appId}] owner cached user_id_type=${expected.userIdType}`)
+    return ownerId
   }
 
   private async hydrateTaskContext(
@@ -1826,6 +1951,26 @@ export class FeishuTaskBridgeRuntime {
       .slice(0, entries.length - 1000)
       .forEach(([eventId]) => {
         delete this.state.dedupEventIds[eventId]
+      })
+  }
+
+  private prunePermissionDeniedCommentNotices(): void {
+    const now = Date.now()
+    const notices = this.state.permissionDeniedCommentNoticeKeys
+    for (const [noticeKey, createdAt] of Object.entries(notices)) {
+      const timestamp = Date.parse(createdAt)
+      if (Number.isFinite(timestamp) && now - timestamp > PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS) {
+        delete notices[noticeKey]
+      }
+    }
+
+    const entries = Object.entries(notices)
+    if (entries.length <= MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS) return
+    entries
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .slice(0, entries.length - MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS)
+      .forEach(([noticeKey]) => {
+        delete notices[noticeKey]
       })
   }
 

@@ -240,6 +240,44 @@ test('OapiFeishuTaskClient appends text deliveries through v2 task patch', async
   }])
 })
 
+test('OapiFeishuTaskClient loads app owner by app id using configured user id type', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    userIdType: 'open_id',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    application: {
+      application: {
+        get: async (payload: unknown) => {
+          calls.push(payload)
+          return {
+            data: {
+              app: {
+                owner: {
+                  owner_id: 'ou_owner',
+                },
+              },
+            },
+          }
+        },
+      },
+    },
+  }
+
+  const owner = await (client as unknown as { getAppOwner: () => Promise<unknown> }).getAppOwner()
+
+  assert.deepEqual(owner, { ownerId: 'ou_owner' })
+  assert.deepEqual(calls, [{
+    path: { app_id: 'cli_xxx' },
+    params: { lang: 'zh_cn', user_id_type: 'open_id' },
+  }])
+})
+
 test('OapiFeishuTaskClient retries retryable v2 task patch failures', async () => {
   let calls = 0
   const client = new OapiFeishuTaskClient({

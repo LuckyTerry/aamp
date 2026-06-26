@@ -10,6 +10,7 @@ import {
 import { createReadStream } from 'node:fs'
 import type {
   BridgeConfig,
+  FeishuAppOwner,
   FeishuTaskClient,
   FeishuTaskComment,
   FeishuTaskDetails,
@@ -272,6 +273,13 @@ function mapV2Comment(record: JsonRecord): FeishuTaskComment | null {
   }
 }
 
+function mapV6AppOwner(record: JsonRecord): FeishuAppOwner | null {
+  const app = asRecord(asRecord(record.data)?.app)
+  const owner = asRecord(app?.owner)
+  const ownerId = getString(owner?.owner_id)
+  return ownerId ? { ownerId } : null
+}
+
 export class OapiFeishuTaskClient implements FeishuTaskClient {
   private readonly client: Client
   private readonly config: FeishuConfig
@@ -390,6 +398,11 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     return this.getV2Comment(commentId)
   }
 
+  async getAppOwner(): Promise<FeishuAppOwner> {
+    this.logger.log(`[feishu app ${this.config.appId}] get owner via v6`)
+    return this.getV6AppOwner()
+  }
+
   async commentTask(taskGuid: string, content: string): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
@@ -467,6 +480,17 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     const task = asRecord(response.data?.task)
     if (!task) throw new Error(`Feishu task ${taskGuid} not found`)
     return mapV2Task(task, taskGuid)
+  }
+
+  private async getV6AppOwner(): Promise<FeishuAppOwner> {
+    const userIdType = this.config.userIdType ?? 'open_id'
+    const response = await withRetry(() => this.client.application.application.get({
+      path: { app_id: this.config.appId },
+      params: { lang: 'zh_cn', user_id_type: userIdType },
+    }), this.retry, this.logger, `application.get app=${this.config.appId}`)
+    const owner = mapV6AppOwner(response as JsonRecord)
+    if (!owner) throw new Error(`Feishu app ${this.config.appId} owner not found`)
+    return owner
   }
 
   private async commentV2Task(taskGuid: string, content: string): Promise<void> {

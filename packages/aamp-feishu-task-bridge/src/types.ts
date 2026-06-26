@@ -70,6 +70,15 @@ export interface FeishuTaskSubscriptionState {
   subscribedAt: string
 }
 
+export interface FeishuAppOwnerState {
+  appId: string
+  domain: string
+  env?: string
+  userIdType: NonNullable<BridgeConfig['feishu']['userIdType']>
+  ownerId: string
+  fetchedAt: string
+}
+
 export interface BridgeState {
   version: 1
   lastStartedAt?: string
@@ -97,8 +106,10 @@ export interface BridgeState {
   }
   agentRegistration?: FeishuAgentRegistrationState
   taskSubscription?: FeishuTaskSubscriptionState
+  appOwner?: FeishuAppOwnerState
   tasks: Record<string, BridgeTaskState>
   dedupEventIds: Record<string, string>
+  permissionDeniedCommentNoticeKeys: Record<string, string>
 }
 
 export interface FeishuTaskEvent {
@@ -132,6 +143,10 @@ export interface FeishuTaskComment {
   content: string
   createdAt?: string
   updatedAt?: string
+}
+
+export interface FeishuAppOwner {
+  ownerId: string
 }
 
 export interface FeishuTaskDetails {
@@ -168,6 +183,7 @@ export interface FeishuTaskClient {
   listSubtasks(taskGuid: string): Promise<FeishuTaskSubtask[]>
   listComments(taskGuid: string): Promise<FeishuTaskComment[]>
   getComment(commentId: string): Promise<FeishuTaskComment | null>
+  getAppOwner(): Promise<FeishuAppOwner>
   commentTask(taskGuid: string, content: string): Promise<void>
   appendTaskStep(taskGuid: string, content: string): Promise<void>
   appendTaskSteps(taskGuid: string, contents: string[]): Promise<void>
