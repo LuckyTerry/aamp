@@ -34,8 +34,13 @@ assignee metadata and do not suppress deleted or hidden tasks. Completed or
 archived task statuses are still ignored. Comment events require a latest
 non-empty comment, skip comments explicitly authored by the configured Feishu
 app (`comment.creator.type=app` and `comment.creator.id` equals the configured
-Feishu app id), and only dispatch when the loaded `agent_task_status` is in an
-execution-relevant state. Comment `author_type` alone is not used as a filter.
+Feishu app id), and trust human comments only when `comment.creator.id` equals
+the configured Feishu app owner returned by
+`GET /open-apis/application/v6/applications/:app_id` with the configured
+`user_id_type`; rejected human comments receive one app-authored permission
+notice per comment. Non-current-app app comments remain effective. Only after
+this author gate does the bridge load task details and dispatch when the loaded
+`agent_task_status` is in an execution-relevant state.
 
 The dispatched prompt treats handled Feishu events as execution of an existing
 Feishu task, not as a plain chat question. It carries

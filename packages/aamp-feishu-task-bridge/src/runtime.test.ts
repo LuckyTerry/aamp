@@ -174,12 +174,15 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   textDeliveryFailures = 0
   completeFailures = 0
   blockFailures = 0
+  commentTaskDelayMs = 0
   getTaskCalls: string[] = []
   listSubtaskCalls: string[] = []
   listCommentCalls: string[] = []
   getCommentCalls: string[] = []
+  getAppOwnerCalls: string[] = []
   tasks: Record<string, FeishuTaskDetails> = {}
   pointComments: Record<string, NonNullable<FeishuTaskDetails['comments']>[number]> = {}
+  appOwner: { ownerId: string } | null = { ownerId: 'ou_human' }
 
   async start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void> {
     this.lifecycle.push('start')
@@ -236,7 +239,16 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     return this.pointComments[commentId] ?? null
   }
 
+  async getAppOwner(): Promise<{ ownerId: string }> {
+    this.getAppOwnerCalls.push('cli_xxx')
+    if (!this.appOwner) throw new Error('app owner unavailable')
+    return this.appOwner
+  }
+
   async commentTask(taskGuid: string, content: string): Promise<void> {
+    if (this.commentTaskDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.commentTaskDelayMs))
+    }
     this.comments.push({ taskGuid, content })
   }
 
@@ -1088,7 +1100,7 @@ test('runtime dispatches comment events and writes reply ack comments', async ()
     status: 'todo',
     agentTaskStatus: 3,
     comments: [
-      { id: 'comment_user', authorType: 'user', content: '请继续执行这个任务', createdAt: '1775793266100' },
+      { id: 'comment_user', authorType: 'user', authorId: 'ou_human', content: '请继续执行这个任务', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -1134,7 +1146,7 @@ test('runtime logs list-comment fallback when comment events omit comment id', a
     status: 'todo',
     agentTaskStatus: 3,
     comments: [
-      { id: 'comment_user_fallback', authorType: 'user', content: '请继续执行这个任务', createdAt: '1775793266100' },
+      { id: 'comment_user_fallback', authorType: 'user', authorId: 'ou_human', content: '请继续执行这个任务', createdAt: '1775793266100' },
     ],
   }
   const config = buildConfig()
@@ -1257,6 +1269,218 @@ test('runtime hydrates full task context only after a point-loaded comment is di
     assert.deepEqual(fakeFeishu.listCommentCalls, ['task_guid_point_comment'])
     assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /child_point_comment/)
     assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /请继续执行这个任务/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores point-loaded human comments not authored by the app owner before loading task details', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.appOwner = { ownerId: 'ou_owner' }
+  fakeFeishu.pointComments.comment_non_owner = {
+    id: 'comment_non_owner',
+    authorType: 'user',
+    authorId: 'ou_other',
+    content: '请继续执行这个任务',
+    createdAt: '1775793266100',
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_non_owner_comment',
+      taskGuid: 'task_guid_non_owner_comment',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+      raw: { comment_id: 'comment_non_owner' },
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_non_owner_comment',
+      content: '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。',
+    }])
+    assert.deepEqual(fakeFeishu.getCommentCalls, ['comment_non_owner'])
+    assert.deepEqual(fakeFeishu.getAppOwnerCalls, ['cli_xxx'])
+    assert.deepEqual(fakeFeishu.getTaskBaseCalls, [])
+    assert.deepEqual(fakeFeishu.listSubtaskCalls, [])
+    assert.deepEqual(fakeFeishu.listCommentCalls, [])
+    assert.equal(runtime.getStateSnapshot().lastIgnoredFeishuEventReason, 'comment_author_not_app_owner')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime comments permission denial only once for the same non-owner human comment', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.appOwner = { ownerId: 'ou_owner' }
+  fakeFeishu.pointComments.comment_non_owner_repeat = {
+    id: 'comment_non_owner_repeat',
+    authorType: 'user',
+    authorId: 'ou_other',
+    content: '继续执行',
+    createdAt: '1775793266100',
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_non_owner_comment_repeat_one',
+      taskGuid: 'task_guid_non_owner_repeat',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+      raw: { comment_id: 'comment_non_owner_repeat' },
+    })
+    await fakeFeishu.emit({
+      eventId: 'evt_non_owner_comment_repeat_two',
+      taskGuid: 'task_guid_non_owner_repeat',
+      eventTypes: ['task_comment_update'],
+      timestamp: '1775793267153',
+      raw: { comment_id: 'comment_non_owner_repeat' },
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_non_owner_repeat',
+      content: '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。',
+    }])
+    assert.deepEqual(fakeFeishu.getCommentCalls, ['comment_non_owner_repeat', 'comment_non_owner_repeat'])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime serializes concurrent permission denial comments for the same non-owner human comment', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.appOwner = { ownerId: 'ou_owner' }
+  fakeFeishu.commentTaskDelayMs = 10
+  fakeFeishu.pointComments.comment_non_owner_concurrent = {
+    id: 'comment_non_owner_concurrent',
+    authorType: 'user',
+    authorId: 'ou_other',
+    content: '继续执行',
+    createdAt: '1775793266100',
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await Promise.all([
+      fakeFeishu.emit({
+        eventId: 'evt_non_owner_comment_concurrent_one',
+        taskGuid: 'task_guid_non_owner_concurrent',
+        eventTypes: ['task_comment_create'],
+        timestamp: '1775793266153',
+        raw: { comment_id: 'comment_non_owner_concurrent' },
+      }),
+      fakeFeishu.emit({
+        eventId: 'evt_non_owner_comment_concurrent_two',
+        taskGuid: 'task_guid_non_owner_concurrent',
+        eventTypes: ['task_comment_update'],
+        timestamp: '1775793267153',
+        raw: { comment_id: 'comment_non_owner_concurrent' },
+      }),
+    ])
+
+    assert.equal(fakeAamp.sentTasks.length, 0)
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_non_owner_concurrent',
+      content: '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime caches app owner lookups for human comment filtering', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.appOwner = { ownerId: 'ou_owner' }
+  fakeFeishu.pointComments.comment_owner_one = {
+    id: 'comment_owner_one',
+    authorType: 'user',
+    authorId: 'ou_owner',
+    content: '第一次继续',
+    createdAt: '1775793266100',
+  }
+  fakeFeishu.pointComments.comment_owner_two = {
+    id: 'comment_owner_two',
+    authorType: 'user',
+    authorId: 'ou_owner',
+    content: '第二次继续',
+    createdAt: '1775793266200',
+  }
+  fakeFeishu.tasks.task_guid_owner_one = {
+    guid: 'task_guid_owner_one',
+    taskId: 't_owner_one',
+    summary: '整理上线方案 1',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [fakeFeishu.pointComments.comment_owner_one],
+  }
+  fakeFeishu.tasks.task_guid_owner_two = {
+    guid: 'task_guid_owner_two',
+    taskId: 't_owner_two',
+    summary: '整理上线方案 2',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [fakeFeishu.pointComments.comment_owner_two],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_owner_comment_one',
+      taskGuid: 'task_guid_owner_one',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266153',
+      raw: { comment_id: 'comment_owner_one' },
+    })
+    await fakeFeishu.emit({
+      eventId: 'evt_owner_comment_two',
+      taskGuid: 'task_guid_owner_two',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793267153',
+      raw: { comment_id: 'comment_owner_two' },
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 2)
+    assert.deepEqual(fakeFeishu.getAppOwnerCalls, ['cli_xxx'])
+    assert.equal((runtime.getStateSnapshot() as { appOwner?: { ownerId?: string } }).appOwner?.ownerId, 'ou_owner')
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1397,7 +1621,7 @@ test('runtime ignores comment events without agent task status', async () => {
     summary: '整理上线方案',
     status: 'todo',
     comments: [
-      { id: 'comment_user', authorType: 'user', content: '继续执行这个任务', createdAt: '1775793266100' },
+      { id: 'comment_user', authorType: 'user', authorId: 'ou_human', content: '继续执行这个任务', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -1435,7 +1659,7 @@ test('runtime ignores comment events with unsupported agent task status', async 
     status: 'todo',
     agentTaskStatus: 99,
     comments: [
-      { id: 'comment_user', authorType: 'user', content: '继续执行这个任务', createdAt: '1775793266100' },
+      { id: 'comment_user', authorType: 'user', authorId: 'ou_human', content: '继续执行这个任务', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -2081,7 +2305,7 @@ test('runtime handles v2 reply_comment output and completes comment-triggered ta
     status: 'todo',
     agentTaskStatus: 3,
     comments: [
-      { id: 'comment_continue', authorType: 'user', content: '请继续，并说明结论。', createdAt: '1775793266100' },
+      { id: 'comment_continue', authorType: 'user', authorId: 'ou_human', content: '请继续，并说明结论。', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
