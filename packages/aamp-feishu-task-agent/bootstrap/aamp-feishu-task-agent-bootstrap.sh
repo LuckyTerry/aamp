@@ -10,7 +10,12 @@ AAMP_HOST="https://meshmail.ai"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
+BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-task-agent/bots.json}"
 CODEM_RD_NETWORK_URL="https://netsegment.bytedance.net/apply/rd-network"
+LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
+FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-task:task,task:comment,task:attachment,task:task:readonly,task:comment:readonly,application:application:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly}"
+FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
+FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.12}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.4}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.11}"
@@ -44,9 +49,10 @@ sanitize_inherited_npm_exec_env() {
 usage() {
   cat <<'USAGE'
 Usage:
-  aamp-feishu-task-agent --agent codex --app-id cli_xxx --app-secret xxx [options]
+  aamp-feishu-task-agent [options]
 
 Options:
+  --agent codex|cursor|codem  Agent to launch. If omitted, choose interactively.
   --env online|pre|boe       Runtime environment. Default: online
   --boe-env-name NAME        BOE x-tt-env value. Default: boe_task_event
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
@@ -192,19 +198,117 @@ npx_package() {
   "$NPX_BIN" -y --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "$@"
 }
 
+validate_agent_name() {
+  case "$1" in
+    codex|cursor|codem) ;;
+    *) agent_fail "--agent must be codex, cursor, or codem" ;;
+  esac
+}
+
+read_tty_line() {
+  local prompt="$1"
+  local value
+  if [ ! -r /dev/tty ]; then
+    agent_fail "interactive input requires a terminal"
+  fi
+  printf '%s' "$prompt" >/dev/tty
+  IFS= read -r value </dev/tty
+  printf '%s' "$value"
+}
+
+render_agent_menu() {
+  local selected="$1"
+  local agents=(codex cursor codem)
+  local index
+
+  printf '\033[?25l' >&3
+  printf '\033[2K\r请选择要启动的 Agent:\n' >&3
+  for index in "${!agents[@]}"; do
+    printf '\033[2K\r' >&3
+    if [ "$index" -eq "$selected" ]; then
+      printf '  > %s\n' "${agents[$index]}" >&3
+    else
+      printf '    %s\n' "${agents[$index]}" >&3
+    fi
+  done
+  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按 1/2/3 或 j/k。\n' >&3
+}
+
+select_agent_interactively() {
+  local agents=(codex cursor codem)
+  local selected=0
+  local key rest
+  local tty_state
+
+  if ! exec 3<>/dev/tty; then
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|codem"
+  fi
+
+  tty_state="$(stty -g <&3)"
+  stty -echo -icanon min 1 time 0 <&3
+  render_agent_menu "$selected"
+  while true; do
+    IFS= read -rsn1 -u 3 key || {
+      stty "$tty_state" <&3
+      printf '\033[?25h\n' >&3
+      exec 3>&-
+      agent_fail "failed to read interactive agent selection"
+    }
+
+    case "$key" in
+      ""|$'\n'|$'\r')
+        AGENT="${agents[$selected]}"
+        stty "$tty_state" <&3
+        printf '\033[?25h\n' >&3
+        exec 3>&-
+        return 0
+        ;;
+      $'\033')
+        IFS= read -rsn2 -u 3 rest || rest=""
+        case "$rest" in
+          "[A")
+            selected=$(( (selected + ${#agents[@]} - 1) % ${#agents[@]} ))
+            printf '\033[5A' >&3
+            render_agent_menu "$selected"
+            ;;
+          "[B")
+            selected=$(( (selected + 1) % ${#agents[@]} ))
+            printf '\033[5A' >&3
+            render_agent_menu "$selected"
+            ;;
+          "[C"|"[D")
+            ;;
+        esac
+        ;;
+      k)
+        selected=$(( (selected + ${#agents[@]} - 1) % ${#agents[@]} ))
+        printf '\033[5A' >&3
+        render_agent_menu "$selected"
+        ;;
+      j)
+        selected=$(( (selected + 1) % ${#agents[@]} ))
+        printf '\033[5A' >&3
+        render_agent_menu "$selected"
+        ;;
+      1|2|3)
+        selected=$(( key - 1 ))
+        AGENT="${agents[$selected]}"
+        stty "$tty_state" <&3
+        printf '\033[5A' >&3
+        render_agent_menu "$selected"
+        printf '\033[?25h\n' >&3
+        exec 3>&-
+        return 0
+        ;;
+    esac
+  done
+}
+
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --agent)
         AGENT="${2:-}"
-        shift 2
-        ;;
-      --app-id)
-        APP_ID="${2:-}"
-        shift 2
-        ;;
-      --app-secret)
-        APP_SECRET="${2:-}"
         shift 2
         ;;
       --env)
@@ -229,9 +333,10 @@ parse_args() {
     esac
   done
 
-  [ -n "$AGENT" ] || agent_fail "missing --agent"
-  [ -n "$APP_ID" ] || agent_fail "missing --app-id"
-  [ -n "$APP_SECRET" ] || agent_fail "missing --app-secret"
+  if [ -z "$AGENT" ]; then
+    select_agent_interactively
+  fi
+  validate_agent_name "$AGENT"
 
   case "$ENV_NAME" in
     online|pre|boe) ;;
@@ -487,30 +592,275 @@ build_feishu_env_args() {
   esac
 }
 
-install_global_npm_package() {
-  local package_name="$1"
-  npm_install_global "$package_name"
+load_bot_configs() {
+  [ -f "$BOT_CONFIG_FILE" ] || return 0
+  node -e '
+const fs = require("fs");
+const file = process.argv[1];
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const bots = Array.isArray(parsed?.bots) ? parsed.bots : [];
+const seen = new Set();
+for (const bot of bots) {
+  const appId = String(bot?.app_id || "").trim();
+  const appSecret = String(bot?.app_secret || "");
+  const name = String(bot?.name || appId).trim();
+  if (!appId || !appSecret || seen.has(appId)) continue;
+  seen.add(appId);
+  console.log([appId, name, appSecret].join("\t"));
+}
+' "$BOT_CONFIG_FILE"
 }
 
-ensure_lark_cli() {
-  if ! command -v lark-cli >/dev/null 2>&1; then
-    agent_log "lark-cli not found; installing @larksuite/cli"
-    install_global_npm_package "@larksuite/cli"
+save_bot_config() {
+  local bot_name="$1"
+  local app_id="$2"
+  local app_secret="$3"
+  mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_APP_SECRET="$app_secret" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+const next = {
+  name: process.env.BOT_NAME || process.env.BOT_APP_ID,
+  app_id: process.env.BOT_APP_ID,
+  app_secret: process.env.BOT_APP_SECRET,
+  updated_at: new Date().toISOString(),
+};
+let parsed = { bots: [] };
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {}
+const bots = Array.isArray(parsed?.bots) ? parsed.bots : [];
+const byAppId = new Map();
+for (const bot of bots) {
+  const appId = String(bot?.app_id || "").trim();
+  if (!appId) continue;
+  byAppId.set(appId, bot);
+}
+byAppId.set(next.app_id, { ...(byAppId.get(next.app_id) || {}), ...next });
+fs.writeFileSync(file, JSON.stringify({ bots: [...byAppId.values()] }, null, 2) + "\n");
+'
+}
+
+remove_bot_config() {
+  local app_id="$1"
+  [ -n "$app_id" ] || return 0
+  [ -f "$BOT_CONFIG_FILE" ] || return 0
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_APP_ID="$app_id" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+const appIdToRemove = process.env.BOT_APP_ID;
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const bots = Array.isArray(parsed?.bots) ? parsed.bots : [];
+const filtered = bots.filter((bot) => String(bot?.app_id || "").trim() !== appIdToRemove);
+if (filtered.length !== bots.length) {
+  fs.writeFileSync(file, JSON.stringify({ bots: filtered }, null, 2) + "\n");
+}
+'
+}
+
+forget_current_bot_after_feishu_start_failure() {
+  agent_log "Feishu task bridge failed before ready; removing local bot config for $APP_ID"
+  remove_bot_config "$APP_ID"
+  agent_log "Removed local bot config. Re-run this script and choose 新建应用/选择其他应用 to recreate it."
+}
+
+select_existing_bot_or_create() {
+  local app_ids=()
+  local names=()
+  local secrets=()
+  local app_id name secret
+  local index choice create_index
+
+  while IFS=$'\t' read -r app_id name secret; do
+    [ -n "$app_id" ] || continue
+    app_ids+=("$app_id")
+    names+=("${name:-$app_id}")
+    secrets+=("$secret")
+  done < <(load_bot_configs)
+
+  if [ "${#app_ids[@]}" -eq 0 ]; then
+    register_feishu_app
+    return 0
   fi
 
-  source_lark_env
+  printf '\n请选择飞书 Bot 应用:\n' >/dev/tty
+  for index in "${!app_ids[@]}"; do
+    printf '  %d) %s (%s)\n' "$((index + 1))" "${names[$index]}" "${app_ids[$index]}" >/dev/tty
+  done
+  create_index=$((${#app_ids[@]} + 1))
+  printf '  %d) 新建应用/选择其他应用\n' "$create_index" >/dev/tty
 
-  if ! lark-cli auth status --verify >/dev/null 2>&1; then
-    agent_log "lark-cli is not initialized or token verification failed; initializing with supplied app credentials"
-    printf '%s' "$APP_SECRET" | lark-cli config init \
-      --app-id "$APP_ID" \
-      --app-secret-stdin \
-      --brand feishu
+  while true; do
+    choice="$(read_tty_line "输入序号: ")"
+    case "$choice" in
+      ''|*[!0-9]*)
+        printf '请输入有效序号。\n' >/dev/tty
+        ;;
+      *)
+        if [ "$choice" -ge 1 ] && [ "$choice" -le "${#app_ids[@]}" ]; then
+          index=$((choice - 1))
+          APP_ID="${app_ids[$index]}"
+          APP_SECRET="${secrets[$index]}"
+          agent_log "using Feishu bot: ${names[$index]} ($APP_ID)"
+          return 0
+        fi
+        if [ "$choice" -eq "$create_index" ]; then
+          register_feishu_app
+          return 0
+        fi
+        printf '请输入有效序号。\n' >/dev/tty
+        ;;
+    esac
+  done
+}
 
-    lark-cli auth status --verify >/dev/null 2>&1 || {
-      agent_fail "lark-cli remains unavailable after init; check app_id/app_secret, app permissions, and app publish status"
+register_feishu_app() {
+  local workdir
+  local register_script
+  local register_log
+  local register_result_file
+  local result_json
+  local default_name
+  local bot_name
+
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}/aamp-register-feishu-app.XXXXXX")"
+  register_script="$workdir/register-app.mjs"
+  register_log="$workdir/register-app.log"
+  register_result_file="$workdir/register-app-result.json"
+  default_name="${AGENT} 飞书 CLI"
+
+  agent_log "preparing Feishu app registration helper"
+  "$NPM_BIN" install \
+    --prefix "$workdir" \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    "$LARK_REGISTER_APP_SDK" >/dev/null
+
+  cat >"$register_script" <<'NODE'
+import * as lark from '@larksuiteoapi/node-sdk';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const sdkPackage = require('@larksuiteoapi/node-sdk/package.json');
+
+function splitList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const tenantScopes = splitList(process.env.FEISHU_APP_SCOPES_TENANT);
+const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
+const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
+const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
+
+console.log(`[aamp-one-click] registerApp sdk=${sdkPackage.version}`);
+console.log(`[aamp-one-click] registerApp appPreset.name=${appName}`);
+console.log(`[aamp-one-click] registerApp addons.scopes.tenant=${tenantScopes.join(',') || '(none)'}`);
+console.log(`[aamp-one-click] registerApp addons.events.items.tenant=${tenantEvents.join(',') || '(none)'}`);
+console.log(`[aamp-one-click] registerApp addons.events.items.user=${userEvents.join(',') || '(none)'}`);
+
+const addons = {
+  scopes: {
+    tenant: tenantScopes,
+  },
+  events: {
+    items: {
+      tenant: tenantEvents,
+      user: userEvents,
+    },
+  },
+};
+console.log(`[aamp-one-click] registerApp addons.json=${JSON.stringify(addons)}`);
+
+const result = await lark.registerApp({
+  source: 'aamp-feishu-task-agent',
+  appPreset: {
+    name: appName,
+    desc: 'AAMP Feishu task bridge bot',
+  },
+  addons,
+  onQRCodeReady(info) {
+    const url = new URL(info.url);
+    console.log('[aamp-one-click] 请在浏览器打开以下链接，创建飞书应用或选择已有应用：');
+    console.log(info.url);
+    console.log(`[aamp-one-click] registerApp url.has_addons=${url.searchParams.has('addons') ? 'yes' : 'no'}`);
+    console.log(`[aamp-one-click] registerApp url.has_name=${url.searchParams.has('name') ? 'yes' : 'no'}`);
+    console.log(`[aamp-one-click] 链接将在 ${info.expireIn} 秒后过期`);
+    if (process.platform === 'darwin') {
+      execFile('open', [info.url], () => {});
     }
-  fi
+  },
+  onStatusChange(info) {
+    if (info.status === 'polling') return;
+    console.log(`[aamp-one-click] registerApp status: ${info.status}`);
+  },
+});
+
+async function fetchRegisteredAppName(appId, appSecret) {
+  try {
+    const client = new lark.Client({
+      appId,
+      appSecret,
+    });
+    const response = await client.application.application.get({
+      path: { app_id: appId },
+      params: { lang: 'zh_cn', user_id_type: 'open_id' },
+    });
+    const app = response?.data?.app;
+    return app?.app_name || app?.i18n?.find?.((item) => item?.i18n_key === 'zh_cn')?.name || '';
+  } catch (error) {
+    console.log(`[aamp-one-click] failed to fetch registered app name; using preset name: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
+}
+
+const registeredAppName = await fetchRegisteredAppName(result.client_id, result.client_secret);
+const resultPayload = {
+  app_id: result.client_id,
+  app_secret: result.client_secret,
+  app_name: registeredAppName || appName,
+};
+await import('node:fs/promises').then(({ writeFile }) => writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(resultPayload)));
+console.log(`[aamp-one-click] Feishu app registration completed: ${result.client_id}`);
+console.log(`[aamp-one-click] Feishu app name: ${resultPayload.app_name}`);
+NODE
+
+  agent_log "starting Feishu app registration"
+  AAMP_REGISTER_APP_RESULT_FILE="$register_result_file" \
+    FEISHU_APP_SCOPES_TENANT="$FEISHU_APP_SCOPES_TENANT" \
+    FEISHU_APP_EVENTS_TENANT="$FEISHU_APP_EVENTS_TENANT" \
+    FEISHU_APP_EVENTS_USER="$FEISHU_APP_EVENTS_USER" \
+    FEISHU_APP_PRESET_NAME="$default_name" \
+    node "$register_script" 2>&1 | tee "$register_log"
+
+  result_json="$(cat "$register_result_file" 2>/dev/null || true)"
+  [ -n "$result_json" ] || agent_fail "failed to get app credentials from Feishu app registration"
+
+  APP_ID="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_id || "")')"
+  APP_SECRET="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_secret || "")')"
+  bot_name="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_name || "")')"
+  [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
+
+  bot_name="${bot_name:-$default_name}"
+  save_bot_config "$bot_name" "$APP_ID" "$APP_SECRET"
+  agent_log "saved Feishu bot config: $bot_name ($APP_ID)"
+}
+
+resolve_feishu_bot_credentials() {
+  select_existing_bot_or_create
 }
 
 ensure_acpx() {
@@ -1067,6 +1417,7 @@ start_feishu_task_bridge() {
     if ! kill -0 "$FEISHU_PID" 2>/dev/null; then
       agent_log "Feishu task bridge exited before becoming ready. Log: $FEISHU_LOG"
       tail -80 "$FEISHU_LOG" >&2 || true
+      forget_current_bot_after_feishu_start_failure
       agent_fail "Feishu task bridge exited before ready"
     fi
 
@@ -1081,6 +1432,7 @@ start_feishu_task_bridge() {
   agent_log "timed out waiting for Feishu task bridge readiness. Log: $FEISHU_LOG"
   agent_log "last 80 lines from Feishu task bridge log:"
   tail -80 "$FEISHU_LOG" >&2 || true
+  forget_current_bot_after_feishu_start_failure
   agent_fail "timed out waiting for Feishu task bridge readiness"
 }
 
@@ -1105,7 +1457,8 @@ main() {
   parse_args "$@"
   ensure_node_toolchain
   build_feishu_env_args
-  ensure_lark_cli
+  source_lark_env
+  resolve_feishu_bot_credentials
   if ! uses_cli_bridge; then
     ensure_acpx
   fi
