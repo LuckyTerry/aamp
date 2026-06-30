@@ -106,9 +106,11 @@ function renderEnvironmentGuidance(options: FeishuTaskDispatchOptions | undefine
 function renderDeliverableGuidance(): string[] {
   return [
     '- Concrete deliverable output rules:',
+    '  - For document deliverables such as reports, plans, specs, requirements, job descriptions, summaries, or long-form Markdown/rich-text content, create a Feishu document first and return a link_delivery output with that document URL. Do not create or upload a local .md file for these document deliverables.',
+    '  - Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
     '  - For a file or image deliverable, return a file_delivery output with an absolute path. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
-    '  - For a link deliverable, return a link_delivery output with the URL. The bridge writes it through the text_deliveries append mechanism.',
-    '  - For a text or rich-text deliverable, return a text_delivery output with format=markdown or format=plain_text. The bridge writes it to a temporary file and uploads it as a task_delivery attachment.',
+    '  - For an externally hosted deliverable or Feishu document, return a link_delivery output with the URL. The bridge writes it through the text_deliveries append mechanism.',
+    '  - For short text deliverables that are not worth a Feishu document, return a text_delivery output with format=markdown or format=plain_text. The bridge writes it to a temporary file and uploads it as a task_delivery attachment.',
     '  - Do not put deliverable content in reply_comment; reply_comment is only for a direct user-visible answer.',
   ]
 }
@@ -153,12 +155,13 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     summary: 'Completed the requested deliverable.',
     outputs: [
       {
-        kind: 'file_delivery',
-        path: '/absolute/path/to/deliverable.md',
+        kind: 'link_delivery',
+        url: 'https://bytedance.larkoffice.com/docx/example',
+        title: '交付文档',
       },
       {
-        kind: 'link_delivery',
-        url: 'https://example.com/report',
+        kind: 'file_delivery',
+        path: '/absolute/path/to/non-document-artifact.png',
       },
     ],
   })

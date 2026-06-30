@@ -1,12 +1,12 @@
 {
   "name": "@zengxingyuan/aamp-feishu-task-agent",
   "files": [
-    "bootstrap",
+    "bootstrap/aamp-feishu-task-agent-bootstrap.sh",
     "bin",
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.0-dev.37",
+  "version": "0.1.0-dev.50",
   "description": "One-click launcher for AAMP ACP bridge and Feishu task bridge.",
   "type": "module",
   "bin": {

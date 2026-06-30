@@ -16,9 +16,9 @@ LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-task:task,task:comment,task:attachment,task:task:readonly,task:comment:readonly,application:application:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly}"
 FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
 FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.12}"
-CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.4}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.11}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.14}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.5}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.13}"
 
 ACP_PID=""
 CLI_PID=""
@@ -67,6 +67,23 @@ agent_log() {
 agent_fail() {
   printf '[aamp-one-click] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+os_name() {
+  uname -s 2>/dev/null || printf 'unknown'
+}
+
+is_macos() {
+  [ "$(os_name)" = "Darwin" ]
+}
+
+path_prepend() {
+  local path_entry="$1"
+  [ -n "$path_entry" ] || return 0
+  case ":$PATH:" in
+    *":$path_entry:"*) ;;
+    *) export PATH="$path_entry:$PATH" ;;
+  esac
 }
 
 run_brew() {
@@ -167,10 +184,7 @@ configure_npm_registry() {
   sanitize_inherited_npm_exec_env
   mkdir -p "$NPM_CACHE_DIR"
   mkdir -p "$NPM_GLOBAL_PREFIX/bin"
-  case ":$PATH:" in
-    *":$NPM_GLOBAL_PREFIX/bin:"*) ;;
-    *) export PATH="$NPM_GLOBAL_PREFIX/bin:$PATH" ;;
-  esac
+  path_prepend "$NPM_GLOBAL_PREFIX/bin"
   export npm_config_cache="$NPM_CACHE_DIR"
   export NPM_CONFIG_CACHE="$NPM_CACHE_DIR"
   export npm_config_registry="$NPM_REGISTRY"
@@ -184,18 +198,108 @@ configure_npm_registry() {
 }
 
 npm_install_global() {
+  local npm_log
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  if "$NPM_BIN" install -g \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" \
+    "$@" >"$npm_log" 2>&1; then
+    cat "$npm_log"
+    hash -r 2>/dev/null || true
+    return 0
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    cat "$npm_log" >&2
+    return 1
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install-retry.XXXXXX")"
   sanitize_inherited_npm_exec_env
   "$NPM_BIN" install -g \
     --registry "$NPM_REGISTRY" \
     --cache "$NPM_CACHE_DIR" \
     --prefix "$NPM_GLOBAL_PREFIX" \
-    "$@"
+    "$@" >"$npm_log" 2>&1 || {
+      cat "$npm_log" >&2
+      return 1
+    }
+  cat "$npm_log"
   hash -r 2>/dev/null || true
 }
 
 npx_package() {
+  local npm_log
+  local status
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npx.XXXXXX")"
   sanitize_inherited_npm_exec_env
-  "$NPX_BIN" -y --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "$@"
+  set +e
+  "$NPX_BIN" -y --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "$@" 2>&1 | tee "$npm_log"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    return "$status"
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npx-retry.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  set +e
+  "$NPX_BIN" -y --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "$@" 2>&1 | tee "$npm_log"
+  status=${PIPESTATUS[0]}
+  set -e
+  return "$status"
+}
+
+npm_log_indicates_cache_error() {
+  local npm_log="$1"
+  grep -Eiq 'Invalid response body|_cacache|ENOENT.*(_cacache|content-v2)|tarball data.*corrupted|TAR_BAD_ARCHIVE|zlib: unexpected end of file' "$npm_log"
+}
+
+reset_npm_cache_for_retry() {
+  NPM_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aamp-one-click-npm-cache.XXXXXX")"
+  export npm_config_cache="$NPM_CACHE_DIR"
+  export NPM_CONFIG_CACHE="$NPM_CACHE_DIR"
+  agent_log "npm cache appears corrupted; retrying with fresh npm cache: $NPM_CACHE_DIR"
+}
+
+npm_install_register_helper() {
+  local workdir="$1"
+  local npm_log
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-register-helper-install.XXXXXX")"
+
+  sanitize_inherited_npm_exec_env
+  if "$NPM_BIN" install \
+    --prefix "$workdir" \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    "$LARK_REGISTER_APP_SDK" >"$npm_log" 2>&1; then
+    return 0
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    cat "$npm_log" >&2
+    return 1
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-register-helper-install-retry.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" install \
+    --prefix "$workdir" \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    "$LARK_REGISTER_APP_SDK" >"$npm_log" 2>&1 || {
+      cat "$npm_log" >&2
+      return 1
+    }
 }
 
 validate_agent_name() {
@@ -299,6 +403,94 @@ select_agent_interactively() {
         printf '\033[?25h\n' >&3
         exec 3>&-
         return 0
+        ;;
+    esac
+  done
+}
+
+render_bot_menu() {
+  local selected="$1"
+  local index
+
+  printf '\033[?25l' >&3
+  printf '\033[2K\r请选择飞书 Bot 应用:\n' >&3
+  for index in "${!bot_labels[@]}"; do
+    printf '\033[2K\r' >&3
+    if [ "$index" -eq "$selected" ]; then
+      printf '  > %s\n' "${bot_labels[$index]}" >&3
+    else
+      printf '    %s\n' "${bot_labels[$index]}" >&3
+    fi
+  done
+  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按数字键或 j/k。\n' >&3
+}
+
+select_bot_menu() {
+  local selected=0
+  local key rest
+  local tty_state
+  local line_count
+
+  if ! exec 3<>/dev/tty; then
+    agent_fail "interactive bot selection requires a terminal"
+  fi
+
+  line_count=$((${#bot_labels[@]} + 2))
+  tty_state="$(stty -g <&3)"
+  stty -echo -icanon min 1 time 0 <&3
+  render_bot_menu "$selected"
+  while true; do
+    IFS= read -rsn1 -u 3 key || {
+      stty "$tty_state" <&3
+      printf '\033[?25h\n' >&3
+      exec 3>&-
+      agent_fail "failed to read interactive bot selection"
+    }
+
+    case "$key" in
+      ""|$'\n'|$'\r')
+        stty "$tty_state" <&3
+        printf '\033[?25h\n' >&3
+        exec 3>&-
+        return "$selected"
+        ;;
+      $'\033')
+        IFS= read -rsn2 -u 3 rest || rest=""
+        case "$rest" in
+          "[A")
+            selected=$(( (selected + ${#bot_labels[@]} - 1) % ${#bot_labels[@]} ))
+            printf '\033[%dA' "$line_count" >&3
+            render_bot_menu "$selected"
+            ;;
+          "[B")
+            selected=$(( (selected + 1) % ${#bot_labels[@]} ))
+            printf '\033[%dA' "$line_count" >&3
+            render_bot_menu "$selected"
+            ;;
+          "[C"|"[D")
+            ;;
+        esac
+        ;;
+      k)
+        selected=$(( (selected + ${#bot_labels[@]} - 1) % ${#bot_labels[@]} ))
+        printf '\033[%dA' "$line_count" >&3
+        render_bot_menu "$selected"
+        ;;
+      j)
+        selected=$(( (selected + 1) % ${#bot_labels[@]} ))
+        printf '\033[%dA' "$line_count" >&3
+        render_bot_menu "$selected"
+        ;;
+      [1-9])
+        if [ "$key" -le "${#bot_labels[@]}" ]; then
+          selected=$(( key - 1 ))
+          stty "$tty_state" <&3
+          printf '\033[%dA' "$line_count" >&3
+          render_bot_menu "$selected"
+          printf '\033[?25h\n' >&3
+          exec 3>&-
+          return "$selected"
+        fi
         ;;
     esac
   done
@@ -548,7 +740,7 @@ ensure_lark_env_script() {
   local target="$HOME/lark-env-task.sh"
   agent_log "writing embedded env script: $target"
   install_embedded_lark_env "$target"
-  chmod +x "$target"
+  chmod +x "$target" 2>/dev/null || true
 }
 
 source_lark_env() {
@@ -678,14 +870,16 @@ select_existing_bot_or_create() {
   local app_ids=()
   local names=()
   local secrets=()
+  local bot_labels=()
   local app_id name secret
-  local index choice create_index
+  local index create_index selected
 
   while IFS=$'\t' read -r app_id name secret; do
     [ -n "$app_id" ] || continue
     app_ids+=("$app_id")
     names+=("${name:-$app_id}")
     secrets+=("$secret")
+    bot_labels+=("${name:-$app_id} ($app_id)")
   done < <(load_bot_configs)
 
   if [ "${#app_ids[@]}" -eq 0 ]; then
@@ -693,35 +887,23 @@ select_existing_bot_or_create() {
     return 0
   fi
 
-  printf '\n请选择飞书 Bot 应用:\n' >/dev/tty
-  for index in "${!app_ids[@]}"; do
-    printf '  %d) %s (%s)\n' "$((index + 1))" "${names[$index]}" "${app_ids[$index]}" >/dev/tty
-  done
   create_index=$((${#app_ids[@]} + 1))
-  printf '  %d) 新建应用/选择其他应用\n' "$create_index" >/dev/tty
+  bot_labels+=("新建应用/选择其他应用")
 
-  while true; do
-    choice="$(read_tty_line "输入序号: ")"
-    case "$choice" in
-      ''|*[!0-9]*)
-        printf '请输入有效序号。\n' >/dev/tty
-        ;;
-      *)
-        if [ "$choice" -ge 1 ] && [ "$choice" -le "${#app_ids[@]}" ]; then
-          index=$((choice - 1))
-          APP_ID="${app_ids[$index]}"
-          APP_SECRET="${secrets[$index]}"
-          agent_log "using Feishu bot: ${names[$index]} ($APP_ID)"
-          return 0
-        fi
-        if [ "$choice" -eq "$create_index" ]; then
-          register_feishu_app
-          return 0
-        fi
-        printf '请输入有效序号。\n' >/dev/tty
-        ;;
-    esac
-  done
+  set +e
+  select_bot_menu
+  selected=$?
+  set -e
+
+  if [ "$selected" -eq $((create_index - 1)) ]; then
+    register_feishu_app
+    return 0
+  fi
+
+  index="$selected"
+  APP_ID="${app_ids[$index]}"
+  APP_SECRET="${secrets[$index]}"
+  agent_log "using Feishu bot: ${names[$index]} ($APP_ID)"
 }
 
 register_feishu_app() {
@@ -740,11 +922,7 @@ register_feishu_app() {
   default_name="${AGENT} 飞书 CLI"
 
   agent_log "preparing Feishu app registration helper"
-  "$NPM_BIN" install \
-    --prefix "$workdir" \
-    --registry "$NPM_REGISTRY" \
-    --cache "$NPM_CACHE_DIR" \
-    "$LARK_REGISTER_APP_SDK" >/dev/null
+  npm_install_register_helper "$workdir"
 
   cat >"$register_script" <<'NODE'
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -934,17 +1112,11 @@ install_codem_cli() {
 }
 
 ensure_codem_local_bin_on_path() {
-  case ":$PATH:" in
-    *":$CODEM_LOCAL_BIN:"*) ;;
-    *) export PATH="$CODEM_LOCAL_BIN:$PATH" ;;
-  esac
+  path_prepend "$CODEM_LOCAL_BIN"
 }
 
 ensure_cursor_local_bin_on_path() {
-  case ":$PATH:" in
-    *":$CURSOR_LOCAL_BIN:"*) ;;
-    *) export PATH="$CURSOR_LOCAL_BIN:$PATH" ;;
-  esac
+  path_prepend "$CURSOR_LOCAL_BIN"
 }
 
 find_cursor_agent_cli() {
@@ -998,7 +1170,7 @@ ensure_cursor_acp_command() {
     printf 'cursor_agent=%q\n' "$cursor_agent"
     printf 'exec "$cursor_agent" "$@"\n'
   } > "$cursor_wrapper"
-  chmod +x "$cursor_wrapper"
+  chmod +x "$cursor_wrapper" 2>/dev/null || true
   hash -r 2>/dev/null || true
   find_cursor_acp_cli >/dev/null 2>&1
 }
@@ -1044,6 +1216,7 @@ ensure_agent_cli() {
 }
 
 clear_quarantine_path() {
+  is_macos || return 0
   local target="$1"
   [ -n "$target" ] || return 0
   [ -e "$target" ] || [ -L "$target" ] || return 0
@@ -1070,7 +1243,7 @@ clear_quarantine_path() {
 clear_cli_quarantine() {
   local label="$1"
   local bin="$2"
-  [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] || return 0
+  is_macos || return 0
   command -v xattr >/dev/null 2>&1 || return 0
   [ -n "$bin" ] || return 0
 
@@ -1101,7 +1274,7 @@ clear_cli_quarantine() {
 }
 
 clear_codex_quarantine() {
-  [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] || return 0
+  is_macos || return 0
 
   local codex_bin
   codex_bin="$(command -v codex || true)"
@@ -1174,7 +1347,7 @@ run_codex_login_status() {
   codex login status >/dev/null 2>&1
   local status=$?
   set -e
-  if [ "$status" -eq 137 ]; then
+  if [ "$status" -eq 137 ] && is_macos; then
     local codex_bin
     local codex_real
     codex_bin="$(command -v codex || true)"
@@ -1190,7 +1363,7 @@ run_codex_login() {
   codex login
   local status=$?
   set -e
-  if [ "$status" -eq 137 ]; then
+  if [ "$status" -eq 137 ] && is_macos; then
     local codex_bin
     local codex_real
     codex_bin="$(command -v codex || true)"
@@ -1221,7 +1394,7 @@ run_cursor_login_status() {
   output="$(run_cursor_command status 2>&1)"
   local status=$?
   set -e
-  if [ "$status" -eq 137 ]; then
+  if [ "$status" -eq 137 ] && is_macos; then
     print_cursor_gatekeeper_help
     agent_fail "cursor CLI was killed by macOS security policy"
   fi
@@ -1243,7 +1416,7 @@ run_cursor_login() {
   run_cursor_command login
   local status=$?
   set -e
-  if [ "$status" -eq 137 ]; then
+  if [ "$status" -eq 137 ] && is_macos; then
     print_cursor_gatekeeper_help
     agent_fail "cursor CLI was killed by macOS security policy"
   fi
