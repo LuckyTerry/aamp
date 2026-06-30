@@ -137,12 +137,13 @@ function renderEnvironmentGuidance(options: FeishuTaskDispatchOptions | undefine
 
 function renderDeliverableGuidance(): string[] {
   return [
-    '- Concrete deliverable output rules:',
-    '  - For document deliverables such as reports, plans, specs, requirements, job descriptions, summaries, or long-form Markdown/rich-text content, create a Feishu document first and return a link_delivery output with that document URL. Do not create or upload a local .md file for these document deliverables.',
-    '  - Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
-    '  - For a file or image deliverable, return a file_delivery output with an absolute path. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
-    '  - For an externally hosted deliverable or Feishu document, return a link_delivery output with the URL. The bridge writes it through the text_deliveries append mechanism.',
-    '  - For short text deliverables that are not worth a Feishu document, return a text_delivery output with format=markdown or format=plain_text. The bridge writes it to a temporary file and uploads it as a task_delivery attachment.',
+    '- Deliverable selection priority:',
+    '  1. Prefer Feishu document link_delivery for human-readable deliverables in this Feishu ecosystem.',
+    '  2. For document deliverables such as reports, plans, specs, requirements, job descriptions, summaries, meeting notes, research notes, or long-form Markdown/rich-text content, create a Feishu document first and return a link_delivery output with that document URL. Do not create or upload a local .md file for these document deliverables.',
+    '  3. Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
+    '  4. Use file_delivery only for native file/image artifacts that should remain files, such as images, CSV, PDF, zip archives, binaries, generated media, or code bundles. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
+    '  5. Use link_delivery for an already-hosted external artifact or the Feishu document URL. The bridge writes it through the text_deliveries append mechanism.',
+    '  6. Use text_delivery only for short text that is not worth a Feishu document. Do not use text_delivery for long-form Markdown/rich-text content; create a Feishu document instead. The bridge writes text_delivery to a temporary file and uploads it as a task_delivery attachment.',
     '  - Do not put deliverable content in reply_comment; reply_comment is only for a direct user-visible answer.',
   ]
 }
@@ -184,13 +185,20 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   const deliveryExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
-    summary: 'Completed the requested deliverable.',
+    summary: 'Completed the requested Feishu document deliverable.',
     outputs: [
       {
         kind: 'link_delivery',
         url: 'https://bytedance.larkoffice.com/docx/example',
         title: '交付文档',
       },
+    ],
+  })
+  const fileDeliveryExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'succeeded',
+    summary: 'Completed the requested non-document artifact.',
+    outputs: [
       {
         kind: 'file_delivery',
         path: '/absolute/path/to/non-document-artifact.png',
@@ -248,7 +256,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Normal successful outcomes use status=succeeded with one or more outputs.',
     '- Use status=answered when the user-visible result is just a normal direct reply. If you wrote the reply as a normal Feishu task comment yourself, set reply_written=true and the bridge will not add another result comment. If you cannot write the Feishu comment, set reply_written=false and put the exact reply text in summary; the bridge will comment summary.',
     '- Use reply_comment output only for backward compatibility when returning status=succeeded.',
-    '- Use file_delivery, link_delivery, or text_delivery outputs for concrete deliverables: file, image, document link, long-form text, or rich text.',
+    '- Use deliverable outputs according to the Deliverable Rules priority: prefer Feishu document link_delivery for human-readable document deliverables; use file_delivery only for native file/image artifacts; use text_delivery only for short text.',
     '- Use status=need_help when user input is required before continuing. Do not write the help comment yourself; the bridge will comment the question field.',
     '- Use status=failed only for exceptional execution failures. Do not write the failure comment yourself; the bridge will comment it.',
     '- Do not put deliverable content in reply_comment, including parent task comments. reply_comment is only for direct replies.',
@@ -279,10 +287,12 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- For status=need_help, include question.',
     '- For status=failed, include error.',
     '- Do not include structuredResult.',
+    '- For human-readable document deliverables, prefer Feishu document link_delivery over file_delivery or text_delivery.',
     '- Do not include ACP attachments or FILE references; if a deliverable is needed, return file_delivery, link_delivery, or text_delivery.',
     `- Example reply_comment: ${replyCommentExample}`,
     `- Example answered bridge-comment: ${answeredBridgeCommentExample}`,
-    `- Example delivery: ${deliveryExample}`,
+    `- Example Feishu document delivery: ${deliveryExample}`,
+    `- Example file_delivery artifact: ${fileDeliveryExample}`,
     `- Example failure: ${failureExample}`,
     `- Example need_help: ${helpExample}`,
   ].join('\n')
