@@ -11,6 +11,8 @@ import { createReadStream } from 'node:fs'
 import type {
   BridgeConfig,
   FeishuAppOwner,
+  FeishuDownloadedAttachment,
+  FeishuTaskAttachment,
   FeishuTaskClient,
   FeishuTaskComment,
   FeishuTaskDetails,
@@ -126,6 +128,29 @@ function getArray(value: unknown): unknown[] | undefined {
   return Array.isArray(value) && value.length > 0 ? value : undefined
 }
 
+function contentTypeFromHeaders(headers: unknown): string | undefined {
+  const value = typeof (headers as { get?: (name: string) => unknown } | undefined)?.get === 'function'
+    ? (headers as { get(name: string): unknown }).get('content-type')
+    : (headers as Record<string, unknown> | undefined)?.['content-type']
+      ?? (headers as Record<string, unknown> | undefined)?.['Content-Type']
+  return typeof value === 'string' && value.trim() ? value.split(';')[0]!.trim() : undefined
+}
+
+function bufferFromHttpBody(body: unknown): Buffer {
+  if (Buffer.isBuffer(body)) return body
+  if (body instanceof ArrayBuffer) return Buffer.from(body)
+  if (ArrayBuffer.isView(body)) {
+    return Buffer.from(body.buffer, body.byteOffset, body.byteLength)
+  }
+  if (typeof body === 'string') return Buffer.from(body)
+  throw new Error('Feishu attachment download returned unsupported body type.')
+}
+
+function bufferFromHttpResponse(response: unknown): Buffer {
+  const data = asRecord(response)?.data
+  return bufferFromHttpBody(data ?? response)
+}
+
 function getErrorStatus(error: unknown): number | undefined {
   const record = asRecord(error)
   const response = asRecord(record?.response)
@@ -222,10 +247,69 @@ function normalizeTaskStatus(value: unknown): FeishuTaskStatus | undefined {
   return undefined
 }
 
+function mapV2Attachment(
+  record: JsonRecord,
+  kind: FeishuTaskAttachment['kind'],
+): FeishuTaskAttachment | null {
+  const guid = getString(record.guid)
+  if (!guid) return null
+
+  const resource = asRecord(record.resource)
+  const uploader = asRecord(record.uploader)
+  const size = getNumber(record.size)
+
+  return {
+    guid,
+    kind,
+    ...(getString(record.file_token) ? { fileToken: getString(record.file_token) } : {}),
+    ...(getString(record.name) ? { name: getString(record.name) } : {}),
+    ...(size !== undefined ? { size } : {}),
+    ...(getString(resource?.type) ? { resourceType: getString(resource?.type) } : {}),
+    ...(getString(resource?.id) ? { resourceId: getString(resource?.id) } : {}),
+    ...(getString(uploader?.id) ? { uploaderId: getString(uploader?.id) } : {}),
+    ...(getString(uploader?.type) ? { uploaderType: getString(uploader?.type) } : {}),
+    ...(typeof record.is_cover === 'boolean' ? { isCover: record.is_cover } : {}),
+    ...(getString(record.uploaded_at) ? { uploadedAt: getString(record.uploaded_at) } : {}),
+    ...(getString(record.url) ? { url: getString(record.url) } : {}),
+  }
+}
+
+function mapV2Attachments(value: unknown, kind: FeishuTaskAttachment['kind']): FeishuTaskAttachment[] | undefined {
+  const attachments = getArray(value)
+    ?.map((item) => asRecord(item))
+    .filter((item): item is JsonRecord => Boolean(item))
+    .map((item) => mapV2Attachment(item, kind))
+    .filter((item): item is FeishuTaskAttachment => Boolean(item))
+  return attachments?.length ? attachments : undefined
+}
+
+function mergeAttachmentMetadata(
+  base: FeishuTaskAttachment,
+  detail: FeishuTaskAttachment,
+): FeishuTaskAttachment {
+  return {
+    ...detail,
+    ...base,
+    url: detail.url ?? base.url,
+    name: detail.name ?? base.name,
+    size: detail.size ?? base.size,
+    fileToken: detail.fileToken ?? base.fileToken,
+    resourceType: base.resourceType ?? detail.resourceType,
+    resourceId: base.resourceId ?? detail.resourceId,
+    uploaderId: detail.uploaderId ?? base.uploaderId,
+    uploaderType: detail.uploaderType ?? base.uploaderType,
+    isCover: detail.isCover ?? base.isCover,
+    uploadedAt: detail.uploadedAt ?? base.uploadedAt,
+    kind: base.kind,
+  }
+}
+
 function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails {
   const agentTaskStatus = getNumber(record.agent_task_status)
   const rrule = getString(record.repeat_rule)
   const status = normalizeTaskStatus(record.status)
+  const attachments = mapV2Attachments(record.attachments, 'task_attachment')
+  const attachmentDeliveries = mapV2Attachments(record.attachment_deliveries, 'task_delivery')
 
   return {
     guid: getString(record.guid) ?? fallbackGuid,
@@ -238,6 +322,8 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
     ...(getString(record.parent_task_guid) ? { parentGuid: getString(record.parent_task_guid) } : {}),
     ...(rrule ? { rrule } : {}),
     ...(getArray(record.reminders) ? { reminders: getArray(record.reminders) } : {}),
+    ...(attachments ? { attachments } : {}),
+    ...(attachmentDeliveries ? { attachmentDeliveries } : {}),
   }
 }
 
@@ -403,6 +489,30 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     return this.getV6AppOwner()
   }
 
+  async downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment> {
+    this.logger.log(`[feishu attachment ${attachment.guid}] download via v2 temporary url`)
+    const detail = await this.getV2Attachment(attachment.guid)
+    const resolvedAttachment = mergeAttachmentMetadata(attachment, detail)
+    const url = resolvedAttachment.url
+    if (!url) {
+      throw new Error(`Feishu attachment ${attachment.guid} has no temporary download url.`)
+    }
+
+    const http = this.httpInstance ?? defaultHttpInstance
+    const response = await withRetry(() => http.request({
+      method: 'GET',
+      url,
+      responseType: 'arraybuffer',
+      $return_headers: true,
+    }), this.retry, this.logger, `attachment.download attachment=${attachment.guid}`)
+
+    return {
+      attachment: resolvedAttachment,
+      content: bufferFromHttpResponse(response),
+      contentType: contentTypeFromHeaders(asRecord(response)?.headers),
+    }
+  }
+
   async commentTask(taskGuid: string, content: string): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
@@ -491,6 +601,18 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     const owner = mapV6AppOwner(response as JsonRecord)
     if (!owner) throw new Error(`Feishu app ${this.config.appId} owner not found`)
     return owner
+  }
+
+  private async getV2Attachment(attachmentGuid: string): Promise<FeishuTaskAttachment> {
+    const response = await withRetry(() => this.client.task.v2.attachment.get({
+      path: { attachment_guid: attachmentGuid },
+      params: { user_id_type: this.config.userIdType },
+    }), this.retry, this.logger, `attachment.get attachment=${attachmentGuid}`)
+    const attachment = asRecord(response.data?.attachment)
+    if (!attachment) throw new Error(`Feishu attachment ${attachmentGuid} not found`)
+    const mapped = mapV2Attachment(attachment, 'task_attachment')
+    if (!mapped) throw new Error(`Feishu attachment ${attachmentGuid} not found`)
+    return mapped
   }
 
   private async commentV2Task(taskGuid: string, content: string): Promise<void> {

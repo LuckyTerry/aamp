@@ -123,6 +123,29 @@ export interface FeishuTaskEvent {
 
 export type FeishuTaskStatus = 'todo' | 'done'
 
+export type FeishuTaskAttachmentKind = 'task_attachment' | 'task_delivery'
+
+export interface FeishuTaskAttachment {
+  guid: string
+  kind: FeishuTaskAttachmentKind
+  fileToken?: string
+  name?: string
+  size?: number
+  resourceType?: string
+  resourceId?: string
+  uploaderId?: string
+  uploaderType?: string
+  isCover?: boolean
+  uploadedAt?: string
+  url?: string
+}
+
+export interface FeishuDownloadedAttachment {
+  attachment: FeishuTaskAttachment
+  content: Buffer
+  contentType?: string
+}
+
 export interface FeishuTaskSubtask {
   guid: string
   taskId?: string
@@ -134,6 +157,8 @@ export interface FeishuTaskSubtask {
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]
+  attachments?: FeishuTaskAttachment[]
+  attachmentDeliveries?: FeishuTaskAttachment[]
 }
 
 export interface FeishuTaskComment {
@@ -160,6 +185,8 @@ export interface FeishuTaskDetails {
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]
+  attachments?: FeishuTaskAttachment[]
+  attachmentDeliveries?: FeishuTaskAttachment[]
   subtasks?: FeishuTaskSubtask[]
   comments?: FeishuTaskComment[]
 }
@@ -184,6 +211,7 @@ export interface FeishuTaskClient {
   listComments(taskGuid: string): Promise<FeishuTaskComment[]>
   getComment(commentId: string): Promise<FeishuTaskComment | null>
   getAppOwner(): Promise<FeishuAppOwner>
+  downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment>
   commentTask(taskGuid: string, content: string): Promise<void>
   appendTaskStep(taskGuid: string, content: string): Promise<void>
   appendTaskSteps(taskGuid: string, contents: string[]): Promise<void>

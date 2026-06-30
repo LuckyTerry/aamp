@@ -15,7 +15,14 @@ import type {
 import { loadBridgeState, saveBridgeState } from './config.js'
 import { buildFeishuTaskPromptRules } from './dispatch.js'
 import { FeishuTaskBridgeRuntime } from './runtime.js'
-import type { BridgeConfig, FeishuTaskClient, FeishuTaskDetails, FeishuTaskEvent } from './types.js'
+import type {
+  BridgeConfig,
+  FeishuDownloadedAttachment,
+  FeishuTaskAttachment,
+  FeishuTaskClient,
+  FeishuTaskDetails,
+  FeishuTaskEvent,
+} from './types.js'
 
 type AckHandler = (ack: TaskAck) => void
 type HelpHandler = (help: TaskHelp) => void
@@ -180,8 +187,10 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   listCommentCalls: string[] = []
   getCommentCalls: string[] = []
   getAppOwnerCalls: string[] = []
+  downloadAttachmentCalls: string[] = []
   tasks: Record<string, FeishuTaskDetails> = {}
   pointComments: Record<string, NonNullable<FeishuTaskDetails['comments']>[number]> = {}
+  downloadedAttachments: Record<string, { content: Buffer; contentType?: string; attachment?: Partial<FeishuTaskAttachment> }> = {}
   appOwner: { ownerId: string } | null = { ownerId: 'ou_human' }
 
   async start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void> {
@@ -243,6 +252,20 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.getAppOwnerCalls.push('cli_xxx')
     if (!this.appOwner) throw new Error('app owner unavailable')
     return this.appOwner
+  }
+
+  async downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment> {
+    this.downloadAttachmentCalls.push(attachment.guid)
+    const downloaded = this.downloadedAttachments[attachment.guid]
+    if (!downloaded) throw new Error(`missing fake attachment ${attachment.guid}`)
+    return {
+      attachment: {
+        ...attachment,
+        ...downloaded.attachment,
+      },
+      content: downloaded.content,
+      ...(downloaded.contentType ? { contentType: downloaded.contentType } : {}),
+    }
   }
 
   async commentTask(taskGuid: string, content: string): Promise<void> {
@@ -599,6 +622,143 @@ test('runtime dispatches Feishu task events and comments on task.ack once', asyn
     assert.equal(fakeFeishu.comments.length, 1)
     assert.equal(fakeFeishu.comments[0]?.taskGuid, 'task_guid_456')
     assert.match(fakeFeishu.comments[0]?.content ?? '', /已收到任务派发请求/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime forwards Feishu task attachments to AAMP dispatch', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_with_attachments = {
+    guid: 'task_with_attachments',
+    taskId: 't_attach',
+    summary: '分析附件',
+    status: 'todo',
+    attachments: [
+      {
+        guid: 'att_parent',
+        kind: 'task_attachment',
+        name: 'input.png',
+        size: 4,
+        resourceType: 'task',
+        resourceId: 'task_with_attachments',
+      },
+    ],
+    attachmentDeliveries: [
+      {
+        guid: 'att_delivery',
+        kind: 'task_delivery',
+        name: 'previous.txt',
+        size: 8,
+        resourceType: 'task_delivery',
+        resourceId: 'task_with_attachments',
+      },
+    ],
+    subtasks: [
+      {
+        guid: 'child_attach',
+        taskId: 't_child_attach',
+        summary: '子任务附件',
+        status: 'todo',
+        attachments: [
+          {
+            guid: 'att_child',
+            kind: 'task_attachment',
+            name: 'child.csv',
+            size: 6,
+            resourceType: 'task',
+            resourceId: 'child_attach',
+          },
+        ],
+      },
+    ],
+  }
+  fakeFeishu.downloadedAttachments.att_parent = { content: Buffer.from('png\n'), contentType: 'image/png' }
+  fakeFeishu.downloadedAttachments.att_delivery = { content: Buffer.from('previous'), contentType: 'text/plain' }
+  fakeFeishu.downloadedAttachments.att_child = { content: Buffer.from('a,b\n1,2'), contentType: 'text/csv' }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_attach',
+      taskGuid: 'task_with_attachments',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266152',
+    })
+
+    const sent = fakeAamp.sentTasks[0]
+    assert.ok(sent)
+    assert.deepEqual(fakeFeishu.downloadAttachmentCalls, ['att_parent', 'att_delivery', 'att_child'])
+    assert.equal(sent.attachments?.length, 3)
+    assert.deepEqual(sent.attachments?.map((attachment) => attachment.filename), [
+      'task-task_wit-input.png',
+      'delivery-task_wit-previous.txt',
+      'child-1-child_at-child.csv',
+    ])
+    assert.equal(sent.attachments?.[0]?.contentType, 'image/png')
+    assert.equal(sent.attachments?.[1]?.contentType, 'text/plain')
+    assert.equal(sent.attachments?.[2]?.contentType, 'text/csv')
+    assert.match(sent.bodyText ?? '', /Task attachments:/)
+    assert.match(sent.bodyText ?? '', /input\.png \| guid=att_parent \| kind=task_attachment/)
+    assert.match(sent.bodyText ?? '', /Task delivery attachments:/)
+    assert.match(sent.bodyText ?? '', /previous\.txt \| guid=att_delivery \| kind=task_delivery/)
+    assert.match(sent.bodyText ?? '', /Child task attachments:/)
+    assert.match(sent.bodyText ?? '', /child\.csv \| guid=att_child \| kind=task_attachment/)
+    assert.doesNotMatch(sent.bodyText ?? '', /Attachment notes:/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime keeps dispatching when Feishu attachment download fails', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_with_bad_attachment = {
+    guid: 'task_with_bad_attachment',
+    taskId: 't_bad_attach',
+    summary: '分析缺失附件',
+    status: 'todo',
+    attachments: [
+      {
+        guid: 'att_missing',
+        kind: 'task_attachment',
+        name: 'missing.pdf',
+        size: 1024,
+      },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_bad_attach',
+      taskGuid: 'task_with_bad_attachment',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266152',
+    })
+
+    const sent = fakeAamp.sentTasks[0]
+    assert.ok(sent)
+    assert.equal(sent.attachments, undefined)
+    assert.match(sent.bodyText ?? '', /Attachment notes:/)
+    assert.match(sent.bodyText ?? '', /Failed to download missing\.pdf guid=att_missing kind=task_attachment 1024 bytes from task:task_with_bad_attachment/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

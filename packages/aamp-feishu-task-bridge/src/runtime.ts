@@ -1,5 +1,6 @@
 import {
   AampClient,
+  type AampAttachment,
   type AampStreamEvent,
   type SendTaskOptions,
   type StreamSubscription,
@@ -30,6 +31,7 @@ import type {
   FeishuAppOwnerState,
   BridgeState,
   BridgeTaskState,
+  FeishuTaskAttachment,
   FeishuTaskClient,
   FeishuTaskComment,
   FeishuTaskDetails,
@@ -56,6 +58,8 @@ const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
 const MAX_DELIVERY_FILE_SIZE_BYTES = 50 * 1024 * 1024
+const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
+const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
 const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
 const TERMINAL_TASK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const HELP_NEEDED_TASK_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
@@ -73,6 +77,17 @@ interface PendingStreamStep {
 interface StreamStepBuffer {
   steps: PendingStreamStep[]
   timer?: ReturnType<typeof setTimeout>
+}
+
+interface FeishuTaskAttachmentRef {
+  attachment: FeishuTaskAttachment
+  sourceLabel: string
+  filenamePrefix: string
+}
+
+interface PreparedFeishuTaskAttachments {
+  attachments: AampAttachment[]
+  notes: string[]
 }
 
 function formatLogMessage(level: LogLevel, message?: unknown): string {
@@ -124,6 +139,79 @@ function formatOutputCounts(outputs: FeishuTaskResultOutput[]): string {
     `file_delivery=${counts.file_delivery}`,
     `text_delivery=${counts.text_delivery}`,
   ].join(' ')
+}
+
+function describeFeishuAttachment(attachment: FeishuTaskAttachment): string {
+  return [
+    attachment.name?.trim() || attachment.guid,
+    `guid=${attachment.guid}`,
+    `kind=${attachment.kind}`,
+    attachment.size !== undefined ? `${attachment.size} bytes` : '',
+  ].filter(Boolean).join(' ')
+}
+
+function extensionForContentType(contentType?: string): string | undefined {
+  const normalized = contentType?.toLowerCase()
+  const byContentType: Record<string, string> = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/svg+xml': '.svg',
+  }
+  return normalized ? byContentType[normalized] : undefined
+}
+
+function resolveAttachmentContentType(filename: string, downloadedContentType?: string): string {
+  if (downloadedContentType?.trim()) return downloadedContentType.trim()
+  const ext = path.extname(filename).toLowerCase()
+  const byExtension: Record<string, string> = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.md': 'text/markdown',
+    '.json': 'application/json',
+    '.csv': 'text/csv',
+    '.zip': 'application/zip',
+  }
+  return byExtension[ext] ?? 'application/octet-stream'
+}
+
+function sanitizeAampAttachmentFilename(value: string | undefined, fallback: string): string {
+  const normalized = value
+    ?.replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim()
+  const lastSegment = (normalized || fallback).split(/[\\/]+/).filter(Boolean).pop() ?? fallback
+  const filename = lastSegment
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return filename && filename !== '.' && filename !== '..' ? filename : fallback
+}
+
+function resolveAampAttachmentFilename(
+  ref: FeishuTaskAttachmentRef,
+  downloadedContentType?: string,
+): string {
+  const baseName = sanitizeAampAttachmentFilename(ref.attachment.name, `feishu-attachment-${ref.attachment.guid}`)
+  const withExtension = path.extname(baseName)
+    ? baseName
+    : `${baseName}${extensionForContentType(downloadedContentType) ?? ''}`
+  return sanitizeAampAttachmentFilename(`${ref.filenamePrefix}${withExtension}`, `feishu-attachment-${ref.attachment.guid}`)
+}
+
+function appendAttachmentNotes(bodyText: string, notes: string[]): string {
+  if (notes.length === 0) return bodyText
+  return [
+    bodyText,
+    'Attachment notes:',
+    ...notes.map((note) => `- ${note}`),
+  ].join('\n')
 }
 
 function normalizeDomain(domain: string | undefined): string | undefined {
@@ -1082,6 +1170,95 @@ export class FeishuTaskBridgeRuntime {
     return hydratedTask
   }
 
+  private collectFeishuTaskAttachmentRefs(task: FeishuTaskDetails): FeishuTaskAttachmentRef[] {
+    const refs: FeishuTaskAttachmentRef[] = []
+    const taskPrefix = `task-${task.guid.slice(0, 8)}-`
+
+    for (const attachment of task.attachments ?? []) {
+      refs.push({
+        attachment,
+        sourceLabel: `task:${task.guid}`,
+        filenamePrefix: taskPrefix,
+      })
+    }
+
+    for (const attachment of task.attachmentDeliveries ?? []) {
+      refs.push({
+        attachment,
+        sourceLabel: `task_delivery:${task.guid}`,
+        filenamePrefix: `delivery-${task.guid.slice(0, 8)}-`,
+      })
+    }
+
+    for (const [index, subtask] of (task.subtasks ?? []).entries()) {
+      const childPrefix = `child-${index + 1}-${subtask.guid.slice(0, 8)}-`
+      for (const attachment of subtask.attachments ?? []) {
+        refs.push({
+          attachment,
+          sourceLabel: `child:${subtask.guid}`,
+          filenamePrefix: childPrefix,
+        })
+      }
+      for (const attachment of subtask.attachmentDeliveries ?? []) {
+        refs.push({
+          attachment,
+          sourceLabel: `child_delivery:${subtask.guid}`,
+          filenamePrefix: `${childPrefix}delivery-`,
+        })
+      }
+    }
+
+    return refs
+  }
+
+  private async prepareFeishuTaskAttachments(task: FeishuTaskDetails): Promise<PreparedFeishuTaskAttachments> {
+    const attachments: AampAttachment[] = []
+    const notes: string[] = []
+    const seenGuids = new Set<string>()
+
+    for (const ref of this.collectFeishuTaskAttachmentRefs(task)) {
+      if (seenGuids.has(ref.attachment.guid)) continue
+      seenGuids.add(ref.attachment.guid)
+
+      if (attachments.length >= MAX_INCOMING_FEISHU_ATTACHMENTS) {
+        notes.push(`Skipped ${describeFeishuAttachment(ref.attachment)} from ${ref.sourceLabel}: reached ${MAX_INCOMING_FEISHU_ATTACHMENTS} attachment limit.`)
+        continue
+      }
+
+      if (
+        ref.attachment.size !== undefined
+        && ref.attachment.size > MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES
+      ) {
+        notes.push(`Skipped ${describeFeishuAttachment(ref.attachment)} from ${ref.sourceLabel}: larger than ${MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES} bytes.`)
+        continue
+      }
+
+      try {
+        const downloaded = await this.feishu.downloadAttachment(ref.attachment)
+        if (downloaded.content.byteLength > MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES) {
+          notes.push(`Skipped ${describeFeishuAttachment(downloaded.attachment)} from ${ref.sourceLabel}: downloaded file is larger than ${MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES} bytes.`)
+          continue
+        }
+
+        const filename = resolveAampAttachmentFilename(ref, downloaded.contentType)
+        attachments.push({
+          filename,
+          contentType: resolveAttachmentContentType(filename, downloaded.contentType),
+          content: downloaded.content,
+          size: downloaded.content.byteLength,
+        })
+      } catch (error) {
+        notes.push(`Failed to download ${describeFeishuAttachment(ref.attachment)} from ${ref.sourceLabel}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    if (attachments.length > 0 || notes.length > 0) {
+      this.debugLog(`[feishu task ${task.guid}] prepared attachments downloaded=${attachments.length} notes=${notes.length}`)
+    }
+
+    return { attachments, notes }
+  }
+
   private async handleFeishuTaskEvent(event: FeishuTaskEvent): Promise<void> {
     this.state.lastFeishuEventAt = new Date().toISOString()
     this.state.lastFeishuEventId = event.eventId
@@ -1107,10 +1284,12 @@ export class FeishuTaskBridgeRuntime {
         await this.ignoreFeishuTaskEvent(event, ignoreReason ?? 'event_type_not_allowlisted')
         return
       }
+      const preparedAttachments = await this.prepareFeishuTaskAttachments(task)
       const dispatch = buildFeishuTaskDispatch(event, task, eventKind, {
         feishuAppId: this.config.feishu.appId,
         ...buildFeishuTaskDispatchOptions(this.config),
       })
+      const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
       const now = new Date().toISOString()
       taskState = {
         taskGuid: task.guid,
@@ -1132,6 +1311,7 @@ export class FeishuTaskBridgeRuntime {
         `source=${dispatch.dispatchContext.source ?? '(none)'}`,
         `event_kind=${dispatch.dispatchContext.feishu_event_kind ?? '(none)'}`,
         `event_types=${dispatch.dispatchContext.feishu_task_event_types ?? '(none)'}`,
+        `attachments=${preparedAttachments.attachments.length}`,
       ].join(' '))
 
       const result = await this.aamp.sendTask({
@@ -1139,10 +1319,11 @@ export class FeishuTaskBridgeRuntime {
         taskId: dispatch.taskId,
         sessionKey: dispatch.sessionKey,
         title: dispatch.title,
-        bodyText: dispatch.bodyText,
-        rawBodyText: dispatch.bodyText,
+        bodyText,
+        rawBodyText: bodyText,
         dispatchContext: dispatch.dispatchContext,
         promptRules: dispatch.promptRules,
+        attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       })
 
       this.state.tasks[dispatch.taskId] = {
@@ -1155,7 +1336,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampDispatchTaskId = dispatch.taskId
       this.rememberEvent(event)
       await this.persistState()
-      this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} dispatch sent aamp_task=${dispatch.taskId} to=${this.config.targetAgentEmail}`)
+      this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} dispatch sent aamp_task=${dispatch.taskId} to=${this.config.targetAgentEmail} attachments=${preparedAttachments.attachments.length} attachment_notes=${preparedAttachments.notes.length}`)
       this.debugLog(`[aamp dispatch ${dispatch.taskId}] sent message=${result.messageId}`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)

@@ -375,6 +375,170 @@ test('OapiFeishuTaskClient uploads task delivery attachments through v2 attachme
   }
 })
 
+test('OapiFeishuTaskClient maps task attachments and attachment deliveries from v2 task get', async () => {
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    userIdType: 'open_id',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        task: {
+          get: async () => ({
+            data: {
+              task: {
+                guid: 'task_guid_attach',
+                task_id: 't_attach',
+                summary: '分析附件',
+                status: 'todo',
+                attachments: [
+                  {
+                    guid: 'att_task',
+                    file_token: 'box_task',
+                    name: 'input.png',
+                    size: 12,
+                    resource: {
+                      type: 'task',
+                      id: 'task_guid_attach',
+                    },
+                    uploader: {
+                      id: 'ou_user',
+                      type: 'user',
+                    },
+                    is_cover: false,
+                    uploaded_at: '1675742789470',
+                  },
+                ],
+                attachment_deliveries: [
+                  {
+                    guid: 'att_delivery',
+                    file_token: 'box_delivery',
+                    name: 'result.txt',
+                    size: 8,
+                    resource: {
+                      type: 'task_delivery',
+                      id: 'task_guid_attach',
+                    },
+                    url: 'https://example.com/download/result',
+                  },
+                ],
+              },
+            },
+          }),
+        },
+      },
+    },
+  }
+
+  const task = await client.getTaskBase('task_guid_attach')
+
+  assert.deepEqual(task.attachments, [
+    {
+      guid: 'att_task',
+      kind: 'task_attachment',
+      fileToken: 'box_task',
+      name: 'input.png',
+      size: 12,
+      resourceType: 'task',
+      resourceId: 'task_guid_attach',
+      uploaderId: 'ou_user',
+      uploaderType: 'user',
+      isCover: false,
+      uploadedAt: '1675742789470',
+    },
+  ])
+  assert.deepEqual(task.attachmentDeliveries, [
+    {
+      guid: 'att_delivery',
+      kind: 'task_delivery',
+      fileToken: 'box_delivery',
+      name: 'result.txt',
+      size: 8,
+      resourceType: 'task_delivery',
+      resourceId: 'task_guid_attach',
+      url: 'https://example.com/download/result',
+    },
+  ])
+})
+
+test('OapiFeishuTaskClient downloads attachments through v2 get temporary url', async () => {
+  const getCalls: unknown[] = []
+  const downloadCalls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_xxx',
+    appSecret: 'secret',
+    userIdType: 'open_id',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    task: {
+      v2: {
+        attachment: {
+          get: async (payload: unknown) => {
+            getCalls.push(payload)
+            return {
+              data: {
+                attachment: {
+                  guid: 'att_download',
+                  file_token: 'box_download',
+                  name: 'download.txt',
+                  size: 5,
+                  resource: {
+                    type: 'task',
+                    id: 'task_guid_download',
+                  },
+                  url: 'https://example.com/temp-download',
+                },
+              },
+            }
+          },
+        },
+      },
+    },
+  }
+  ;(client as unknown as { httpInstance: unknown }).httpInstance = {
+    request: async (opts: unknown) => {
+      downloadCalls.push(opts)
+      return {
+        data: Buffer.from('hello'),
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+        },
+      }
+    },
+  }
+
+  const downloaded = await client.downloadAttachment({
+    guid: 'att_download',
+    kind: 'task_attachment',
+    name: 'input-name.txt',
+    size: 5,
+  })
+
+  assert.deepEqual(getCalls, [{
+    path: { attachment_guid: 'att_download' },
+    params: { user_id_type: 'open_id' },
+  }])
+  assert.deepEqual(downloadCalls, [{
+    method: 'GET',
+    url: 'https://example.com/temp-download',
+    responseType: 'arraybuffer',
+    $return_headers: true,
+  }])
+  assert.equal(downloaded.attachment.guid, 'att_download')
+  assert.equal(downloaded.attachment.kind, 'task_attachment')
+  assert.equal(downloaded.attachment.name, 'download.txt')
+  assert.equal(downloaded.attachment.fileToken, 'box_download')
+  assert.equal(downloaded.content.toString('utf8'), 'hello')
+  assert.equal(downloaded.contentType, 'text/plain')
+})
+
 test('OapiFeishuTaskClient normalizes escaped newlines before creating v2 comments', async () => {
   const calls: unknown[] = []
   const client = new OapiFeishuTaskClient({

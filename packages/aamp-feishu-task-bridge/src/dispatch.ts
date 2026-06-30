@@ -3,6 +3,7 @@ import type { FeishuTaskDetails, FeishuTaskDispatch, FeishuTaskEvent, FeishuTask
 const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
 type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
+type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
 
 export interface FeishuTaskDispatchOptions {
   feishuAppId?: string
@@ -76,6 +77,37 @@ function renderComments(task: FeishuTaskDetails): string[] {
     ]
     return `- ${parts.join(' | ')}`
   })
+}
+
+function renderAttachment(attachment: FeishuTaskAttachment, index: number, source?: string): string {
+  const parts = [
+    `${index + 1}. ${attachment.name?.trim() || '(unnamed attachment)'}`,
+    `guid=${attachment.guid}`,
+    `kind=${attachment.kind}`,
+    ...(source ? [`source=${source}`] : []),
+    ...(attachment.size !== undefined ? [`size=${attachment.size}`] : []),
+    ...(attachment.resourceType && attachment.resourceId ? [`resource=${attachment.resourceType}:${attachment.resourceId}`] : []),
+    ...(attachment.uploadedAt ? [`uploaded_at=${attachment.uploadedAt}`] : []),
+  ]
+  return `- ${parts.join(' | ')}`
+}
+
+function renderAttachments(attachments: FeishuTaskAttachment[] | undefined): string[] {
+  if (!attachments?.length) return ['- (none)']
+  return attachments.map((attachment, index) => renderAttachment(attachment, index))
+}
+
+function renderChildAttachments(task: FeishuTaskDetails): string[] {
+  const lines: string[] = []
+  for (const subtask of task.subtasks ?? []) {
+    for (const attachment of subtask.attachments ?? []) {
+      lines.push(renderAttachment(attachment, lines.length, `child:${subtask.guid}`))
+    }
+    for (const attachment of subtask.attachmentDeliveries ?? []) {
+      lines.push(renderAttachment(attachment, lines.length, `child:${subtask.guid}`))
+    }
+  }
+  return lines.length ? lines : ['- (none)']
 }
 
 function getLatestEffectiveComment(task: FeishuTaskDetails, appId: string | undefined): string | undefined {
@@ -276,8 +308,14 @@ export function buildFeishuTaskContext(
     ...(taskStatus ? [`- status: ${taskStatus}`] : []),
     ...(task.parentGuid ? [`- parent_guid: ${task.parentGuid}`] : []),
     ...(taskUrl ? [`- url: ${taskUrl}`] : []),
+    'Task attachments:',
+    ...renderAttachments(task.attachments),
+    'Task delivery attachments:',
+    ...renderAttachments(task.attachmentDeliveries),
     'Child tasks:',
     ...renderSubtasks(task),
+    'Child task attachments:',
+    ...renderChildAttachments(task),
     'Comments:',
     ...renderComments(task),
     ...(latestComment ? [`- Latest effective comment: ${latestComment}`] : []),
