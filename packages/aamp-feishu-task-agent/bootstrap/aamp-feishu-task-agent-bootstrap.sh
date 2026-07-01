@@ -7,18 +7,21 @@ APP_SECRET=""
 ENV_NAME="online"
 BOE_ENV_NAME="boe_task_event"
 AAMP_HOST="https://meshmail.ai"
+DEBUG_MODE="false"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
 BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-task-agent/bots.json}"
 CODEM_RD_NETWORK_URL="https://netsegment.bytedance.net/apply/rd-network"
+CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
+CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-task:task,task:comment,task:attachment,task:task:readonly,task:comment:readonly,application:application:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly}"
 FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
 FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.14}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.5}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.13}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.15}"
 
 ACP_PID=""
 CLI_PID=""
@@ -29,6 +32,7 @@ FEISHU_LOG=""
 CODEM_LOGIN_LOG=""
 PAIRING_URL=""
 FEISHU_ENV_ARGS=()
+ACP_AGENT_COMMAND=""
 NPM_BIN=""
 NPX_BIN=""
 CURSOR_LOCAL_BIN="$HOME/.local/bin"
@@ -56,6 +60,7 @@ Options:
   --env online|pre|boe       Runtime environment. Default: online
   --boe-env-name NAME        BOE x-tt-env value. Default: boe_task_event
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
+  --debug                    Enable debug mode for bridge processes
   -h, --help                 Show this help
 USAGE
 }
@@ -514,6 +519,10 @@ parse_args() {
       --aamp-host)
         AAMP_HOST="${2:-}"
         shift 2
+        ;;
+      --debug)
+        DEBUG_MODE="true"
+        shift
         ;;
       -h|--help)
         usage
@@ -1513,31 +1522,88 @@ uses_cli_bridge() {
   [ "$AGENT" = "codem" ]
 }
 
+resolve_codex_cli_for_acp() {
+  if is_macos && [ -x "$CODEX_APP_CLI" ]; then
+    printf '%s\n' "$CODEX_APP_CLI"
+    return 0
+  fi
+
+  command -v codex
+}
+
+build_acp_agent_command() {
+  ACP_AGENT_COMMAND="$AGENT"
+  if [ "$AGENT" != "codex" ]; then
+    return 0
+  fi
+
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp)" || agent_fail "codex CLI is unavailable after installation"
+  ACP_AGENT_COMMAND="env CODEX_PATH=$codex_bin npx -y $CODEX_ACP_PKG"
+  agent_log "using fixed Codex ACP command: CODEX_PATH=$codex_bin $CODEX_ACP_PKG"
+}
+
+validate_codex_acp_command() {
+  [ "$AGENT" = "codex" ] || return 0
+
+  local output
+  set +e
+  output="$(acpx --approve-all --cwd "$PWD" --timeout 30 --agent "$ACP_AGENT_COMMAND" sessions ensure --name aamp-one-click-probe 2>&1)"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    agent_log "Codex ACP command validation failed:"
+    printf '%s\n' "$output" >&2
+    agent_fail "codex ACP command is unavailable; check Codex.app or reinstall codex CLI"
+  fi
+}
+
 start_acp_bridge_and_capture_pairing_url() {
   ACP_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-acp-bridge.XXXXXX")"
-  agent_log "starting ACP bridge; log: $ACP_LOG"
+  agent_log "initializing ACP bridge; log: $ACP_LOG"
 
-  run_acp_bridge init \
-    --agent "$AGENT" \
-    --aamp-host "$AAMP_HOST" \
-    --connection-setup pairing-code \
-    --debug 2>&1 | tee "$ACP_LOG" &
+  local init_payload
+  local init_output
+  init_payload="$(AAMP_HOST="$AAMP_HOST" AGENT="$AGENT" ACP_AGENT_COMMAND="$ACP_AGENT_COMMAND" node -e 'process.stdout.write(JSON.stringify({ aampHost: process.env.AAMP_HOST, agents: [{ name: process.env.AGENT, acpCommand: process.env.ACP_AGENT_COMMAND, createPairing: true }] }))')"
+
+  set +e
+  init_output="$(printf '%s' "$init_payload" | run_acp_bridge init --json 2>&1)"
+  local init_status=$?
+  set -e
+  printf '%s\n' "$init_output" | tee "$ACP_LOG" >/dev/null
+  if [ "$init_status" -ne 0 ]; then
+    agent_fail "ACP bridge init failed. Log: $ACP_LOG"
+  fi
+
+  PAIRING_URL="$(printf '%s' "$init_output" | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const start = input.indexOf("{"); const end = input.lastIndexOf("}"); if (start < 0 || end < start) return; const data = JSON.parse(input.slice(start, end + 1)); process.stdout.write(data.agents?.[0]?.pairing?.connectUrl || ""); });')"
+  [ -n "$PAIRING_URL" ] || agent_fail "ACP bridge init did not return a pairing URL. Log: $ACP_LOG"
+  agent_log "captured Pairing URL"
+
+  agent_log "starting ACP bridge; log: $ACP_LOG"
+  local command=(
+    start
+    --agent "$AGENT"
+  )
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
+
+  run_acp_bridge "${command[@]}" 2>&1 | tee -a "$ACP_LOG" &
 
   ACP_PID=$!
 
   for _ in $(seq 1 90); do
     if ! kill -0 "$ACP_PID" 2>/dev/null; then
-      agent_fail "ACP bridge exited before emitting Pairing URL. Log: $ACP_LOG"
+      agent_fail "ACP bridge exited before becoming ready. Log: $ACP_LOG"
     fi
-    PAIRING_URL="$(grep -Eo 'aamp://connect[^[:space:]]+' "$ACP_LOG" | tail -1 || true)"
-    if [ -n "$PAIRING_URL" ]; then
-      agent_log "captured Pairing URL"
+    if grep -E 'Bridge running with|agent\(s\):' "$ACP_LOG" >/dev/null 2>&1; then
+      agent_log "ACP bridge is ready"
       return 0
     fi
     sleep 1
   done
 
-  agent_fail "timed out waiting for Pairing URL. Log: $ACP_LOG"
+  agent_fail "timed out waiting for ACP bridge readiness. Log: $ACP_LOG"
 }
 
 start_cli_bridge_and_capture_pairing_url() {
@@ -1580,7 +1646,9 @@ start_feishu_task_bridge() {
   if [ "${#FEISHU_ENV_ARGS[@]}" -gt 0 ]; then
     command+=("${FEISHU_ENV_ARGS[@]}")
   fi
-  command+=(--debug)
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
 
   run_feishu_bridge "${command[@]}" 2>&1 | tee "$FEISHU_LOG" &
 
@@ -1640,6 +1708,8 @@ main() {
   if uses_cli_bridge; then
     start_cli_bridge_and_capture_pairing_url
   else
+    build_acp_agent_command
+    validate_codex_acp_command
     start_acp_bridge_and_capture_pairing_url
   fi
   start_feishu_task_bridge

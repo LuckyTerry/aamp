@@ -2578,6 +2578,60 @@ test('runtime handles v2 delivery outputs and completes child tasks before paren
   }
 })
 
+test('runtime treats answered result with link deliverables as task delivery output', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_answered_delivery',
+      taskGuid: 'task_guid_answered_delivery',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_answered_delivery-evt_answered_delivery', {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'answered',
+        summary: '已创建测试工程师 JD 飞书文档。',
+        reply_written: false,
+        deliverables: [
+          {
+            mode: 'link_delivery',
+            doc_type: 'docx',
+            doc_token: 'Rfv1dGbsKoljlaxTJtOciGvZnsd',
+            doc_url: 'https://bytedance.larkoffice.com/docx/Rfv1dGbsKoljlaxTJtOciGvZnsd',
+            summary: '测试工程师 JD',
+          },
+        ],
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_answered_delivery'])
+      assert.equal(fakeFeishu.textDeliveries.length, 1)
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [])
+    assert.deepEqual(fakeFeishu.textDeliveries, [{
+      taskGuid: 'task_guid_answered_delivery',
+      urls: ['https://bytedance.larkoffice.com/docx/Rfv1dGbsKoljlaxTJtOciGvZnsd'],
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime comments answered result when reply was not written by agent', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()

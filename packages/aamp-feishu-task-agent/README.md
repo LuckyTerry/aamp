@@ -36,6 +36,8 @@ Defaults:
 - CLI bridge: `@zengxingyuan/aamp-cli-bridge@0.1.7-dev.3`
 - Feishu task bridge: `@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.10`
 - Authorization method: `pairing-code`
+- Debug mode: disabled by default; pass `--debug` to enable bridge debug logs
+- Codex ACP command: refreshed on every launch; macOS prefers the signed Codex.app binary and pins `@agentclientprotocol/codex-acp`
 
 The launcher writes its embedded environment helper to `~/lark-env-task.sh` on
 every run, overwriting any existing file with the same name.

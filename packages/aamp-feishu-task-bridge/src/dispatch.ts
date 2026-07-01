@@ -140,10 +140,13 @@ function renderDeliverableGuidance(): string[] {
     '- Deliverable selection priority:',
     '  1. Prefer Feishu document link_delivery for human-readable deliverables in this Feishu ecosystem.',
     '  2. For document deliverables such as reports, plans, specs, requirements, job descriptions, summaries, meeting notes, research notes, or long-form Markdown/rich-text content, create a Feishu document first and return a link_delivery output with that document URL. Do not create or upload a local .md file for these document deliverables.',
-    '  3. Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
-    '  4. Use file_delivery only for native file/image artifacts that should remain files, such as images, CSV, PDF, zip archives, binaries, generated media, or code bundles. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
-    '  5. Use link_delivery for an already-hosted external artifact or the Feishu document URL. The bridge writes it through the text_deliveries append mechanism.',
-    '  6. Use text_delivery only for short text that is not worth a Feishu document. Do not use text_delivery for long-form Markdown/rich-text content; create a Feishu document instead. The bridge writes text_delivery to a temporary file and uploads it as a task_delivery attachment.',
+    '  3. Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document.',
+    '  4. lark-cli is an allowed document creation path. For document deliverables, first run `lark-cli docs --help`, then run `lark-cli skills read lark-doc`, then create the document with `lark-cli docs +create --api-version v2 ...` using the workflow described by the lark-doc skill.',
+    '  5. Do not conclude that Feishu document creation is unavailable before trying these lark-cli commands or another concrete Feishu/Lark document creation API.',
+    '  6. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
+    '  7. Use file_delivery only for native file/image artifacts that should remain files, such as images, CSV, PDF, zip archives, binaries, generated media, or code bundles. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
+    '  8. Use link_delivery for an already-hosted external artifact or the Feishu document URL. The bridge writes it through the text_deliveries append mechanism.',
+    '  9. Use text_delivery only for short text that is not worth a Feishu document. Do not use text_delivery for long-form Markdown/rich-text content; create a Feishu document instead. The bridge writes text_delivery to a temporary file and uploads it as a task_delivery attachment.',
     '  - Do not put deliverable content in reply_comment; reply_comment is only for a direct user-visible answer.',
   ]
 }

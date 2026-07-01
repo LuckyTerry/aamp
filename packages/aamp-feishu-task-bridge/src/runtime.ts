@@ -400,13 +400,13 @@ function parseResultOutput(value: unknown, index: number): FeishuTaskResultOutpu
   const output = asRecord(value)
   if (!output) return `outputs[${index}] 必须是对象。`
 
-  const kind = getString(output.kind)
+  const kind = getString(output.kind) ?? getString(output.mode)
   if (kind === 'reply_comment') {
     const content = getString(output.content)
     return content ? { kind, content } : `outputs[${index}].content 不能为空。`
   }
   if (kind === 'link_delivery') {
-    const url = getString(output.url)
+    const url = getString(output.url) ?? getString(output.doc_url)
     return url ? { kind, url } : `outputs[${index}].url 不能为空。`
   }
   if (kind === 'file_delivery') {
@@ -428,8 +428,8 @@ function parseResultOutput(value: unknown, index: number): FeishuTaskResultOutpu
   return `outputs[${index}].kind 不支持：${kind ?? '(missing)'}。`
 }
 
-function parseResultOutputs(value: unknown): FeishuTaskResultOutput[] | string {
-  if (!Array.isArray(value)) return 'status=succeeded 时 outputs 必须是数组。'
+function parseResultOutputs(value: unknown, fieldName = 'outputs'): FeishuTaskResultOutput[] | string {
+  if (!Array.isArray(value)) return `status=succeeded 时 ${fieldName} 必须是数组。`
   if (value.length === 0) return 'status=succeeded 时 outputs 至少包含一项。'
   if (value.length > 10) return 'outputs 最多支持 10 项。'
 
@@ -440,6 +440,12 @@ function parseResultOutputs(value: unknown): FeishuTaskResultOutput[] | string {
     outputs.push(parsed)
   }
   return outputs
+}
+
+function parsePayloadDeliveryOutputs(payload: Record<string, unknown>): FeishuTaskResultOutput[] | string | undefined {
+  if (payload.outputs != null) return parseResultOutputs(payload.outputs, 'outputs')
+  if (payload.deliverables != null) return parseResultOutputs(payload.deliverables, 'deliverables')
+  return undefined
 }
 
 function parseFeishuResultPayload(output: string): Record<string, unknown> | undefined {
@@ -512,6 +518,11 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
 
     const replyWritten = getBoolean(payload.reply_written)
     if (status === 'answered') {
+      const outputs = parsePayloadDeliveryOutputs(payload)
+      if (outputs) {
+        if (typeof outputs === 'string') return { kind: 'failure', message: outputs }
+        return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
+      }
       return {
         kind: 'answered',
         ...(summary ? { summary } : {}),
@@ -520,7 +531,8 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     }
 
     if (status === 'succeeded') {
-      const outputs = parseResultOutputs(payload.outputs)
+      const outputs = parsePayloadDeliveryOutputs(payload)
+      if (!outputs) return { kind: 'failure', message: 'status=succeeded 时 outputs 必须是数组。' }
       if (typeof outputs === 'string') return { kind: 'failure', message: outputs }
       return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
     }
