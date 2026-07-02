@@ -208,6 +208,14 @@ export class FeishuBridgeRuntime {
     await this.persistState()
   }
 
+  registerRawFeishuEventHandlers(handlers: Record<string, (data: unknown) => void>): void {
+    const dispatcher = (this.channel as unknown as { dispatcher?: { register: (handlers: Record<string, (data: unknown) => void>) => unknown } }).dispatcher
+    if (!dispatcher) {
+      throw new Error('Feishu channel does not expose an event dispatcher; task events require app-secret websocket transport.')
+    }
+    dispatcher.register(handlers)
+  }
+
   getStateSnapshot(): BridgeState {
     return structuredClone(this.state)
   }
@@ -2624,8 +2632,9 @@ export class FeishuBridgeRuntime {
 
     task.lastStreamEventId = event.id
     task.updatedAt = new Date().toISOString()
+    const eventType = event.type as string
 
-    if (event.type === 'text.delta') {
+    if (eventType === 'text.delta') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'text')
       const text = this.readStreamPayloadText(event.payload)
       this.appendTextDelta(task, text)
@@ -2635,14 +2644,14 @@ export class FeishuBridgeRuntime {
       return
     }
 
-    if (event.type === 'todo') {
+    if (eventType === 'todo') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.statusLabel = this.readStreamPayloadString(event.payload, ['summary', 'label', 'message', 'text']) || '正在回复...'
       await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
-    if (event.type === 'tool_call') {
+    if (eventType === 'tool_call') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'tool')
       this.appendToolProgress(task, event.payload)
       task.status = 'streaming'
@@ -2651,7 +2660,7 @@ export class FeishuBridgeRuntime {
       return
     }
 
-    if (event.type === 'artifact') {
+    if (eventType === 'artifact') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.progressLabel = this.readStreamPayloadString(event.payload, ['label', 'filename', 'url', 'message'])
       await this.updateStreamingCard(taskId, splitCursor)

@@ -11,6 +11,7 @@ import {
   removeBridgeConfigEntry,
 } from './config.js'
 import { FeishuBridgeRuntime } from './runtime.js'
+import { runTaskEnabledBridge } from './task-runtime.js'
 
 type CommandName = 'init' | 'start' | 'run' | 'status' | 'remove' | 'unbind' | 'help' | 'unknown'
 
@@ -98,6 +99,7 @@ function printUsage(): void {
 Usage:
   aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
   aamp-feishu-bridge start [--config-dir DIR] [--json]
+  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--bot-name NAME] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
   aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
@@ -222,6 +224,25 @@ async function runRemove(args: ParsedArgs): Promise<void> {
 
 async function runBridge(args: ParsedArgs): Promise<void> {
   const configDir = firstArg(args, 'config-dir')
+  if (args.booleans.has('enable-task')) {
+    await runTaskEnabledBridge({
+      configDir,
+      aampHost: firstArg(args, 'aamp-host'),
+      agent: firstArg(args, 'agent'),
+      targetAgentEmail: firstArg(args, 'target-agent'),
+      pairingUrl: firstArg(args, 'pairing-url'),
+      appId: firstArg(args, 'app-id'),
+      appSecret: firstArg(args, 'app-secret'),
+      botName: firstArg(args, 'bot-name'),
+      domain: firstArg(args, 'domain'),
+      boe: args.booleans.has('boe'),
+      pre: args.booleans.has('pre'),
+      env: firstArg(args, 'env'),
+      debug: args.booleans.has('debug'),
+      json: jsonOutput(args),
+    })
+    return
+  }
   const entries = await loadBridgeConfigEntries(configDir)
   if (entries.length === 0) {
     throw new Error(`No bridge config found in ${getBridgeHomeDir(configDir)}. Run "aamp-feishu-bridge init" first.`)

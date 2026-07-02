@@ -4,6 +4,7 @@ set -euo pipefail
 AGENT=""
 APP_ID=""
 APP_SECRET=""
+BOT_NAME=""
 ENV_NAME="online"
 BOE_ENV_NAME="boe_task_event"
 AAMP_HOST="https://meshmail.ai"
@@ -11,17 +12,19 @@ DEBUG_MODE="false"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
-BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-task-agent/bots.json}"
+BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/bots-v2.json}"
 CODEM_RD_NETWORK_URL="https://netsegment.bytedance.net/apply/rd-network"
 CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
 CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
-FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-task:task,task:comment,task:attachment,task:task:readonly,task:comment:readonly,application:application:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly}"
+FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:message:read,im:message:write,im:resource,im:resource:readonly,im:resource:upload,im:resource:download,im:chat,im:chat:readonly,cardkit:card,cardkit:card:readonly,cardkit:card:write,task:task,task:comment,task:attachment,task:task:readonly,task:comment:readonly,application:application:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly}"
 FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
 FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.14}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.5}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.15}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.17}"
+AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-true}"
+AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
 ACP_PID=""
 CLI_PID=""
@@ -72,6 +75,76 @@ agent_log() {
 agent_fail() {
   printf '[aamp-one-click] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+cleanup_stale_one_click_processes() {
+  [ "$AAMP_STALE_PROCESS_CLEANUP" = "true" ] || return 0
+  command -v ps >/dev/null 2>&1 || return 0
+
+  local pass stale line pid command
+  for pass in 1 2; do
+    stale=()
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      stale+=("$line")
+    done < <(
+      ps -axo pid=,ppid=,etime=,command= 2>/dev/null | awk -v min_age="$AAMP_STALE_PROCESS_SECONDS" -v self="$$" '
+        function etime_seconds(value, days, parts, count, time_parts) {
+          days = 0
+          if (index(value, "-") > 0) {
+            count = split(value, parts, "-")
+            days = parts[1] + 0
+            value = parts[count]
+          }
+          count = split(value, time_parts, ":")
+          if (count == 3) return days * 86400 + time_parts[1] * 3600 + time_parts[2] * 60 + time_parts[3]
+          if (count == 2) return days * 86400 + time_parts[1] * 60 + time_parts[2]
+          return days * 86400 + value
+        }
+        {
+          pid = $1
+          ppid = $2
+          etime = $3
+          $1 = ""; $2 = ""; $3 = ""
+          sub(/^[[:space:]]+/, "")
+          command = $0
+
+          if (pid == self) next
+          if (ppid != 1) next
+
+          age = etime_seconds(etime)
+          if (age < min_age) next
+
+          if (command ~ /aamp-one-click-npm-cache/ && command ~ /(aamp-acp-bridge|aamp-feishu-bridge|aamp-feishu-task-bridge|aamp-cli-bridge|codex-acp|acpx)/) {
+            print pid "\t" command
+            next
+          }
+
+          if (command ~ /node_modules\/\.bin\/(aamp-acp-bridge|aamp-feishu-bridge|aamp-feishu-task-bridge|aamp-cli-bridge|codex-acp)/) {
+            print pid "\t" command
+            next
+          }
+
+          if (command ~ /acpx.*__queue-owner/) {
+            print pid "\t" command
+            next
+          }
+        }
+      '
+    )
+
+    [ "${#stale[@]}" -gt 0 ] || return 0
+
+    agent_log "cleaning stale one-click orphan process(es) older than ${AAMP_STALE_PROCESS_SECONDS}s"
+    for line in "${stale[@]}"; do
+      pid="${line%%$'\t'*}"
+      command="${line#*$'\t'}"
+      agent_log "stopping stale process pid=$pid command=$command"
+      kill "$pid" 2>/dev/null || true
+    done
+
+    [ "$pass" -eq 1 ] && sleep 1
+  done
 }
 
 os_name() {
@@ -829,6 +902,7 @@ const next = {
   name: process.env.BOT_NAME || process.env.BOT_APP_ID,
   app_id: process.env.BOT_APP_ID,
   app_secret: process.env.BOT_APP_SECRET,
+  capabilities: ["im", "task"],
   updated_at: new Date().toISOString(),
 };
 let parsed = { bots: [] };
@@ -870,9 +944,29 @@ if (filtered.length !== bots.length) {
 }
 
 forget_current_bot_after_feishu_start_failure() {
-  agent_log "Feishu task bridge failed before ready; removing local bot config for $APP_ID"
+  agent_log "Feishu bridge failed before ready; removing local bot config for $APP_ID"
   remove_bot_config "$APP_ID"
   agent_log "Removed local bot config. Re-run this script and choose 新建应用/选择其他应用 to recreate it."
+}
+
+should_forget_bot_after_feishu_failure() {
+  [ -n "$FEISHU_LOG" ] && [ -f "$FEISHU_LOG" ] || return 1
+
+  # Do not remove a valid bot config when the bridge package or local npm cache
+  # failed before the Feishu bridge process actually started.
+  if grep -E 'npm error code (E404|ENOENT|EACCES|EPERM)|Not Found - GET .*@zengxingyuan%2faamp-feishu-bridge|Invalid response body while trying to fetch|ERR_MODULE_NOT_FOUND|Cannot find package .aamp-sdk.|permission denied|Permission denied|command not found' "$FEISHU_LOG" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  return 0
+}
+
+forget_current_bot_after_feishu_failure_if_needed() {
+  if should_forget_bot_after_feishu_failure; then
+    forget_current_bot_after_feishu_start_failure
+  else
+    agent_log "Feishu bridge failed before ready, but this looks like a package/local environment failure; keeping local bot config for $APP_ID"
+  fi
 }
 
 select_existing_bot_or_create() {
@@ -912,7 +1006,8 @@ select_existing_bot_or_create() {
   index="$selected"
   APP_ID="${app_ids[$index]}"
   APP_SECRET="${secrets[$index]}"
-  agent_log "using Feishu bot: ${names[$index]} ($APP_ID)"
+  BOT_NAME="${names[$index]}"
+  agent_log "using Feishu bot: $BOT_NAME ($APP_ID)"
 }
 
 register_feishu_app() {
@@ -1042,6 +1137,7 @@ NODE
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
 
   bot_name="${bot_name:-$default_name}"
+  BOT_NAME="$bot_name"
   save_bot_config "$bot_name" "$APP_ID" "$APP_SECRET"
   agent_log "saved Feishu bot config: $bot_name ($APP_ID)"
 }
@@ -1515,7 +1611,7 @@ run_cli_bridge() {
 }
 
 run_feishu_bridge() {
-  npx_package --package "$FEISHU_BRIDGE_PKG" aamp-feishu-task-bridge "$@"
+  npx_package --package "$FEISHU_BRIDGE_PKG" aamp-feishu-bridge "$@"
 }
 
 uses_cli_bridge() {
@@ -1633,13 +1729,16 @@ start_cli_bridge_and_capture_pairing_url() {
 }
 
 start_feishu_task_bridge() {
-  FEISHU_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-feishu-task-bridge.XXXXXX")"
-  agent_log "starting Feishu task bridge; log: $FEISHU_LOG"
+  FEISHU_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-feishu-bridge.XXXXXX")"
+  agent_log "starting Feishu bridge with task enabled; log: $FEISHU_LOG"
   local command=(
-    init
+    start
+    --enable-task
     --aamp-host "$AAMP_HOST" \
+    --agent "$AGENT" \
     --app-id "$APP_ID" \
     --app-secret "$APP_SECRET" \
+    --bot-name "${BOT_NAME:-$AGENT 飞书 CLI}" \
     --pairing-url "$PAIRING_URL"
   )
 
@@ -1656,25 +1755,25 @@ start_feishu_task_bridge() {
 
   for _ in $(seq 1 90); do
     if ! kill -0 "$FEISHU_PID" 2>/dev/null; then
-      agent_log "Feishu task bridge exited before becoming ready. Log: $FEISHU_LOG"
+      agent_log "Feishu bridge exited before becoming ready. Log: $FEISHU_LOG"
       tail -80 "$FEISHU_LOG" >&2 || true
-      forget_current_bot_after_feishu_start_failure
-      agent_fail "Feishu task bridge exited before ready"
+      forget_current_bot_after_feishu_failure_if_needed
+      agent_fail "Feishu bridge exited before ready"
     fi
 
-    if grep -E 'Feishu task bridge is running for|\[feishu\] listener started|\[feishu ws\] connected' "$FEISHU_LOG" >/dev/null 2>&1; then
-      agent_log "Feishu task bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
+    if grep -E 'Feishu bridge IM \+ Task is running for|bridge.task_runtime.running|\[feishu\] listener started|\[feishu ws\] connected' "$FEISHU_LOG" >/dev/null 2>&1; then
+      agent_log "Feishu bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
       return 0
     fi
 
     sleep 1
   done
 
-  agent_log "timed out waiting for Feishu task bridge readiness. Log: $FEISHU_LOG"
-  agent_log "last 80 lines from Feishu task bridge log:"
+  agent_log "timed out waiting for Feishu bridge readiness. Log: $FEISHU_LOG"
+  agent_log "last 80 lines from Feishu bridge log:"
   tail -80 "$FEISHU_LOG" >&2 || true
-  forget_current_bot_after_feishu_start_failure
-  agent_fail "timed out waiting for Feishu task bridge readiness"
+  forget_current_bot_after_feishu_failure_if_needed
+  agent_fail "timed out waiting for Feishu bridge readiness"
 }
 
 cleanup() {
@@ -1696,6 +1795,7 @@ main() {
   trap cleanup EXIT INT TERM
 
   parse_args "$@"
+  cleanup_stale_one_click_processes
   ensure_node_toolchain
   build_feishu_env_args
   source_lark_env

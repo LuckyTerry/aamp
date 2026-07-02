@@ -1,7 +1,8 @@
 # aamp-feishu-task-agent
 
-One-click launcher for running the AAMP ACP bridge and Feishu task bridge
-together. Use the standalone script as the single entrypoint:
+One-click launcher for running the AAMP ACP/CLI bridge and unified Feishu
+bridge with task support together. Use the standalone script as the single
+entrypoint:
 
 ```bash
 bash aamp-feishu-task-agent-bootstrap.sh \
@@ -32,9 +33,9 @@ Defaults:
 
 - Environment: `online`
 - AAMP host: `https://meshmail.ai`
-- ACP bridge: `@zengxingyuan/aamp-acp-bridge@0.1.28-dev.11`
-- CLI bridge: `@zengxingyuan/aamp-cli-bridge@0.1.7-dev.3`
-- Feishu task bridge: `@zengxingyuan/aamp-feishu-task-bridge@0.1.1-dev.10`
+- ACP bridge: `@zengxingyuan/aamp-acp-bridge@0.1.28-dev.14`
+- CLI bridge: `@zengxingyuan/aamp-cli-bridge@0.1.7-dev.5`
+- Feishu bridge: `@zengxingyuan/aamp-feishu-bridge@0.1.14` with `--enable-task`
 - Authorization method: `pairing-code`
 - Debug mode: disabled by default; pass `--debug` to enable bridge debug logs
 - Codex ACP command: refreshed on every launch; macOS prefers the signed Codex.app binary and pins `@agentclientprotocol/codex-acp`
