@@ -17,6 +17,9 @@ import type {
   FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskOrigin,
+  FeishuTaskOriginReferResource,
+  FeishuTaskOriginSourceMessage,
   FeishuTaskStatus,
   FeishuTaskSubtask,
 } from './types.js'
@@ -283,6 +286,43 @@ function mapV2Attachments(value: unknown, kind: FeishuTaskAttachment['kind']): F
   return attachments?.length ? attachments : undefined
 }
 
+function mapV2OriginSourceMessage(value: unknown): FeishuTaskOriginSourceMessage | undefined {
+  const record = asRecord(value)
+  if (!record) return undefined
+  const messageId = getString(record.message_id)
+  const content = getString(record.content)
+  if (!messageId && !content) return undefined
+  return {
+    ...(messageId ? { messageId } : {}),
+    ...(content ? { content } : {}),
+  }
+}
+
+function mapV2OriginReferResource(value: unknown): FeishuTaskOriginReferResource | null {
+  const record = asRecord(value)
+  if (!record) return null
+  const resourceId = getString(record.resource_id)
+  const type = getString(record.type)
+  const sourceMessage = mapV2OriginSourceMessage(record.source_message)
+  const unavailableReason = getString(record.unavailable_reason)
+  if (!resourceId && !type && !sourceMessage && !unavailableReason) return null
+  return {
+    ...(resourceId ? { resourceId } : {}),
+    ...(type ? { type } : {}),
+    ...(sourceMessage ? { sourceMessage } : {}),
+    ...(unavailableReason ? { unavailableReason } : {}),
+  }
+}
+
+function mapV2Origin(value: unknown): FeishuTaskOrigin | undefined {
+  const origin = asRecord(value)
+  if (!origin) return undefined
+  const referResources = getArray(origin.refer_resources)
+    ?.map(mapV2OriginReferResource)
+    .filter((item): item is FeishuTaskOriginReferResource => Boolean(item))
+  return referResources?.length ? { referResources } : undefined
+}
+
 function mergeAttachmentMetadata(
   base: FeishuTaskAttachment,
   detail: FeishuTaskAttachment,
@@ -310,6 +350,7 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
   const status = normalizeTaskStatus(record.status)
   const attachments = mapV2Attachments(record.attachments, 'task_attachment')
   const attachmentDeliveries = mapV2Attachments(record.attachment_deliveries, 'task_delivery')
+  const origin = mapV2Origin(record.origin)
 
   return {
     guid: getString(record.guid) ?? fallbackGuid,
@@ -322,6 +363,7 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
     ...(getString(record.parent_task_guid) ? { parentGuid: getString(record.parent_task_guid) } : {}),
     ...(rrule ? { rrule } : {}),
     ...(getArray(record.reminders) ? { reminders: getArray(record.reminders) } : {}),
+    ...(origin ? { origin } : {}),
     ...(attachments ? { attachments } : {}),
     ...(attachmentDeliveries ? { attachmentDeliveries } : {}),
   }

@@ -118,6 +118,40 @@ test('buildFeishuTaskContext includes only task, child, comment, and event facts
   assert.doesNotMatch(context, /runtime next_action_specs/i)
 })
 
+test('buildFeishuTaskContext includes source message context and only document links', () => {
+  const context = buildFeishuTaskContext(event, {
+    ...task,
+    origin: {
+      referResources: [
+        {
+          resourceId: 'refer_resource_1',
+          type: 'message',
+          sourceMessage: {
+            messageId: 'om_message_1',
+            content: [
+              '复选消息 1：请参考文档 https://bytedance.larkoffice.com/docx/DOCX123。',
+              '复选消息 2：旧版文档 https://example.feishu.cn/docs/DOCS456,',
+              '复选消息 3：知识库 https://bytedance.larkoffice.com/wiki/WIKI789)',
+              '不要把表格当文档 https://bytedance.larkoffice.com/sheets/SHEET123',
+            ].join('\n'),
+          },
+        },
+      ],
+    },
+  }, 'task_create')
+
+  assert.match(context, /Task source context:/)
+  assert.match(context, /resource_id=refer_resource_1/)
+  assert.match(context, /message_id=om_message_1/)
+  assert.match(context, /复选消息 1：请参考文档/)
+  assert.match(context, /Detected source document links:/)
+  assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/docx\/DOCX123/)
+  assert.match(context, /https:\/\/example\.feishu\.cn\/docs\/DOCS456/)
+  assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/wiki\/WIKI789/)
+  const detectedLinksSection = context.slice(context.indexOf('Detected source document links:'), context.indexOf('Task attachments:'))
+  assert.doesNotMatch(detectedLinksSection, /https:\/\/bytedance\.larkoffice\.com\/sheets\/SHEET123/)
+})
+
 test('buildFeishuTaskContext uses user or non-current app comments as effective comments', () => {
   const context = buildFeishuTaskContext(commentEvent, {
     ...task,
@@ -232,8 +266,14 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.match(rules, /The bridge writes link_delivery, file_delivery, and text_delivery outputs/i)
   assert.match(rules, /The bridge completes or blocks parent and child tasks after the final result/i)
   assert.match(rules, /latest effective comment/i)
+  assert.match(rules, /source context/i)
+  assert.match(rules, /Source Document Rules:/)
+  assert.match(rules, /lark-cli docs --help/i)
+  assert.match(rules, /lark-cli skills read lark-doc/i)
+  assert.match(rules, /cannot be accessed after a concrete lark-cli attempt/i)
   assert.equal(countOccurrences(rules, /Feishu Write Contract:/g), 1)
   assert.equal(countOccurrences(rules, /Newline Rules:/g), 1)
+  assert.equal(countOccurrences(rules, /Source Document Rules:/g), 1)
   assert.equal(countOccurrences(rules, /Context Compression Contract:/g), 1)
   assert.equal(countOccurrences(rules, /Final Result Contract:/g), 1)
   assert.doesNotMatch(rules, /latest effective human comment/i)

@@ -4,6 +4,9 @@ const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
 type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
+type FeishuTaskOriginReferResource = NonNullable<NonNullable<FeishuTaskDetails['origin']>['referResources']>[number]
+const FEISHU_DOCUMENT_HOST_SUFFIXES = ['larkoffice.com', 'feishu.cn', 'larksuite.com']
+const FEISHU_DOCUMENT_PATH_PREFIXES = ['/docx', '/docs', '/wiki']
 
 export interface FeishuTaskDispatchOptions {
   feishuAppId?: string
@@ -77,6 +80,81 @@ function renderComments(task: FeishuTaskDetails): string[] {
     ]
     return `- ${parts.join(' | ')}`
   })
+}
+
+function trimUrlCandidate(value: string): string {
+  return value.replace(/[),.;:!?，。）、；：！？\]}]+$/u, '')
+}
+
+function isAllowedFeishuDocumentHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase()
+  return FEISHU_DOCUMENT_HOST_SUFFIXES.some((suffix) => (
+    normalized === suffix || normalized.endsWith(`.${suffix}`)
+  ))
+}
+
+function isFeishuDocumentPath(pathname: string): boolean {
+  const normalized = pathname.toLowerCase()
+  return FEISHU_DOCUMENT_PATH_PREFIXES.some((prefix) => (
+    normalized === prefix || normalized.startsWith(`${prefix}/`)
+  ))
+}
+
+function extractFeishuDocumentLinks(text: string): string[] {
+  const links: string[] = []
+  const seen = new Set<string>()
+  const matches = text.matchAll(/https?:\/\/[^\s<>"'`]+/gi)
+  for (const match of matches) {
+    const candidate = trimUrlCandidate(match[0])
+    let parsed: URL
+    try {
+      parsed = new URL(candidate)
+    } catch {
+      continue
+    }
+    if (!isAllowedFeishuDocumentHost(parsed.hostname)) continue
+    if (!isFeishuDocumentPath(parsed.pathname)) continue
+    const key = `${parsed.protocol}//${parsed.hostname.toLowerCase()}${parsed.pathname}${parsed.search}${parsed.hash}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    links.push(candidate)
+  }
+  return links
+}
+
+function renderSourceResource(resource: FeishuTaskOriginReferResource, index: number): string[] {
+  const parts = [
+    ...(resource.resourceId ? [`resource_id=${resource.resourceId}`] : []),
+    ...(resource.type ? [`type=${resource.type}`] : []),
+    ...(resource.sourceMessage?.messageId ? [`message_id=${resource.sourceMessage.messageId}`] : []),
+    ...(resource.unavailableReason ? [`unavailable_reason=${resource.unavailableReason}`] : []),
+  ]
+  const lines = [`- ${index + 1}. ${parts.join(' | ') || '(source resource)'}`]
+  const content = nonEmpty(resource.sourceMessage?.content)
+  if (content) {
+    lines.push('  content:')
+    lines.push(...content.split(/\r?\n/).map((line) => `    ${line}`))
+  }
+  return lines
+}
+
+function renderSourceContext(task: FeishuTaskDetails): string[] {
+  const resources = task.origin?.referResources ?? []
+  if (resources.length === 0) return []
+  const sourceText = resources
+    .map((resource) => resource.sourceMessage?.content ?? '')
+    .join('\n')
+  const documentLinks = extractFeishuDocumentLinks(sourceText)
+  return [
+    'Task source context:',
+    ...resources.flatMap(renderSourceResource),
+    ...(documentLinks.length
+      ? [
+          'Detected source document links:',
+          ...documentLinks.map((link) => `- ${link}`),
+        ]
+      : []),
+  ]
 }
 
 function renderAttachment(attachment: FeishuTaskAttachment, index: number, source?: string): string {
@@ -161,6 +239,16 @@ function renderNewlineGuidance(): string[] {
   ]
 }
 
+function renderSourceDocumentGuidance(): string[] {
+  return [
+    '- Source document links detected in Task source context are task input, not deliverables.',
+    '- Before relying on a detected source document link, read it with lark-cli.',
+    '- First run `lark-cli docs --help`, then run `lark-cli skills read lark-doc`, then use the lark-doc workflow to read or export the document content from the URL.',
+    '- Do not ask the user to paste document content before trying lark-cli.',
+    '- If a required source document cannot be accessed after a concrete lark-cli attempt, use status=need_help and identify the inaccessible URL.',
+  ]
+}
+
 function buildFinalResultExample(payload: Record<string, unknown>): string {
   return `AAMP_RESULT_JSON: ${JSON.stringify({
     output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify(payload)}`,
@@ -230,17 +318,20 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or bridge-owned current-task write rules, stop and ask for the original rules before continuing.',
     '',
     'Feishu Task Rules:',
-    '- Treat the Description section as the complete Feishu task context.',
+    '- Treat the Description section as the complete Feishu task context, including Task source context when present.',
     '- Use normalized_kind as the scenario to execute; raw_event_types are reference metadata only.',
     '- This is an existing Feishu task delegation assigned to the app, not a plain chat message and not an ACP direct-answer shortcut.',
-    '- Infer intent only from the Feishu task summary, description, child tasks, comments, latest effective comment, and event metadata in the Description section.',
+    '- Infer intent only from the Feishu task summary, description, Task source context, source documents read via lark-cli from detected source document links, child tasks, comments, latest effective comment, and event metadata in the Description section.',
     '- Do not reconstruct missing intent from unrelated local files, account state, mailbox, credentials, or remote services.',
     '',
     'Intent Rules:',
     '- For task_create or task_reminder_fire, execute the original delegated task intent. For task_reminder_fire, do not treat it as a follow-up question.',
-    '- For task_comment, treat the latest effective comment as the new instruction for this delegated task; continue execution or answer the comment according to its content.',
+    '- For task_comment, treat the latest effective comment as the new instruction for this delegated task; Task source context remains original background for the delegated task.',
     '- Child tasks are context only: do not write child steps or child deliverables directly.',
     '- If the intent is ambiguous or missing required information, use status=need_help.',
+    '',
+    'Source Document Rules:',
+    ...renderSourceDocumentGuidance(),
     '',
     'Feishu Write Contract:',
     '- Do not write current-task comments, status, steps, or deliverables directly.',
@@ -321,6 +412,7 @@ export function buildFeishuTaskContext(
     ...(taskStatus ? [`- status: ${taskStatus}`] : []),
     ...(task.parentGuid ? [`- parent_guid: ${task.parentGuid}`] : []),
     ...(taskUrl ? [`- url: ${taskUrl}`] : []),
+    ...renderSourceContext(task),
     'Task attachments:',
     ...renderAttachments(task.attachments),
     'Task delivery attachments:',

@@ -1683,10 +1683,7 @@ export class FeishuTaskBridgeRuntime {
           await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
         }
 
-        const shouldCompleteFeishuTask = flushedTaskState.feishuEventKind !== 'task_comment'
-        if (shouldCompleteFeishuTask) {
-          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
-        }
+        await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
 
         const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
         const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])

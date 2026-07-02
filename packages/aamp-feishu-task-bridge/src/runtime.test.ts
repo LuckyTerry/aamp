@@ -2675,6 +2675,59 @@ test('runtime comments answered result when reply was not written by agent', asy
   }
 })
 
+test('runtime completes comment-triggered answered results when bridge writes the reply', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_answered_comment = {
+    guid: 'task_guid_answered_comment',
+    taskId: 't_answered_comment',
+    summary: '继续回答日期问题',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [
+      { id: 'comment_answered', authorType: 'user', authorId: 'ou_human', content: '请直接回复答案。', createdAt: '1775793266100' },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_answered_comment',
+      taskGuid: 'task_guid_answered_comment',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_answered_comment-evt_answered_comment', {
+      output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"今天是 2026-07-03。","reply_written":false}',
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_answered_comment'])
+      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_comment-evt_answered_comment']?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_answered_comment',
+      content: '今天是 2026-07-03。',
+    }])
+    assert.deepEqual(
+      runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_comment-evt_answered_comment']?.resultCommentedTaskIds,
+      ['feishu-task-task_guid_answered_comment-evt_answered_comment'],
+    )
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime retries completion without duplicating already applied v2 delivery outputs', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const deliveryFilePath = path.join(configDir, 'retry-report.md')

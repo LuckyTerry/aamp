@@ -47,9 +47,10 @@ Feishu task, not as a plain chat question. It carries
 `source=feishu-task`, task guid/id/status, event id/types, event kind, and
 whether the task has children in dispatch context. The dispatched `bodyText`
 is also sent as `rawBodyText`; it contains only Feishu task context facts: the
-parent task text, child task text, loaded task comments, latest effective
-comment, and event metadata. This lets the target Agent infer intent directly
-without installing a Feishu task skill.
+parent task text, source message context from `origin.refer_resources`, detected
+source Feishu document links, child task text, loaded task comments, latest
+effective comment, and event metadata. This lets the target Agent infer intent
+directly without installing a Feishu task skill.
 
 For ACP agents, the bridge also sends `promptRules` on `task.dispatch` so
 `aamp-acp-bridge` replaces its default task rules with a complete Feishu task
