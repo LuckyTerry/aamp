@@ -462,6 +462,16 @@ async function ensureMailboxConfig(
   }
 }
 
+export function resolveTaskRuntimeBehavior(
+  options: Pick<TaskEnabledRunOptions, 'debug'>,
+  existingBehavior?: TaskBridgeConfig['behavior'],
+): TaskBridgeConfig['behavior'] {
+  return {
+    ackComment: existingBehavior?.ackComment ?? true,
+    debug: options.debug === true,
+  }
+}
+
 async function ensureInstanceConfigs(
   selection: PairSelection,
   options: TaskEnabledRunOptions,
@@ -519,10 +529,7 @@ async function ensureInstanceConfigs(
       eventNames: existingTask?.feishu.eventNames ?? ['task.task.update_user_access_v2'],
     },
     mailbox: sharedMailbox,
-    behavior: {
-      ackComment: existingTask?.behavior.ackComment ?? true,
-      debug: options.debug ? true : (existingTask?.behavior.debug ?? false),
-    },
+    behavior: resolveTaskRuntimeBehavior(options, existingTask?.behavior),
   }
 
   await writeJsonAtomic(imConfigPath, imConfig)

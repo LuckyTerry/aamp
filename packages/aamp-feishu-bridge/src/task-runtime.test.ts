@@ -9,6 +9,7 @@ import {
   resolveTaskProfileName,
 } from './task-runtime-profile.js'
 import { isRetryableAampNetworkError, isSmtpAuthError } from './task-runtime-errors.js'
+import { resolveTaskRuntimeBehavior } from './task-runtime.js'
 
 test('resolveTaskProfileName uses the app id as the profile suffix', () => {
   assert.equal(resolveTaskProfileName(' cli_a123456 '), 'aamp-feishu-task-cli_a123456')
@@ -136,6 +137,26 @@ test('resolveTaskProfileSelection preserves saved app secret in non-interactive 
 
   assert.equal(selected.app_secret, 'cached-secret')
   assert.equal(selected.display_name, '缓存 Bot')
+})
+
+test('resolveTaskRuntimeBehavior does not inherit debug from previous runs', () => {
+  assert.deepEqual(resolveTaskRuntimeBehavior({}, {
+    ackComment: false,
+    debug: true,
+  }), {
+    ackComment: false,
+    debug: false,
+  })
+})
+
+test('resolveTaskRuntimeBehavior enables debug only for the current --debug run', () => {
+  assert.deepEqual(resolveTaskRuntimeBehavior({ debug: true }, {
+    ackComment: false,
+    debug: false,
+  }), {
+    ackComment: false,
+    debug: true,
+  })
 })
 
 test('isRetryableAampNetworkError detects transient AAMP connect timeout errors', () => {
