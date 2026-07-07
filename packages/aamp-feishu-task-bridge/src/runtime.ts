@@ -59,6 +59,8 @@ const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
 const MAX_DELIVERY_FILE_SIZE_BYTES = 50 * 1024 * 1024
+const MAX_FEISHU_COMMENT_CHARACTERS = 3000
+const MAX_FEISHU_COMMENT_BYTES = 10000
 const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
 const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
 const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
@@ -144,6 +146,28 @@ function formatOutputCounts(outputs: FeishuTaskResultOutput[]): string {
     `file_delivery=${counts.file_delivery}`,
     `text_delivery=${counts.text_delivery}`,
   ].join(' ')
+}
+
+function countFeishuCommentCharacters(content: string): number {
+  return Array.from(content).length
+}
+
+function getFeishuCommentByteLength(content: string): number {
+  return Buffer.byteLength(content, 'utf8')
+}
+
+function isFeishuCommentWithinLimit(content: string): boolean {
+  return countFeishuCommentCharacters(content) <= MAX_FEISHU_COMMENT_CHARACTERS
+    && getFeishuCommentByteLength(content) <= MAX_FEISHU_COMMENT_BYTES
+}
+
+function buildOversizedCommentDeliveryNotice(content: string): string {
+  return [
+    '评论内容超过飞书限制',
+    `（${countFeishuCommentCharacters(content)} characters / ${getFeishuCommentByteLength(content)} bytes，`,
+    `限制为 ${MAX_FEISHU_COMMENT_CHARACTERS} characters / ${MAX_FEISHU_COMMENT_BYTES} bytes），`,
+    '已作为 Markdown 附件上传。',
+  ].join('')
 }
 
 function describeFeishuAttachment(attachment: FeishuTaskAttachment): string {
@@ -1173,7 +1197,7 @@ export class FeishuTaskBridgeRuntime {
 
   private async writePermissionDeniedCommentNotice(event: FeishuTaskEvent, noticeKey: string): Promise<void> {
     if (this.state.permissionDeniedCommentNoticeKeys[noticeKey]) return
-    await this.feishu.commentTask(event.taskGuid, PERMISSION_DENIED_COMMENT_REPLY)
+    await this.commentTaskOrUploadFallback(event.taskGuid, PERMISSION_DENIED_COMMENT_REPLY, 'permission-denied-comment')
     this.state.permissionDeniedCommentNoticeKeys[noticeKey] = new Date().toISOString()
     this.prunePermissionDeniedCommentNotices()
     await this.persistState()
@@ -1722,7 +1746,7 @@ export class FeishuTaskBridgeRuntime {
         || (help.blockedReason ?? '').trim()
         || '智能体需要更多信息才能继续处理该任务。'
       this.debugLog(`[aamp help ${help.taskId}] commenting on Feishu task ${latestTaskState.taskGuid}`)
-      await this.feishu.commentTask(latestTaskState.taskGuid, comment)
+      await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment')
 
       const helpCommentedTaskIds = new Set(latestTaskState.helpCommentedTaskIds ?? [])
       helpCommentedTaskIds.add(help.taskId)
@@ -1978,7 +2002,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting reply output on Feishu task ${latestTaskState.taskGuid}`)
-    await this.feishu.commentTask(latestTaskState.taskGuid, content)
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, content, 'reply-comment')
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2033,6 +2057,21 @@ export class FeishuTaskBridgeRuntime {
     }
   }
 
+  private async commentTaskOrUploadFallback(taskGuid: string, content: string, fallbackTitle: string): Promise<void> {
+    if (isFeishuCommentWithinLimit(content)) {
+      await this.feishu.commentTask(taskGuid, content)
+      return
+    }
+
+    await this.uploadTextDelivery(taskGuid, {
+      kind: 'text_delivery',
+      title: fallbackTitle,
+      format: 'markdown',
+      content,
+    })
+    await this.feishu.commentTask(taskGuid, buildOversizedCommentDeliveryNotice(content))
+  }
+
   private async commentHelpNeededOnce(aampTaskId: string, taskState: BridgeTaskState, message: string): Promise<void> {
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     if ((latestTaskState.resultCommentedTaskIds ?? []).includes(aampTaskId)) {
@@ -2046,7 +2085,7 @@ export class FeishuTaskBridgeRuntime {
       message,
     ].join('\n')
     this.debugLog(`[aamp result ${aampTaskId}] commenting help-needed on Feishu task ${latestTaskState.taskGuid}`)
-    await this.feishu.commentTask(latestTaskState.taskGuid, comment)
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result')
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2067,7 +2106,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting answered result on Feishu task ${latestTaskState.taskGuid}`)
-    await this.feishu.commentTask(latestTaskState.taskGuid, summary)
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result')
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2097,7 +2136,7 @@ export class FeishuTaskBridgeRuntime {
     ].join('\n')
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting result on Feishu task ${latestTaskState.taskGuid}`)
-    await this.feishu.commentTask(latestTaskState.taskGuid, comment)
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'failed-result')
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -174,6 +174,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   inProgressTaskGuids: string[] = []
   textDeliveries: Array<{ taskGuid: string; urls: string[] }> = []
   uploadedDeliveries: Array<{ taskGuid: string; filePath: string }> = []
+  uploadedDeliveryContents: string[] = []
   completedTaskGuids: string[] = []
   blockedTaskGuids: string[] = []
   getTaskBaseCalls: string[] = []
@@ -314,6 +315,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
 
   async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
     this.uploadedDeliveries.push({ taskGuid, filePath })
+    this.uploadedDeliveryContents.push(await readFile(filePath, 'utf8'))
   }
 
   async markTaskInProgress(taskGuid: string): Promise<void> {
@@ -2632,6 +2634,66 @@ test('runtime handles v2 reply_comment output and completes comment-triggered ta
     assert.deepEqual(runtime.getStateSnapshot().tasks['feishu-task-task_guid_v2_reply-evt_v2_reply']?.resultCommentedTaskIds, [
       'feishu-task-task_guid_v2_reply-evt_v2_reply',
     ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime uploads oversized reply comments as markdown delivery attachments', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.tasks.task_guid_long_reply = {
+    guid: 'task_guid_long_reply',
+    taskId: 't_long_reply',
+    summary: '继续输出长回复',
+    status: 'todo',
+    agentTaskStatus: 3,
+    comments: [
+      { id: 'comment_long', authorType: 'user', authorId: 'ou_human', content: '请给完整长回复。', createdAt: '1775793266100' },
+    ],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const longReply = `# 长回复\n\n${'很长的内容。'.repeat(800)}`
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_long_reply',
+      taskGuid: 'task_guid_long_reply',
+      eventTypes: ['task_comment_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_long_reply-evt_long_reply', {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'succeeded',
+        summary: '已生成长回复。',
+        outputs: [
+          { kind: 'reply_comment', content: longReply },
+        ],
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_long_reply'])
+      assert.equal(fakeFeishu.uploadedDeliveries.length, 1)
+      assert.equal(fakeFeishu.comments.length, 1)
+    })
+
+    assert.equal(fakeFeishu.uploadedDeliveryContents[0], longReply)
+    assert.match(path.basename(fakeFeishu.uploadedDeliveries[0]?.filePath ?? ''), /^reply-comment.*\.md$/)
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_long_reply',
+      content: '评论内容超过飞书限制（4807 characters / 14413 bytes，限制为 3000 characters / 10000 bytes），已作为 Markdown 附件上传。',
+    }])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
