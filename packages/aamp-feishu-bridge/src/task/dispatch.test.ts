@@ -92,6 +92,20 @@ test('buildFeishuTaskPromptRules tells agents how to read source document links'
   assert.match(rules, /source documents read via lark-cli from source document links in Task source context/i)
 })
 
+test('buildFeishuTaskPromptRules requires Codem-safe prefix for any lark-cli command with task profile', () => {
+  const rules = buildFeishuTaskPromptRules({
+    feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
+  })
+
+  assert.ok(rules.includes(
+    "Whenever you run any lark-cli command for this task, you MUST use the prefix `unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile aamp-feishu-task-cli_aac6764b90f89cd0` followed by the lark-cli subcommand and arguments.",
+  ))
+  assert.ok(rules.includes(
+    "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
+  ))
+  assert.match(rules, /prevents Codem exported shell functions from affecting lark-cli credential resolution/)
+})
+
 test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing source', () => {
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create')
 

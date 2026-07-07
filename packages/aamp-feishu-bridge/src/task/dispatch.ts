@@ -184,9 +184,11 @@ function renderFeishuLarkCliProfileRules(profile: string | undefined): string[] 
   return [
     'Feishu lark-cli profile rules:',
     `- This task came through a Feishu bot bound to lark-cli profile \`${normalized}\`.`,
-    `- Whenever you run lark-cli for this task, you MUST pass \`--profile ${normalized}\` in that command.`,
+    `- Whenever you run any lark-cli command for this task, you MUST use the prefix \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized}\` followed by the lark-cli subcommand and arguments.`,
+    `- For example, check auth status with \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized} auth status --json\`.`,
+    '- The unset/env prefix prevents Codem exported shell functions from affecting lark-cli credential resolution.',
     '- Do not use the active/default lark-cli profile for this task.',
-    `- If you ask the user to authorize or rerun a lark-cli command, include \`--profile ${normalized}\` in the exact command.`,
+    `- If you ask the user to authorize or rerun a lark-cli command, include the same unset/env prefix and \`--profile ${normalized}\` in the exact command.`,
     '',
   ]
 }
