@@ -273,9 +273,11 @@ function renderTextChunk(chunk: AcpTextChunk, state: StreamTextRenderState): str
   return `${prefix}${chunk.text}`
 }
 
-function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
+export function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
   return (events ?? []).some((event) =>
-    event.intent === 'task.result' || event.intent === 'task.cancel',
+    event.intent === 'task.result'
+    || event.intent === 'task.cancel'
+    || event.intent === 'task.help_needed',
   )
 }
 
@@ -798,6 +800,10 @@ export class AgentBridge {
       return
     }
 
+    this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
+      this.agentConfig.senderPoliciesFile,
+      this.agentConfig.name,
+    ))
     const senderDecision = matchCombinedSenderPolicy(
       task,
       this.agentConfig.senderPolicies,

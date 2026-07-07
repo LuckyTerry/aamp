@@ -457,6 +457,9 @@ test('runtime subscribes task events when upgrading from registration-only local
     },
     tasks: {},
     dedupEventIds: {},
+    dedupSemanticEventKeys: {},
+    ackCommentedEventKeys: {},
+    permissionDeniedCommentNoticeKeys: {},
   }, configDir)
 
   const fakeFeishu = new FakeFeishuTaskClient()
@@ -562,6 +565,9 @@ test('runtime prunes old terminal task state while retaining active and recent t
       },
     },
     dedupEventIds: {},
+    dedupSemanticEventKeys: {},
+    ackCommentedEventKeys: {},
+    permissionDeniedCommentNoticeKeys: {},
   }, configDir)
   const fakeFeishu = new FakeFeishuTaskClient()
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -622,6 +628,77 @@ test('runtime dispatches Feishu task events and comments on task.ack once', asyn
     assert.equal(fakeFeishu.comments.length, 1)
     assert.equal(fakeFeishu.comments[0]?.taskGuid, 'task_guid_456')
     assert.match(fakeFeishu.comments[0]?.content ?? '', /已收到任务派发请求/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime injects configured Feishu lark-cli profile into task dispatch context', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const config = buildConfig()
+  config.feishu.authMode = 'lark-cli'
+  config.feishu.cliProfile = 'custom-feishu-profile'
+  const runtime = new FeishuTaskBridgeRuntime(config, {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_profile_context',
+      taskGuid: 'task_guid_profile_context',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266152',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 1)
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, 'custom-feishu-profile')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores duplicate task_create events for the same Feishu task even when event id changes', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_first_create',
+      taskGuid: 'task_guid_replayed_create',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266152',
+    })
+    fakeAamp.emitAck('feishu-task-task_guid_replayed_create-evt_first_create')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    await fakeFeishu.emit({
+      eventId: 'evt_second_create',
+      taskGuid: 'task_guid_replayed_create',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266152',
+    })
+
+    assert.equal(fakeAamp.sentTasks.length, 1)
+    assert.equal(fakeFeishu.comments.length, 1)
+    const state = await loadBridgeState(configDir)
+    assert.equal(state.lastIgnoredFeishuEventId, 'evt_second_create')
+    assert.equal(state.lastIgnoredFeishuEventReason, 'duplicate_task_event')
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -2454,6 +2531,54 @@ test('runtime comments task.help_needed question and blocks the Feishu task once
   }
 })
 
+test('runtime treats needs_input questions as help-needed result', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_needs_input',
+      taskGuid: 'task_guid_needs_input',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266154',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_needs_input-evt_needs_input', {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'needs_input',
+        summary: '需要更多信息才能继续。',
+        questions: [
+          { question: '请提供 svc_core 仓库地址和 RocketMQ ConsumerGroup。', blocking: true },
+        ],
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.equal(fakeFeishu.comments.length, 1)
+      assert.deepEqual(fakeFeishu.blockedTaskGuids, ['task_guid_needs_input'])
+    })
+
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_needs_input',
+      content: '智能体需要更多信息才能继续处理该任务。\n\n请提供 svc_core 仓库地址和 RocketMQ ConsumerGroup。',
+    }])
+    assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_needs_input-evt_needs_input']?.status, 'help_needed')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime handles v2 reply_comment output and completes comment-triggered tasks', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()
@@ -2931,6 +3056,44 @@ test('runtime rejects FEISHU_TASK_RESULT_JSON when it does not start the output 
 
     assert.match(fakeFeishu.comments[0]?.content ?? '', /未按 FEISHU_TASK_RESULT_JSON 协议收尾/)
     assert.notEqual(fakeFeishu.comments[0]?.content, '这条评论不应该被写入。')
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime explains nested JSON newline escaping when FEISHU_TASK_RESULT_JSON contains literal LF', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_literal_lf',
+      taskGuid: 'task_guid_literal_lf',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult('feishu-task-task_guid_literal_lf-evt_literal_lf', {
+      output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"第一行\n第二行","reply_written":false}',
+    })
+
+    await waitFor(() => {
+      assert.equal(fakeFeishu.comments.length, 1)
+      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_literal_lf-evt_literal_lf']?.status, 'failed')
+    })
+
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /literal LF newline/i)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /embedded inside AAMP_RESULT_JSON\.output/i)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /\\\\n in the final visible AAMP_RESULT_JSON text/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

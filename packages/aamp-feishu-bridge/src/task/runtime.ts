@@ -54,6 +54,7 @@ type FeishuTaskEventIgnoreReason =
   | 'comment_author_not_app_owner'
   | 'comment_without_effective_comment'
   | 'agent_task_status_not_dispatchable'
+  | 'duplicate_task_event'
 const MAX_STREAM_STEPS_PER_TASK = 32
 const STREAM_STEP_FLUSH_BATCH_SIZE = 4
 const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
@@ -68,6 +69,9 @@ const APP_OWNER_CACHE_TTL_MS = 60 * 60 * 1000
 const PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS = 1000
 const PERMISSION_DENIED_COMMENT_REPLY = '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。'
+function getFeishuLarkCliProfile(profile: string | undefined): string | undefined {
+  return profile?.trim() || undefined
+}
 
 interface PendingStreamStep {
   content: string
@@ -448,6 +452,15 @@ function parsePayloadDeliveryOutputs(payload: Record<string, unknown>): FeishuTa
   return undefined
 }
 
+function getFirstQuestionText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined
+  for (const item of value) {
+    const question = getString(asRecord(item)?.question)
+    if (question) return question
+  }
+  return undefined
+}
+
 function parseFeishuResultPayload(output: string): Record<string, unknown> | undefined {
   const trimmedOutput = output.trimStart()
   if (!trimmedOutput.startsWith(FEISHU_RESULT_MARKER)) return undefined
@@ -455,6 +468,18 @@ function parseFeishuResultPayload(output: string): Record<string, unknown> | und
   if (!jsonText) return undefined
   const parsed = JSON.parse(jsonText) as unknown
   return asRecord(parsed)
+}
+
+function formatFeishuResultParseError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/bad control character/i.test(message)) {
+    return [
+      message,
+      'FEISHU_TASK_RESULT_JSON contains a literal LF newline or another control character inside a JSON string.',
+      'Because FEISHU_TASK_RESULT_JSON is embedded inside AAMP_RESULT_JSON.output, multiline user-visible fields must be written as \\\\n in the final visible AAMP_RESULT_JSON text.',
+    ].join(' ')
+  }
+  return message
 }
 
 function canonicalizeJson(value: unknown): unknown {
@@ -502,7 +527,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
   } catch (error) {
     return {
       kind: 'failure',
-      message: `智能体返回了无法解析的 FEISHU_TASK_RESULT_JSON：${error instanceof Error ? error.message : String(error)}`,
+      message: `智能体返回了无法解析的 FEISHU_TASK_RESULT_JSON：${formatFeishuResultParseError(error)}`,
     }
   }
 
@@ -512,6 +537,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     const summary = getString(payload.summary)
     const error = getString(payload.error)
     const question = getString(payload.question)
+    const firstQuestion = getFirstQuestionText(payload.questions)
     if (schema !== 'feishu_task_result.v2') {
       return { kind: 'failure', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
     }
@@ -536,8 +562,8 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
       if (typeof outputs === 'string') return { kind: 'failure', message: outputs }
       return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
     }
-    if (status === 'need_help') {
-      return { kind: 'help_needed', message: question ?? summary ?? error ?? '智能体需要更多信息才能继续处理该任务。' }
+    if (status === 'need_help' || status === 'needs_input') {
+      return { kind: 'help_needed', message: question ?? firstQuestion ?? summary ?? error ?? '智能体需要更多信息才能继续处理该任务。' }
     }
     if (status === 'failed') {
       return {
@@ -598,6 +624,25 @@ function getEventCommentId(event: FeishuTaskEvent): string | undefined {
 function getPermissionDeniedCommentNoticeKey(event: FeishuTaskEvent, comment: FeishuTaskComment): string {
   const commentId = comment.id?.trim()
   return commentId ? `comment:${event.taskGuid}:${commentId}` : `event:${event.eventId}`
+}
+
+function getSemanticEventKey(event: FeishuTaskEvent, eventKind: FeishuTaskEventKind): string | undefined {
+  if (eventKind === 'task_create') return `task_create:${event.taskGuid}`
+  if (eventKind === 'task_comment') {
+    const commentId = event.commentId ?? getEventCommentId(event)
+    return commentId ? `task_comment:${event.taskGuid}:${commentId}` : undefined
+  }
+  return undefined
+}
+
+function getAckCommentEventKey(taskState: BridgeTaskState): string | undefined {
+  if (taskState.feishuEventKind === 'task_create') {
+    return `task_create:${taskState.taskGuid}`
+  }
+  if (taskState.feishuEventKind === 'task_comment' && taskState.feishuEventId) {
+    return `task_comment:${taskState.taskGuid}:${taskState.feishuEventId}`
+  }
+  return undefined
 }
 
 function mergeComments(
@@ -1297,6 +1342,11 @@ export class FeishuTaskBridgeRuntime {
       await this.ignoreFeishuTaskEvent(event, 'event_type_not_allowlisted')
       return
     }
+    const semanticEventKey = getSemanticEventKey(event, eventKind)
+    if (semanticEventKey && this.state.dedupSemanticEventKeys[semanticEventKey]) {
+      await this.ignoreFeishuTaskEvent(event, 'duplicate_task_event')
+      return
+    }
     this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} received kind=${eventKind} types=${event.eventTypes.join(',') || '(unknown)'}`)
 
     let taskState: BridgeTaskState | undefined
@@ -1326,6 +1376,14 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.tasks[dispatch.taskId] = taskState
       await this.persistState()
+      const feishuCliProfile = this.config.feishu.cliProfile?.trim()
+      const injectedFeishuCliProfile = getFeishuLarkCliProfile(feishuCliProfile)
+      const dispatchContext = {
+        ...dispatch.dispatchContext,
+        ...(injectedFeishuCliProfile
+          ? { feishu_lark_cli_profile: injectedFeishuCliProfile }
+          : {}),
+      }
       this.debugLog([
         `[aamp dispatch ${dispatch.taskId}] sending`,
         `to=${this.config.targetAgentEmail}`,
@@ -1333,6 +1391,9 @@ export class FeishuTaskBridgeRuntime {
         `source=${dispatch.dispatchContext.source ?? '(none)'}`,
         `event_kind=${dispatch.dispatchContext.feishu_event_kind ?? '(none)'}`,
         `event_types=${dispatch.dispatchContext.feishu_task_event_types ?? '(none)'}`,
+        `feishu_auth_mode=${this.config.feishu.authMode ?? '(none)'}`,
+        `feishu_cli_profile=${feishuCliProfile || '(none)'}`,
+        `dispatch_feishu_lark_cli_profile=${dispatchContext.feishu_lark_cli_profile ?? '(none)'}`,
         `attachments=${preparedAttachments.attachments.length}`,
       ].join(' '))
 
@@ -1343,7 +1404,7 @@ export class FeishuTaskBridgeRuntime {
         title: dispatch.title,
         bodyText,
         rawBodyText: bodyText,
-        dispatchContext: dispatch.dispatchContext,
+        dispatchContext,
         promptRules: dispatch.promptRules,
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
       })
@@ -1356,7 +1417,7 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.lastAampDispatchAt = new Date().toISOString()
       this.state.lastAampDispatchTaskId = dispatch.taskId
-      this.rememberEvent(event)
+      this.rememberEvent(event, semanticEventKey)
       await this.persistState()
       this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} dispatch sent aamp_task=${dispatch.taskId} to=${this.config.targetAgentEmail} attachments=${preparedAttachments.attachments.length} attachment_notes=${preparedAttachments.notes.length}`)
       this.debugLog(`[aamp dispatch ${dispatch.taskId}] sent message=${result.messageId}`)
@@ -1603,6 +1664,19 @@ export class FeishuTaskBridgeRuntime {
       return
     }
 
+    const ackCommentEventKey = getAckCommentEventKey(taskState)
+    if (ackCommentEventKey && this.state.ackCommentedEventKeys[ackCommentEventKey]) {
+      this.logger.log(`[aamp ack ${ack.taskId}] semantic comment already recorded key=${ackCommentEventKey}`)
+      this.state.tasks[ack.taskId] = {
+        ...taskState,
+        status: 'acknowledged',
+        ackCommentedEventKeys: [...new Set([...(taskState.ackCommentedEventKeys ?? []), ackCommentEventKey])],
+        updatedAt: new Date().toISOString(),
+      }
+      await this.persistState()
+      return
+    }
+
     if (!shouldCommentAck(taskState, ack.taskId)) {
       this.logger.log(`[aamp ack ${ack.taskId}] comment already recorded`)
       return
@@ -1618,7 +1692,17 @@ export class FeishuTaskBridgeRuntime {
         debug: this.config.behavior.debug,
       }))
 
-      this.state.tasks[ack.taskId] = markAckCommented(taskState, ack.taskId)
+      const updatedTaskState = markAckCommented(taskState, ack.taskId)
+      this.state.tasks[ack.taskId] = ackCommentEventKey
+        ? {
+          ...updatedTaskState,
+          ackCommentedEventKeys: [...new Set([...(updatedTaskState.ackCommentedEventKeys ?? []), ackCommentEventKey])],
+        }
+        : updatedTaskState
+      if (ackCommentEventKey) {
+        this.state.ackCommentedEventKeys[ackCommentEventKey] = new Date().toISOString()
+        this.pruneAckCommentedEvents()
+      }
       await this.persistState()
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} ack commented aamp_task=${ack.taskId}`)
       this.debugLog(`[aamp ack ${ack.taskId}] commented on Feishu task ${taskState.taskGuid}`)
@@ -2199,9 +2283,13 @@ export class FeishuTaskBridgeRuntime {
     return prunedCount
   }
 
-  private rememberEvent(event: FeishuTaskEvent): boolean {
+  private rememberEvent(event: FeishuTaskEvent, semanticEventKey?: string): boolean {
     if (this.state.dedupEventIds[event.eventId]) return false
     this.state.dedupEventIds[event.eventId] = new Date().toISOString()
+    if (semanticEventKey) {
+      this.state.dedupSemanticEventKeys[semanticEventKey] = new Date().toISOString()
+      this.pruneSemanticDedupEvents()
+    }
     this.pruneDedupEvents()
     return true
   }
@@ -2214,6 +2302,28 @@ export class FeishuTaskBridgeRuntime {
       .slice(0, entries.length - 1000)
       .forEach(([eventId]) => {
         delete this.state.dedupEventIds[eventId]
+      })
+  }
+
+  private pruneSemanticDedupEvents(): void {
+    const entries = Object.entries(this.state.dedupSemanticEventKeys)
+    if (entries.length <= 1000) return
+    entries
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .slice(0, entries.length - 1000)
+      .forEach(([eventKey]) => {
+        delete this.state.dedupSemanticEventKeys[eventKey]
+      })
+  }
+
+  private pruneAckCommentedEvents(): void {
+    const entries = Object.entries(this.state.ackCommentedEventKeys)
+    if (entries.length <= 1000) return
+    entries
+      .sort((a, b) => a[1].localeCompare(b[1]))
+      .slice(0, entries.length - 1000)
+      .forEach(([eventKey]) => {
+        delete this.state.ackCommentedEventKeys[eventKey]
       })
   }
 

@@ -46,6 +46,19 @@ test('buildPrompt keeps simple direct-answer guidance when no required skill is 
   assert.match(prompt, /For simple chat messages that are fully present in the prompt, answer them directly/i)
 })
 
+test('buildPrompt requires the Feishu lark-cli profile when provided by dispatch context', () => {
+  const prompt = buildPrompt(buildTask({
+    dispatchContext: {
+      source: 'feishu',
+      feishu_lark_cli_profile: 'aamp-feishu-task-cli_aacddfe1d7b21cb6',
+    },
+  }), undefined, 'codex')
+
+  assert.match(prompt, /Feishu lark-cli profile rules:/)
+  assert.match(prompt, /--profile aamp-feishu-task-cli_aacddfe1d7b21cb6/)
+  assert.match(prompt, /Do not use the active\/default lark-cli profile/)
+})
+
 test('buildPrompt replaces default task prompt rules when promptRules are provided', () => {
   const prompt = buildPrompt(buildTask({
     promptRules: [

@@ -71,6 +71,8 @@ export function createDefaultBridgeState(): BridgeState {
     },
     tasks: {},
     dedupEventIds: {},
+    dedupSemanticEventKeys: {},
+    ackCommentedEventKeys: {},
     permissionDeniedCommentNoticeKeys: {},
   }
 }
@@ -90,6 +92,8 @@ export async function loadBridgeState(customDir?: string): Promise<BridgeState> 
     },
     tasks: parsed.tasks ?? {},
     dedupEventIds: parsed.dedupEventIds ?? {},
+    dedupSemanticEventKeys: parsed.dedupSemanticEventKeys ?? {},
+    ackCommentedEventKeys: parsed.ackCommentedEventKeys ?? {},
     permissionDeniedCommentNoticeKeys: parsed.permissionDeniedCommentNoticeKeys ?? {},
   }
 }

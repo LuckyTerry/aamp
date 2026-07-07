@@ -48,6 +48,10 @@ interface SenderRawEvent {
   }
 }
 
+function getFeishuLarkCliProfile(profile: string | undefined): string | undefined {
+  return profile?.trim() || undefined
+}
+
 interface FeishuCardSession {
   messageId?: string
   cardId?: string
@@ -298,6 +302,7 @@ export class FeishuBridgeRuntime {
   private async handleIncomingMessage(message: NormalizedMessage): Promise<void> {
     const botIdentity = this.channel.botIdentity
     if (botIdentity && message.senderId === botIdentity.openId) return
+    if (this.isBridgeAuthoredMessage(message.messageId)) return
     if (!this.shouldAcceptMessage(message, botIdentity)) return
     if (this.isDuplicateMessage(message.messageId)) return
 
@@ -313,6 +318,23 @@ export class FeishuBridgeRuntime {
     }
 
     await this.dispatchUserMessageTask(message, threadKey, conversation?.lastTaskId)
+  }
+
+  private isBridgeAuthoredMessage(messageId: string): boolean {
+    const normalizedMessageId = messageId.trim()
+    if (!normalizedMessageId) return false
+
+    for (const conversation of Object.values(this.state.conversations)) {
+      if (conversation.lastBridgeMessageId === normalizedMessageId) return true
+    }
+
+    for (const task of Object.values(this.state.tasks)) {
+      if (task.bridgeMessageId === normalizedMessageId) return true
+      if (task.helpCardMessageId === normalizedMessageId) return true
+      if (task.dispatchMessageId === normalizedMessageId) return true
+    }
+
+    return false
   }
 
   private async handleCardAction(event: CardActionEvent): Promise<void> {
@@ -685,6 +707,7 @@ export class FeishuBridgeRuntime {
 
   private buildDispatchContext(message: NormalizedMessage): Record<string, string> {
     const raw = (message.raw ?? {}) as SenderRawEvent
+    const cliProfile = getFeishuLarkCliProfile(this.config.feishu.cliProfile)
     return {
       source: 'feishu',
       chat_id: message.chatId,
@@ -692,6 +715,7 @@ export class FeishuBridgeRuntime {
       sender_open_id: message.senderId,
       sender_name: message.senderName || '',
       bot_open_id: this.channel.botIdentity?.openId || '',
+      ...(cliProfile ? { feishu_lark_cli_profile: cliProfile } : {}),
       is_group_mention: String(message.chatType === 'group'),
       feishu_message_id: message.messageId,
       feishu_reply_to_message_id: message.replyToMessageId || '',

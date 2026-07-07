@@ -12,23 +12,29 @@ import type { BridgeConfig as ImBridgeConfig } from './types.js'
 import { FEISHU_BOE_DOMAIN, FEISHU_PRE_DOMAIN } from './task/config.js'
 import { FeishuTaskBridgeRuntime } from './task/runtime.js'
 import type { BridgeConfig as TaskBridgeConfig } from './task/types.js'
+import {
+  TASK_PROFILE_FILENAME,
+  buildTaskProfileFeishuConfig,
+  buildTaskProfileTaskFeishuConfig,
+  dedupeTaskProfiles,
+  normalizeTaskProfile,
+  resolveTaskProfileName,
+  type TaskProfileConfig,
+  type TaskProfileStore,
+} from './task-runtime-profile.js'
 
 const TASK_RUNTIME_DIRNAME = 'task-runtime'
-const BOTS_FILENAME = 'bots-v2.json'
 const AGENTS_FILENAME = 'agents.json'
 const CURRENT_RUN_FILENAME = 'current.json'
+const ACTIVE_RUNS_FILENAME = 'active.json'
 const CONFIG_FILENAME = 'config.json'
 const SUPPORTED_AGENT_TYPES = ['codex', 'cursor', 'codem'] as const
+const PAIR_REQUEST_AUTH_RETRY_COUNT = 8
+const PAIR_REQUEST_AUTH_RETRY_DELAY_MS = 1_000
 
 type AgentType = typeof SUPPORTED_AGENT_TYPES[number]
 
-export interface TaskRuntimeBotConfig {
-  name: string
-  app_id: string
-  app_secret: string
-  capabilities: Array<'im' | 'task'>
-  updated_at: string
-}
+export type TaskRuntimeBotConfig = TaskProfileConfig
 
 export interface TaskRuntimeAgentConfig {
   type: AgentType | string
@@ -43,10 +49,6 @@ export interface TaskRuntimePair {
   instance_id: string
 }
 
-interface TaskRuntimeBotStore {
-  bots: TaskRuntimeBotConfig[]
-}
-
 interface TaskRuntimeAgentStore {
   agents: TaskRuntimeAgentConfig[]
 }
@@ -55,6 +57,11 @@ interface TaskRuntimeRunStore {
   run_id: string
   pairs: TaskRuntimePair[]
   updated_at: string
+}
+
+interface TaskRuntimeActiveRunStore {
+  version: 1
+  runs: TaskRuntimeRunStore[]
 }
 
 interface PairSelection {
@@ -72,6 +79,9 @@ export interface TaskEnabledRunOptions {
   appId?: string
   appSecret?: string
   botName?: string
+  useFeishuCli?: boolean
+  feishuCliProfile?: string
+  feishuCliBin?: string
   domain?: string
   boe?: boolean
   pre?: boolean
@@ -85,7 +95,7 @@ function taskRuntimeHome(customDir?: string): string {
 }
 
 function botsPath(customDir?: string): string {
-  return path.join(taskRuntimeHome(customDir), BOTS_FILENAME)
+  return path.join(taskRuntimeHome(customDir), TASK_PROFILE_FILENAME)
 }
 
 function agentsPath(customDir?: string): string {
@@ -98,6 +108,10 @@ function runsDir(customDir?: string): string {
 
 function currentRunPath(customDir?: string): string {
   return path.join(runsDir(customDir), CURRENT_RUN_FILENAME)
+}
+
+function activeRunsPath(customDir?: string): string {
+  return path.join(runsDir(customDir), ACTIVE_RUNS_FILENAME)
 }
 
 function instanceRoot(instanceId: string, customDir?: string): string {
@@ -126,12 +140,12 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
 }
 
 async function loadBots(customDir?: string): Promise<TaskRuntimeBotConfig[]> {
-  const store = await readJsonFile<TaskRuntimeBotStore>(botsPath(customDir), { bots: [] })
-  return dedupeBots(store.bots ?? [])
+  const store = await readJsonFile<TaskProfileStore>(botsPath(customDir), { version: 1, profiles: [] })
+  return dedupeTaskProfiles(store.profiles ?? [])
 }
 
 async function saveBots(bots: TaskRuntimeBotConfig[], customDir?: string): Promise<void> {
-  await writeJsonAtomic(botsPath(customDir), { bots: dedupeBots(bots) })
+  await writeJsonAtomic(botsPath(customDir), { version: 1, profiles: dedupeTaskProfiles(bots) } satisfies TaskProfileStore)
 }
 
 async function loadAgents(customDir?: string): Promise<TaskRuntimeAgentConfig[]> {
@@ -143,21 +157,30 @@ async function saveAgents(agents: TaskRuntimeAgentConfig[], customDir?: string):
   await writeJsonAtomic(agentsPath(customDir), { agents: dedupeAgents(agents) })
 }
 
-function dedupeBots(bots: TaskRuntimeBotConfig[]): TaskRuntimeBotConfig[] {
-  const byAppId = new Map<string, TaskRuntimeBotConfig>()
-  for (const bot of bots) {
-    const appId = bot.app_id.trim()
-    if (!appId) continue
-    byAppId.set(appId, {
-      ...bot,
-      app_id: appId,
-      name: bot.name.trim() || appId,
-      app_secret: bot.app_secret.trim(),
-      capabilities: [...new Set([...(bot.capabilities ?? []), 'im', 'task'])] as Array<'im' | 'task'>,
-      updated_at: bot.updated_at || new Date().toISOString(),
-    })
+function isPidAliveFromRunId(runId: string): boolean {
+  const pid = Number(/-(\d+)$/.exec(runId)?.[1])
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
   }
-  return [...byAppId.values()].sort((left, right) => left.name.localeCompare(right.name))
+}
+
+async function upsertActiveRun(run: TaskRuntimeRunStore, customDir?: string): Promise<void> {
+  const store = await readJsonFile<TaskRuntimeActiveRunStore>(activeRunsPath(customDir), { version: 1, runs: [] })
+  const runs = [
+    ...store.runs.filter((item) => item.run_id !== run.run_id && isPidAliveFromRunId(item.run_id)),
+    run,
+  ]
+  await writeJsonAtomic(activeRunsPath(customDir), { version: 1, runs } satisfies TaskRuntimeActiveRunStore)
+}
+
+async function removeActiveRun(runId: string, customDir?: string): Promise<void> {
+  const store = await readJsonFile<TaskRuntimeActiveRunStore>(activeRunsPath(customDir), { version: 1, runs: [] })
+  const runs = store.runs.filter((item) => item.run_id !== runId && isPidAliveFromRunId(item.run_id))
+  await writeJsonAtomic(activeRunsPath(customDir), { version: 1, runs } satisfies TaskRuntimeActiveRunStore)
 }
 
 function dedupeAgents(agents: TaskRuntimeAgentConfig[]): TaskRuntimeAgentConfig[] {
@@ -297,41 +320,47 @@ async function selectAgent(customDir?: string, requested?: string, targetInput?:
   return { agent, pairingUrl: pairing ? target : undefined }
 }
 
-async function selectBot(customDir: string | undefined, usedAppIds: Set<string>, appId?: string, appSecret?: string, botName?: string): Promise<TaskRuntimeBotConfig> {
+async function selectBot(
+  customDir: string | undefined,
+  usedAppIds: Set<string>,
+  appId?: string,
+  cliProfile?: string,
+  botName?: string,
+): Promise<TaskRuntimeBotConfig> {
   const bots = await loadBots(customDir)
   const now = new Date().toISOString()
-  if (appId || appSecret || botName) {
-    if (!appId || !appSecret) throw new Error('Both --app-id and --app-secret are required for --enable-task non-interactive mode.')
-    const bot: TaskRuntimeBotConfig = {
-      name: botName?.trim() || appId,
-      app_id: appId.trim(),
-      app_secret: appSecret.trim(),
-      capabilities: ['im', 'task'],
+  if (appId || cliProfile || botName) {
+    if (!appId) throw new Error('Feishu App ID is required for --enable-task profile mode.')
+    const bot = normalizeTaskProfile({
+      app_id: appId,
+      profile: cliProfile,
+      display_name: botName,
       updated_at: now,
-    }
+    })
     await saveBots([...bots, bot], customDir)
     return bot
   }
 
   const availableBots = bots.filter((bot) => !usedAppIds.has(bot.app_id))
-  const createOption = { app_id: '', app_secret: '', name: '新建应用/选择其他应用', capabilities: ['im', 'task'] as Array<'im' | 'task'>, updated_at: now }
+  const createOption = normalizeTaskProfile({
+    app_id: '__create__',
+    profile: '__create__',
+    display_name: '新建应用/选择其他应用',
+    updated_at: now,
+  })
   const selected = await chooseFromList('请选择飞书 Bot 应用:', [...availableBots, createOption], (bot) => (
-    bot.app_id ? `${bot.name} (${bot.app_id})` : bot.name
+    bot.app_id !== '__create__' ? `${bot.display_name ?? bot.app_id} (${bot.app_id}) profile=${bot.profile}` : bot.display_name ?? '新建应用/选择其他应用'
   ))
   if (!selected) throw new Error('No Feishu bot selected.')
-  if (selected.app_id) return selected
+  if (selected.app_id !== '__create__') return selected
 
-  const name = await prompt('请输入本地展示的 Bot 名称', '飞书 CLI')
   const newAppId = await prompt('请输入 Feishu App ID')
-  const newAppSecret = await prompt('请输入 Feishu App Secret')
-  if (!newAppId || !newAppSecret) throw new Error('Feishu App ID and App Secret are required.')
-  const bot: TaskRuntimeBotConfig = {
-    name,
-    app_id: newAppId.trim(),
-    app_secret: newAppSecret.trim(),
-    capabilities: ['im', 'task'],
+  const displayName = await prompt('请输入本地展示的 Bot 名称', '飞书 CLI')
+  const bot = normalizeTaskProfile({
+    app_id: newAppId,
+    display_name: displayName,
     updated_at: now,
-  }
+  })
   await saveBots([...bots, bot], customDir)
   return bot
 }
@@ -342,7 +371,7 @@ function validatePairs(selections: PairSelection[]): TaskRuntimePair[] {
   for (const selection of selections) {
     const existingAgent = appToAgent.get(selection.bot.app_id)
     if (existingAgent && existingAgent !== selection.agent.target_agent_email) {
-      throw new Error(`Feishu bot ${selection.bot.name} (${selection.bot.app_id}) is selected for multiple agents in this run.`)
+      throw new Error(`Feishu bot ${selection.bot.app_id} is selected for multiple agents in this run.`)
     }
     appToAgent.set(selection.bot.app_id, selection.agent.target_agent_email)
     const instanceId = resolveInstanceId(selection.agent, selection.bot)
@@ -360,6 +389,41 @@ async function loadConfigIfExists<T>(filePath: string): Promise<T | undefined> {
   return JSON.parse(await readFile(filePath, 'utf8')) as T
 }
 
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error)
+  const details = error as Error & {
+    code?: string
+    errno?: number
+    syscall?: string
+    hostname?: string
+    host?: string
+    address?: string
+    port?: number
+    cause?: unknown
+  }
+  const parts = [details.message]
+  if (details.code) parts.push(`code=${details.code}`)
+  if (details.errno !== undefined) parts.push(`errno=${details.errno}`)
+  if (details.syscall) parts.push(`syscall=${details.syscall}`)
+  if (details.hostname) parts.push(`hostname=${details.hostname}`)
+  if (details.host) parts.push(`host=${details.host}`)
+  if (details.address) parts.push(`address=${details.address}`)
+  if (details.port !== undefined) parts.push(`port=${details.port}`)
+  if (details.cause) parts.push(`cause=${describeError(details.cause)}`)
+  return parts.join(' | ')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isSmtpAuthError(error: unknown): boolean {
+  const message = describeError(error).toLowerCase()
+  return message.includes('535')
+    || message.includes('invalid login')
+    || message.includes('authentication credentials invalid')
+}
+
 async function sendPairRequestIfNeeded(
   mailbox: ImBridgeConfig['mailbox'],
   pairingUrl: string | undefined,
@@ -371,11 +435,24 @@ async function sendPairRequestIfNeeded(
     smtpPassword: mailbox.smtpPassword,
     baseUrl: mailbox.baseUrl,
   })
-  await client.sendPairRequest({
-    to: pairing.mailbox,
-    pairCode: pairing.pairCode,
-    dispatchContextRules: pairing.dispatchContextRules ?? { source: ['feishu', 'feishu-task'] },
-  })
+  for (let attempt = 1; attempt <= PAIR_REQUEST_AUTH_RETRY_COUNT; attempt += 1) {
+    try {
+      await client.sendPairRequest({
+        to: pairing.mailbox,
+        pairCode: pairing.pairCode,
+        dispatchContextRules: pairing.dispatchContextRules ?? { source: ['feishu', 'feishu-task'] },
+      })
+      return
+    } catch (error) {
+      if (attempt < PAIR_REQUEST_AUTH_RETRY_COUNT && isSmtpAuthError(error)) {
+        console.warn(`[feishu task-runtime] AAMP pair request SMTP auth not ready from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms`)
+        await sleep(PAIR_REQUEST_AUTH_RETRY_DELAY_MS)
+        continue
+      }
+      console.error(`[feishu task-runtime] AAMP pair request failed from=${mailbox.email} to=${pairing.mailbox} host=${mailbox.baseUrl}: ${describeError(error)}`)
+      throw error
+    }
+  }
 }
 
 async function ensureMailboxConfig(
@@ -391,11 +468,17 @@ async function ensureMailboxConfig(
     return options.existing
   }
   console.log(`[feishu task-runtime] registering AAMP mailbox host=${options.aampHost} slug=${options.slug} slugLength=${options.slug.length}`)
-  const mailbox = await AampClient.registerMailbox({
-    aampHost: options.aampHost,
-    slug: options.slug,
-    description: options.description,
-  })
+  let mailbox: Awaited<ReturnType<typeof AampClient.registerMailbox>>
+  try {
+    mailbox = await AampClient.registerMailbox({
+      aampHost: options.aampHost,
+      slug: options.slug,
+      description: options.description,
+    })
+  } catch (error) {
+    console.error(`[feishu task-runtime] AAMP mailbox registration failed host=${options.aampHost} slug=${options.slug}: ${describeError(error)}`)
+    throw error
+  }
   return {
     email: mailbox.email,
     mailboxToken: mailbox.mailboxToken,
@@ -418,6 +501,7 @@ async function ensureInstanceConfigs(
   const aampHost = options.aampHost?.trim() || existingIm?.aampHost || existingTask?.aampHost || 'https://meshmail.ai'
   const feishuDomain = resolveFeishuDomain(options, existingIm?.feishu.domain ?? existingTask?.feishu.domain)
   const feishuHeaders = resolveFeishuHeaders(options, existingTask?.feishu.headers)
+  const taskAppSecret = options.appSecret?.trim() || existingTask?.feishu.appSecret?.trim() || existingIm?.feishu.appSecret?.trim()
   const slugBase = instanceId
   const existingMailbox = existingIm?.mailbox ?? existingTask?.mailbox
   const sharedMailbox = await ensureMailboxConfig({
@@ -433,10 +517,9 @@ async function ensureInstanceConfigs(
     targetAgentEmail: selection.agent.target_agent_email,
     slug: slugBase,
     feishu: {
-      appId: selection.bot.app_id,
-      appSecret: selection.bot.app_secret,
+      ...buildTaskProfileFeishuConfig(selection.bot, { appSecret: taskAppSecret }),
       ...(feishuDomain ? { domain: feishuDomain } : {}),
-      authMode: 'app-secret',
+      ...(options.feishuCliBin ? { cliBin: options.feishuCliBin } : {}),
     },
     mailbox: sharedMailbox,
     behavior: existingIm?.behavior ?? {
@@ -450,8 +533,8 @@ async function ensureInstanceConfigs(
     targetAgentEmail: selection.agent.target_agent_email,
     slug: slugBase,
     feishu: {
-      appId: selection.bot.app_id,
-      appSecret: selection.bot.app_secret,
+      ...buildTaskProfileTaskFeishuConfig(selection.bot, { appSecret: taskAppSecret }),
+      ...(options.feishuCliBin ? { cliBin: options.feishuCliBin } : {}),
       ...(feishuDomain ? { domain: feishuDomain } : {}),
       ...(feishuHeaders ? { headers: feishuHeaders } : {}),
       userIdType: existingTask?.feishu.userIdType ?? 'open_id',
@@ -473,11 +556,11 @@ async function ensureInstanceConfigs(
 async function collectSelections(options: TaskEnabledRunOptions): Promise<PairSelection[]> {
   const selections: PairSelection[] = []
   const usedAppIds = new Set<string>()
-  const nonInteractive = Boolean(options.agent || options.targetAgentEmail || options.pairingUrl || options.appId || options.appSecret)
+  const nonInteractive = Boolean(options.agent || options.targetAgentEmail || options.pairingUrl || options.appId || options.feishuCliProfile)
   while (true) {
     const { agent, pairingUrl } = await selectAgent(options.configDir, options.agent, options.pairingUrl ?? options.targetAgentEmail)
-    const bot = await selectBot(options.configDir, usedAppIds, options.appId, options.appSecret, options.botName)
-    if (usedAppIds.has(bot.app_id)) throw new Error(`Feishu bot ${bot.name} (${bot.app_id}) was already selected in this run.`)
+    const bot = await selectBot(options.configDir, usedAppIds, options.appId, options.feishuCliProfile, options.botName)
+    if (usedAppIds.has(bot.app_id)) throw new Error(`Feishu bot ${bot.app_id} was already selected in this run.`)
     selections.push({ agent, bot, pairingUrl })
     usedAppIds.add(bot.app_id)
     if (nonInteractive) break
@@ -490,11 +573,13 @@ export async function runTaskEnabledBridge(options: TaskEnabledRunOptions): Prom
   await mkdir(taskRuntimeHome(options.configDir), { recursive: true })
   const selections = await collectSelections(options)
   const pairs = validatePairs(selections)
-  await writeJsonAtomic(currentRunPath(options.configDir), {
+  const run: TaskRuntimeRunStore = {
     run_id: `${Date.now()}-${process.pid}`,
     pairs,
     updated_at: new Date().toISOString(),
-  } satisfies TaskRuntimeRunStore)
+  }
+  await writeJsonAtomic(currentRunPath(options.configDir), run)
+  await upsertActiveRun(run, options.configDir)
 
   const runtimePairs = await Promise.all(selections.map(async (selection) => ({
     selection,
@@ -515,7 +600,7 @@ export async function runTaskEnabledBridge(options: TaskEnabledRunOptions): Prom
           taskConfigDir: item.taskDir,
         }))
       } else {
-        console.log(`Starting IM + Task for ${item.selection.agent.display_name} using ${item.selection.bot.name}`)
+        console.log(`Starting IM + Task for ${item.selection.agent.display_name} using ${item.selection.bot.app_id}`)
       }
       await im.start()
       await task.start({
@@ -527,6 +612,7 @@ export async function runTaskEnabledBridge(options: TaskEnabledRunOptions): Prom
     } catch (error) {
       await im.stop().catch(() => {})
       await task.stop().catch(() => {})
+      await removeActiveRun(run.run_id, options.configDir).catch(() => {})
       throw error
     }
   }
@@ -547,6 +633,7 @@ export async function runTaskEnabledBridge(options: TaskEnabledRunOptions): Prom
       im.stop().catch(() => {}),
       task.stop().catch(() => {}),
     ]))
+    await removeActiveRun(run.run_id, options.configDir).catch(() => {})
     process.exit(0)
   }
   process.on('SIGINT', () => { void shutdown('SIGINT') })

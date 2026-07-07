@@ -155,6 +155,7 @@ function renderNewlineGuidance(): string[] {
   return [
     '- For any user-visible Feishu text, use actual LF newline characters (U+000A / 0x0A) for line breaks.',
     '- Do not write visible literal `\\n`, `\\n\\n`, or double-escaped `\\\\n` text into Feishu comments, FEISHU_TASK_RESULT_JSON user-visible fields, or text deliverables.',
+    '- Exception: inside the final AAMP_RESULT_JSON block, follow the Final Result Contract nested JSON escaping rules so decoded user-visible fields still contain actual LF line breaks.',
     '- User-visible fields that may become Feishu comments or deliveries, including summary, question, error, reply_comment content, and text_delivery content, must follow these newline rules; for need_help, the bridge will comment the question field.',
     '- If using JSON or shell commands, ensure the final decoded comment body or file content contains real line breaks.',
     '- For markdown/text deliverables, prefer heredoc-style file creation so the saved file contains actual newlines.',
@@ -183,6 +184,12 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     schema: 'feishu_task_result.v2',
     status: 'answered',
     summary: 'The direct reply text that the bridge should write as a Feishu task comment.',
+    reply_written: false,
+  })
+  const multilineAnsweredBridgeCommentExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'answered',
+    summary: '第一行\n\n第二行\n- item',
     reply_written: false,
   })
   const deliveryExample = buildFinalResultExample({
@@ -236,6 +243,13 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Infer intent only from the Feishu task summary, description, child tasks, comments, latest effective comment, and event metadata in the Description section.',
     '- Do not reconstruct missing intent from unrelated local files, account state, mailbox, credentials, or remote services.',
     '',
+    'Feishu/Lark Authorization Rules:',
+    '- Before using Feishu/Lark APIs or lark-cli capabilities, inspect the current granted user scopes for the provided lark-cli profile and treat those granted scopes as the hard capability boundary.',
+    '- If a lark-cli profile is provided in Dispatch Context, run lark-cli commands with that profile and check its auth status before choosing Feishu/Lark data sources.',
+    '- Do not run lark-cli auth login, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.',
+    '- Complete the task using only currently granted scopes and available task context. If a preferred Feishu/Lark source is unavailable, try another already-authorized source or produce the best result possible within the granted scopes.',
+    '- If the task truly cannot be completed within the currently granted scopes, use status=need_help only for missing business input, identifiers, documents, groups, or data locations; do not include authorization commands or scope requests.',
+    '',
     'Intent Rules:',
     '- For task_create or task_reminder_fire, execute the original delegated task intent. For task_reminder_fire, do not treat it as a follow-up question.',
     '- For task_comment, treat the latest effective comment as the new instruction for this delegated task; continue execution or answer the comment according to its content.',
@@ -275,6 +289,8 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- The FEISHU_TASK_RESULT_JSON JSON object after the marker inside output must also be parseable by JSON.parse.',
     '- Do not wrap AAMP_RESULT_JSON in Markdown fences, add comments, use trailing commas, single-quoted JSON, or extra keys.',
     '- Inside JSON text, JSON strings must escape line breaks as `\\n`; after parsing, those escapes become actual LF newlines in user-visible fields.',
+    '- Because FEISHU_TASK_RESULT_JSON is embedded inside AAMP_RESULT_JSON.output, multiline user-visible fields must appear as `\\\\n` in the final visible AAMP_RESULT_JSON text.',
+    '- After parsing the outer JSON, the inner FEISHU_TASK_RESULT_JSON must still contain `\\n` escape sequences, not literal LF characters inside JSON strings.',
     '- Before finalizing, validate that JSON.parse(<outer-json>).output starts with `FEISHU_TASK_RESULT_JSON:`, and JSON.parse(output.slice(marker.length)) succeeds.',
     '- Use schema=feishu_task_result.v2.',
     '- Use status=answered when there is no separate deliverable. Include reply_written=true if you already wrote a Feishu comment, or reply_written=false if the bridge should comment summary.',
@@ -294,6 +310,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Do not include ACP attachments or FILE references; if a deliverable is needed, return file_delivery, link_delivery, or text_delivery.',
     `- Example reply_comment: ${replyCommentExample}`,
     `- Example answered bridge-comment: ${answeredBridgeCommentExample}`,
+    `- Example multiline answered bridge-comment: ${multilineAnsweredBridgeCommentExample}`,
     `- Example Feishu document delivery: ${deliveryExample}`,
     `- Example file_delivery artifact: ${fileDeliveryExample}`,
     `- Example failure: ${failureExample}`,

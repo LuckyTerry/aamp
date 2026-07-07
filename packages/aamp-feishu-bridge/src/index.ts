@@ -99,7 +99,7 @@ function printUsage(): void {
 Usage:
   aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
   aamp-feishu-bridge start [--config-dir DIR] [--json]
-  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--bot-name NAME] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
+  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
   aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
@@ -234,6 +234,9 @@ async function runBridge(args: ParsedArgs): Promise<void> {
       appId: firstArg(args, 'app-id'),
       appSecret: firstArg(args, 'app-secret'),
       botName: firstArg(args, 'bot-name'),
+      useFeishuCli: args.booleans.has('use-feishu-cli') || args.booleans.has('feishu-cli'),
+      feishuCliProfile: firstArg(args, 'feishu-cli-profile'),
+      feishuCliBin: firstArg(args, 'feishu-cli-bin'),
       domain: firstArg(args, 'domain'),
       boe: args.booleans.has('boe'),
       pre: args.booleans.has('pre'),

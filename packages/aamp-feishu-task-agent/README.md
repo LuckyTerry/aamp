@@ -33,9 +33,10 @@ Defaults:
 
 - Environment: `online`
 - AAMP host: `https://meshmail.ai`
-- ACP bridge: `@zengxingyuan/aamp-acp-bridge@0.1.28-dev.14`
-- CLI bridge: `@zengxingyuan/aamp-cli-bridge@0.1.7-dev.5`
-- Feishu bridge: `@zengxingyuan/aamp-feishu-bridge@0.1.14` with `--enable-task`
+- ACP bridge: `@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16`
+- CLI bridge: `@zengxingyuan/aamp-cli-bridge@0.1.7-dev.9`
+- Feishu bridge: `@zengxingyuan/aamp-feishu-bridge@0.1.27` with `--enable-task`
+- lark-cli minimum version: `1.0.64`
 - Authorization method: `pairing-code`
 - Debug mode: disabled by default; pass `--debug` to enable bridge debug logs
 - Codex ACP command: refreshed on every launch; macOS prefers the signed Codex.app binary and pins `@agentclientprotocol/codex-acp`

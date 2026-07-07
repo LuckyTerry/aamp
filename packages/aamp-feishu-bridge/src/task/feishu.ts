@@ -20,6 +20,7 @@ import type {
   FeishuTaskStatus,
   FeishuTaskSubtask,
 } from './types.js'
+import { resolveLarkCliProfileCredentialsFromDisk } from '../feishu-cli.js'
 
 type FeishuConfig = BridgeConfig['feishu']
 type Logger = Pick<Console, 'error' | 'log'>
@@ -161,6 +162,22 @@ function getErrorStatus(error: unknown): number | undefined {
 function getErrorCode(error: unknown): string | undefined {
   const record = asRecord(error)
   return getString(record?.code)
+}
+
+function resolveRuntimeFeishuConfig(config: FeishuConfig): FeishuConfig {
+  if ((config.authMode ?? 'app-secret') !== 'lark-cli' || config.appSecret?.trim()) return config
+  const credentials = resolveLarkCliProfileCredentialsFromDisk({
+    appId: config.appId,
+    profile: config.cliProfile,
+  })
+  if (!credentials.appSecret?.trim()) {
+    throw new Error(`Feishu lark-cli profile ${config.cliProfile ?? config.appId} does not contain a readable app secret.`)
+  }
+  return {
+    ...config,
+    appId: credentials.appId,
+    appSecret: credentials.appSecret,
+  }
 }
 
 export function isRetryableFeishuError(error: unknown): boolean {
@@ -375,17 +392,17 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
   private wsClient?: WSClient
 
   constructor(config: FeishuConfig, options: OapiFeishuTaskClientOptions = {}) {
-    this.config = config
+    this.config = resolveRuntimeFeishuConfig(config)
     this.logger = options.logger ?? console
     this.retry = {
       maxAttempts: options.retryMaxAttempts ?? 3,
       baseDelayMs: options.retryBaseDelayMs ?? 300,
     }
-    this.httpInstance = createFeishuHttpInstance(config.headers)
+    this.httpInstance = createFeishuHttpInstance(this.config.headers)
     this.client = new Client({
-      appId: config.appId,
-      appSecret: config.appSecret,
-      ...(config.domain ? { domain: config.domain } : {}),
+      appId: this.config.appId,
+      appSecret: this.config.appSecret ?? '',
+      ...(this.config.domain ? { domain: this.config.domain } : {}),
       ...(this.httpInstance ? { httpInstance: this.httpInstance } : {}),
       loggerLevel: LoggerLevel.info,
       source: 'aamp-feishu-task-bridge',
@@ -440,7 +457,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     this.logger.log(`[feishu ws] starting app=${this.config.appId} events=${this.config.eventNames.join(',')}`)
     this.wsClient = new WSClient({
       appId: this.config.appId,
-      appSecret: this.config.appSecret,
+      appSecret: this.config.appSecret ?? '',
       ...(this.config.domain ? { domain: this.config.domain } : {}),
       ...(this.httpInstance ? { httpInstance: this.httpInstance } : {}),
       loggerLevel: LoggerLevel.info,

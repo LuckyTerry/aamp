@@ -376,6 +376,23 @@ function renderTaskPromptRules(promptRules: string | undefined): string[] {
   ]
 }
 
+function renderLarkCliProfileRules(task: TaskDispatch): string[] {
+  const profile = asString(task.dispatchContext?.feishu_lark_cli_profile)
+  if (!profile) return []
+
+  return [
+    `Feishu lark-cli profile rules:`,
+    `- This task came through a Feishu bot bound to lark-cli profile \`${profile}\`.`,
+    `- Before using Feishu/Lark capabilities, inspect the current granted user scopes for this profile, for example with \`lark-cli --profile ${profile} auth status --format json\`, and treat those granted scopes as the hard capability boundary.`,
+    `- Whenever you run lark-cli for this task, you MUST pass \`--profile ${profile}\` in that command.`,
+    `- Do not use the active/default lark-cli profile for this task.`,
+    `- Do not run \`lark-cli auth login\`, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.`,
+    `- Complete the task using only the currently granted scopes and available context. If a preferred API is unavailable, try another already-authorized source or produce the best result possible within the granted scopes.`,
+    `- If the task truly cannot be completed within the currently granted scopes, use the task protocol's help/failure path and ask only for missing business input or data location; do not include authorization commands or scope requests.`,
+    ``,
+  ]
+}
+
 export function buildPrompt(task: TaskDispatch, threadContextText?: string, agentName?: string): string {
   const agentDisplayName = displayAgentName(task, agentName)
   const dispatchContextLines = task.dispatchContext && Object.keys(task.dispatchContext).length > 0
@@ -406,6 +423,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
         `Execution rules:`,
+        ...renderLarkCliProfileRules(task),
         `- Treat the latest user message and prior thread context as the only conversation context.`,
         `- Only start your response with "HELP:" when you are truly blocked and need specific missing information.`,
         `- Keep your final reply limited to the final user-facing message.`,
@@ -432,6 +450,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
+        ...renderLarkCliProfileRules(task),
         ...renderTaskPromptRules(task.promptRules),
       ]
 

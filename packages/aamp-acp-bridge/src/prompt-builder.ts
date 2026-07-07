@@ -376,6 +376,20 @@ function renderTaskPromptRules(promptRules: string | undefined): string[] {
   ]
 }
 
+function renderLarkCliProfileRules(task: TaskDispatch): string[] {
+  const profile = asString(task.dispatchContext?.feishu_lark_cli_profile)
+  if (!profile) return []
+
+  return [
+    `Feishu lark-cli profile rules:`,
+    `- This task came through a Feishu bot bound to lark-cli profile \`${profile}\`.`,
+    `- Whenever you run lark-cli for this task, you MUST pass \`--profile ${profile}\` in that command.`,
+    `- Do not use the active/default lark-cli profile for this task.`,
+    `- If you ask the user to authorize or rerun a lark-cli command, include \`--profile ${profile}\` in the exact command.`,
+    ``,
+  ]
+}
+
 /**
  * Convert an AAMP TaskDispatch into a prompt string for an ACP agent.
  */
@@ -415,6 +429,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
         `Execution rules:`,
+        ...renderLarkCliProfileRules(task),
         `- Treat the Latest user message section and any prior thread context below as the only conversation context you were given.`,
         `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct intent from local files, account state, or remote services.`,
         `- Do not search outside the current working directory unless the user message explicitly asks you to inspect a specific external path.`,
@@ -446,6 +461,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ` `,
+        ...renderLarkCliProfileRules(task),
         ...renderTaskPromptRules(task.promptRules),
       ]
   return parts.filter(Boolean).join('\n')

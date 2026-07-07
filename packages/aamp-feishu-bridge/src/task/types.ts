@@ -12,7 +12,10 @@ export interface BridgeConfig {
   slug: string
   feishu: {
     appId: string
-    appSecret: string
+    appSecret?: string
+    authMode?: 'app-secret' | 'lark-cli'
+    cliProfile?: string
+    cliBin?: string
     domain?: string
     headers?: Record<string, string>
     userIdType?: 'open_id' | 'user_id' | 'union_id'
@@ -43,6 +46,7 @@ export interface BridgeTaskState {
   streamStepTexts?: string[]
   status: BridgeTaskStatus
   ackCommentedTaskIds?: string[]
+  ackCommentedEventKeys?: string[]
   helpCommentedTaskIds?: string[]
   resultHandledTaskIds?: string[]
   resultCommentedTaskIds?: string[]
@@ -109,6 +113,8 @@ export interface BridgeState {
   appOwner?: FeishuAppOwnerState
   tasks: Record<string, BridgeTaskState>
   dedupEventIds: Record<string, string>
+  dedupSemanticEventKeys: Record<string, string>
+  ackCommentedEventKeys: Record<string, string>
   permissionDeniedCommentNoticeKeys: Record<string, string>
 }
 

@@ -78,6 +78,10 @@ function matchesSenderPattern(senderEmail: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`, 'i').test(normalizedSender)
 }
 
+function resolveTaskSessionKey(task: TaskDispatch, hydratedTask: TaskDispatch): string | undefined {
+  return hydratedTask.sessionKey ?? task.sessionKey ?? task.taskId
+}
+
 function matchPairedSenderPolicy(
   task: TaskDispatch,
   senderPolicies: SenderPolicy[],
@@ -136,9 +140,11 @@ interface HandleEventOptions {
   historical?: boolean
 }
 
-function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
+export function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
   return (events ?? []).some((event) =>
-    event.intent === 'task.result' || event.intent === 'task.cancel',
+    event.intent === 'task.result'
+    || event.intent === 'task.cancel'
+    || event.intent === 'task.help_needed',
   )
 }
 
@@ -505,6 +511,10 @@ export class AgentBridge {
       return
     }
 
+    this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
+      this.agentConfig.senderPoliciesFile,
+      this.agentConfig.name,
+    ))
     const senderDecision = matchCombinedSenderPolicy(task, this.agentConfig.senderPolicies, this.senderPolicies)
     if (!senderDecision.allowed) {
       if (options.historical) return
@@ -692,7 +702,11 @@ export class AgentBridge {
       }
 
       const prompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
-      const result = await this.cli.prompt(hydratedTask.sessionKey, prompt, {
+      const sessionKey = resolveTaskSessionKey(task, hydratedTask)
+      if (sessionKey !== hydratedTask.sessionKey) {
+        console.log(`[${this.name}] using dispatch session for ${task.taskId}: ${sessionKey}`)
+      }
+      const result = await this.cli.prompt(sessionKey, prompt, {
         onStreamUpdate: handleStreamUpdate,
       })
       if (this.cancelledTaskIds.has(task.taskId)) {

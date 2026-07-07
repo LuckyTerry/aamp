@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatDebugPromptLog } from './agent-bridge.js'
+import { formatDebugPromptLog, threadAlreadyTerminal } from './agent-bridge.js'
 
 test('formatDebugPromptLog prints metadata and the full prompt body', () => {
   const prompt = [
@@ -21,4 +21,15 @@ test('formatDebugPromptLog prints metadata and the full prompt body', () => {
   assert.match(log, /--- BEGIN ACP PROMPT ---\n## AAMP Task/)
   assert.match(log, /Execution rules:\n- Use the requested runtime\./)
   assert.match(log, /\n--- END ACP PROMPT ---$/)
+})
+
+test('threadAlreadyTerminal treats help-needed threads as closed for historical reconcile', () => {
+  assert.equal(threadAlreadyTerminal([
+    {
+      intent: 'task.help_needed',
+      from: 'agent@meshmail.ai',
+      to: 'bridge@meshmail.ai',
+      createdAt: '2026-07-06T00:00:00.000Z',
+    },
+  ]), true)
 })
