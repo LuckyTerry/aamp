@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  buildFeishuTaskDispatchContext,
   buildFeishuTaskContext,
   buildFeishuTaskPromptRules,
 } from './dispatch.js'
@@ -20,6 +21,7 @@ const task: FeishuTaskDetails = {
   description: '请拆解需求确认、技术改造、测试验收、发布回滚。',
   url: 'https://applink.feishu.cn/client/todo/detail?guid=task_guid_123',
   status: 'todo',
+  parentGuid: 'parent_guid_123',
 } as FeishuTaskDetails
 
 test('buildFeishuTaskPromptRules explains nested multiline JSON escaping', () => {
@@ -32,7 +34,7 @@ test('buildFeishuTaskPromptRules explains nested multiline JSON escaping', () =>
   assert.match(rules, /第一行\\\\n\\\\n第二行\\\\n- item/)
 })
 
-test('buildFeishuTaskContext includes source message context and only Feishu document links', () => {
+test('buildFeishuTaskContext renders compact event, task, and source context', () => {
   const context = buildFeishuTaskContext(event, {
     ...task,
     origin: {
@@ -54,27 +56,44 @@ test('buildFeishuTaskContext includes source message context and only Feishu doc
     },
   } as unknown as FeishuTaskDetails, 'task_create')
 
+  assert.match(context, /^Feishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\nFeishu Task:/)
+  assert.doesNotMatch(context, /event_id:/)
+  assert.doesNotMatch(context, /task_guid:/)
+  assert.doesNotMatch(context, /timestamp:/)
   assert.match(context, /Task source context:/)
-  assert.match(context, /resource_id=refer_resource_1/)
-  assert.match(context, /message_id=om_message_1/)
   assert.match(context, /复选消息 1：请参考文档/)
-  assert.match(context, /Detected source document links:/)
   assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/docx\/DOCX123/)
-  assert.match(context, /https:\/\/example\.feishu\.cn\/docs\/DOCS456/)
-  assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/wiki\/WIKI789/)
-  const detectedLinksSection = context.slice(context.indexOf('Detected source document links:'), context.indexOf('Task attachments:'))
-  assert.doesNotMatch(detectedLinksSection, /https:\/\/bytedance\.larkoffice\.com\/sheets\/SHEET123/)
+  assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/sheets\/SHEET123/)
+  assert.doesNotMatch(context, /resource_id=/)
+  assert.doesNotMatch(context, /message_id=/)
+  assert.doesNotMatch(context, /Detected source document links:/)
+  assert.doesNotMatch(context, /^\- task_id:/m)
+  assert.doesNotMatch(context, /^\- status:/m)
+  assert.doesNotMatch(context, /^\- parent_guid:/m)
+  assert.doesNotMatch(context, /^\- url:/m)
+  assert.doesNotMatch(context, /Task attachments:/)
+  assert.doesNotMatch(context, /Task delivery attachments:/)
+  assert.doesNotMatch(context, /Child tasks:/)
+  assert.doesNotMatch(context, /Child task attachments:/)
+  assert.doesNotMatch(context, /Comments:/)
+  assert.doesNotMatch(context, /\(none/)
 })
 
 test('buildFeishuTaskPromptRules tells agents how to read source document links', () => {
   const rules = buildFeishuTaskPromptRules()
 
   assert.match(rules, /Source Document Rules:/)
-  assert.match(rules, /Source document links detected in Task source context are task input, not deliverables/i)
-  assert.match(rules, /Before relying on a detected source document link, read it with lark-cli/i)
+  assert.match(rules, /Source document links in Task source context are task input, not deliverables/i)
+  assert.match(rules, /Before relying on a source document link from Task source context, read it with lark-cli/i)
   assert.match(rules, /lark-cli docs --help/i)
   assert.match(rules, /lark-cli skills read lark-doc/i)
   assert.match(rules, /cannot be accessed after a concrete lark-cli attempt/i)
   assert.match(rules, /Treat the Description section as the complete Feishu task context, including Task source context when present/i)
-  assert.match(rules, /source documents read via lark-cli from detected source document links/i)
+  assert.match(rules, /source documents read via lark-cli from source document links in Task source context/i)
+})
+
+test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing source', () => {
+  const context = buildFeishuTaskDispatchContext(event, task, 'task_create')
+
+  assert.deepEqual(context, { source: 'feishu-task' })
 })

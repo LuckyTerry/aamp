@@ -268,3 +268,34 @@ test('runtime completes comment-triggered answered results when bridge writes th
     await rm(configDir, { recursive: true, force: true })
   }
 })
+
+test('runtime keeps lark-cli profile out of dispatch context and puts it in prompt rules', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const config = buildConfig()
+  config.feishu.cliProfile = 'custom-feishu-profile'
+  const runtime = new FeishuTaskBridgeRuntime(config, {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_profile_context',
+      taskGuid: 'task_guid_profile_context',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /Feishu lark-cli profile rules:/)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /--profile custom-feishu-profile/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
