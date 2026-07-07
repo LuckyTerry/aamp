@@ -163,6 +163,7 @@ export interface FeishuTaskSubtask {
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]
+  origin?: FeishuTaskOrigin
   attachments?: FeishuTaskAttachment[]
   attachmentDeliveries?: FeishuTaskAttachment[]
 }
@@ -180,6 +181,22 @@ export interface FeishuAppOwner {
   ownerId: string
 }
 
+export interface FeishuTaskOriginSourceMessage {
+  messageId?: string
+  content?: string
+}
+
+export interface FeishuTaskOriginReferResource {
+  resourceId?: string
+  type?: string
+  sourceMessage?: FeishuTaskOriginSourceMessage
+  unavailableReason?: string
+}
+
+export interface FeishuTaskOrigin {
+  referResources?: FeishuTaskOriginReferResource[]
+}
+
 export interface FeishuTaskDetails {
   guid: string
   taskId?: string
@@ -191,6 +208,7 @@ export interface FeishuTaskDetails {
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]
+  origin?: FeishuTaskOrigin
   attachments?: FeishuTaskAttachment[]
   attachmentDeliveries?: FeishuTaskAttachment[]
   subtasks?: FeishuTaskSubtask[]
