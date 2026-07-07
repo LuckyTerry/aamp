@@ -18,10 +18,12 @@ import {
   buildTaskProfileTaskFeishuConfig,
   dedupeTaskProfiles,
   normalizeTaskProfile,
+  resolveTaskProfileSelection,
   resolveTaskProfileName,
   type TaskProfileConfig,
   type TaskProfileStore,
 } from './task-runtime-profile.js'
+import { describeError, isRetryableAampNetworkError, isSmtpAuthError } from './task-runtime-errors.js'
 
 const TASK_RUNTIME_DIRNAME = 'task-runtime'
 const AGENTS_FILENAME = 'agents.json'
@@ -331,7 +333,7 @@ async function selectBot(
   const now = new Date().toISOString()
   if (appId || cliProfile || botName) {
     if (!appId) throw new Error('Feishu App ID is required for --enable-task profile mode.')
-    const bot = normalizeTaskProfile({
+    const bot = resolveTaskProfileSelection(bots, {
       app_id: appId,
       profile: cliProfile,
       display_name: botName,
@@ -389,46 +391,17 @@ async function loadConfigIfExists<T>(filePath: string): Promise<T | undefined> {
   return JSON.parse(await readFile(filePath, 'utf8')) as T
 }
 
-function describeError(error: unknown): string {
-  if (!(error instanceof Error)) return String(error)
-  const details = error as Error & {
-    code?: string
-    errno?: number
-    syscall?: string
-    hostname?: string
-    host?: string
-    address?: string
-    port?: number
-    cause?: unknown
-  }
-  const parts = [details.message]
-  if (details.code) parts.push(`code=${details.code}`)
-  if (details.errno !== undefined) parts.push(`errno=${details.errno}`)
-  if (details.syscall) parts.push(`syscall=${details.syscall}`)
-  if (details.hostname) parts.push(`hostname=${details.hostname}`)
-  if (details.host) parts.push(`host=${details.host}`)
-  if (details.address) parts.push(`address=${details.address}`)
-  if (details.port !== undefined) parts.push(`port=${details.port}`)
-  if (details.cause) parts.push(`cause=${describeError(details.cause)}`)
-  return parts.join(' | ')
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function isSmtpAuthError(error: unknown): boolean {
-  const message = describeError(error).toLowerCase()
-  return message.includes('535')
-    || message.includes('invalid login')
-    || message.includes('authentication credentials invalid')
 }
 
 async function sendPairRequestIfNeeded(
   mailbox: ImBridgeConfig['mailbox'],
   pairingUrl: string | undefined,
+  options: { retrySmtpAuth?: boolean } = {},
 ): Promise<void> {
   if (!pairingUrl || !isPairingUrl(pairingUrl)) return
+  const retrySmtpAuth = options.retrySmtpAuth ?? true
   const pairing = parsePairingUrl(pairingUrl)
   const client = AampClient.fromMailboxIdentity({
     email: mailbox.email,
@@ -444,8 +417,10 @@ async function sendPairRequestIfNeeded(
       })
       return
     } catch (error) {
-      if (attempt < PAIR_REQUEST_AUTH_RETRY_COUNT && isSmtpAuthError(error)) {
-        console.warn(`[feishu task-runtime] AAMP pair request SMTP auth not ready from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms`)
+      const canRetrySmtpAuth = retrySmtpAuth && isSmtpAuthError(error)
+      if (attempt < PAIR_REQUEST_AUTH_RETRY_COUNT && (canRetrySmtpAuth || isRetryableAampNetworkError(error))) {
+        const reason = canRetrySmtpAuth ? 'SMTP auth not ready' : 'network temporarily unavailable'
+        console.warn(`[feishu task-runtime] AAMP pair request ${reason} from=${mailbox.email} attempt=${attempt}/${PAIR_REQUEST_AUTH_RETRY_COUNT}; retrying in ${PAIR_REQUEST_AUTH_RETRY_DELAY_MS}ms: ${describeError(error)}`)
         await sleep(PAIR_REQUEST_AUTH_RETRY_DELAY_MS)
         continue
       }
@@ -501,7 +476,10 @@ async function ensureInstanceConfigs(
   const aampHost = options.aampHost?.trim() || existingIm?.aampHost || existingTask?.aampHost || 'https://meshmail.ai'
   const feishuDomain = resolveFeishuDomain(options, existingIm?.feishu.domain ?? existingTask?.feishu.domain)
   const feishuHeaders = resolveFeishuHeaders(options, existingTask?.feishu.headers)
-  const taskAppSecret = options.appSecret?.trim() || existingTask?.feishu.appSecret?.trim() || existingIm?.feishu.appSecret?.trim()
+  const taskAppSecret = options.appSecret?.trim()
+    || existingTask?.feishu.appSecret?.trim()
+    || existingIm?.feishu.appSecret?.trim()
+    || selection.bot.app_secret?.trim()
   const slugBase = instanceId
   const existingMailbox = existingIm?.mailbox ?? existingTask?.mailbox
   const sharedMailbox = await ensureMailboxConfig({
@@ -549,7 +527,22 @@ async function ensureInstanceConfigs(
 
   await writeJsonAtomic(imConfigPath, imConfig)
   await writeJsonAtomic(taskConfigPath, taskConfig)
-  await sendPairRequestIfNeeded(sharedMailbox, selection.pairingUrl)
+  try {
+    await sendPairRequestIfNeeded(sharedMailbox, selection.pairingUrl, { retrySmtpAuth: !existingMailbox })
+  } catch (error) {
+    if (!existingMailbox || !isSmtpAuthError(error)) throw error
+    console.warn(`[feishu task-runtime] existing AAMP mailbox SMTP credentials are invalid; re-registering mailbox slug=${slugBase} email=${existingMailbox.email}`)
+    const refreshedMailbox = await ensureMailboxConfig({
+      aampHost,
+      slug: slugBase,
+      description: `Feishu bridge runtime for ${selection.agent.target_agent_email}`,
+    })
+    imConfig.mailbox = refreshedMailbox
+    taskConfig.mailbox = refreshedMailbox
+    await writeJsonAtomic(imConfigPath, imConfig)
+    await writeJsonAtomic(taskConfigPath, taskConfig)
+    await sendPairRequestIfNeeded(refreshedMailbox, selection.pairingUrl)
+  }
   return { imConfig, taskConfig, imDir, taskDir }
 }
 

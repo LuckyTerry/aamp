@@ -38,7 +38,7 @@ FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.9}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.36}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.41}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -1070,9 +1070,10 @@ for (const bot of bots) {
   const appId = String(bot?.app_id || "").trim();
   const profile = String(bot?.profile || "").trim();
   const name = String(bot?.display_name || appId).trim();
+  const appSecret = String(bot?.app_secret || "").trim();
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
   seen.add(appId);
-  console.log([appId, name, profile].join("\t"));
+  console.log([appId, name, profile, appSecret].join("\t"));
 }
 '
 }
@@ -1203,13 +1204,16 @@ save_bot_config() {
   local bot_name="$1"
   local app_id="$2"
   local profile="$3"
+  local app_secret="${4:-}"
   mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
-  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" FEISHU_USER_AUTH_DOMAINS="$FEISHU_USER_AUTH_DOMAINS" node -e '
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_USER_AUTH_DOMAINS="$FEISHU_USER_AUTH_DOMAINS" node -e '
 const fs = require("fs");
 const file = process.env.BOT_CONFIG_FILE;
+const appSecret = String(process.env.BOT_APP_SECRET || "").trim();
 const next = {
   display_name: process.env.BOT_NAME || process.env.BOT_APP_ID,
   app_id: process.env.BOT_APP_ID,
+  ...(appSecret ? { app_secret: appSecret } : {}),
   profile: process.env.BOT_PROFILE,
   auth_mode: "lark-cli",
   capabilities: ["im", "task"],
@@ -1227,7 +1231,12 @@ for (const bot of bots) {
   if (!appId) continue;
   byAppId.set(appId, bot);
 }
-byAppId.set(next.app_id, { ...(byAppId.get(next.app_id) || {}), ...next });
+const existing = byAppId.get(next.app_id) || {};
+byAppId.set(next.app_id, {
+  ...existing,
+  ...next,
+  app_secret: next.app_secret || existing.app_secret,
+});
 fs.writeFileSync(file, JSON.stringify({ version: 1, profiles: [...byAppId.values()] }, null, 2) + "\n");
 '
 }
@@ -1250,6 +1259,82 @@ const bots = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
 const filtered = bots.filter((bot) => String(bot?.app_id || "").trim() !== appIdToRemove);
 if (filtered.length !== bots.length) {
   fs.writeFileSync(file, JSON.stringify({ version: 1, profiles: filtered }, null, 2) + "\n");
+}
+'
+}
+
+clean_bot_instance_configs_preserve_mailbox() {
+  local app_id="$1"
+  local profile="$2"
+  [ -n "$app_id" ] || return 0
+  BOT_APP_ID="$app_id" BOT_PROFILE="$profile" HOME_DIR="$HOME" node -e '
+const fs = require("fs");
+const path = require("path");
+
+const appId = String(process.env.BOT_APP_ID || "").trim();
+const profile = String(process.env.BOT_PROFILE || "").trim();
+const home = process.env.HOME_DIR || process.env.HOME;
+const instancesDir = path.join(home, ".aamp", "feishu-bridge", "task-runtime", "instances");
+if (!appId || !fs.existsSync(instancesDir)) process.exit(0);
+
+function normalizeId(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32) || "instance";
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return undefined; }
+}
+
+function writeJson(file, value) {
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
+}
+
+function matchesApp(instanceName, config) {
+  if (String(config?.feishu?.appId || "").trim() === appId) return true;
+  const normalizedAppId = normalizeId(appId);
+  return String(instanceName || "").includes(normalizedAppId);
+}
+
+let cleaned = 0;
+for (const entry of fs.readdirSync(instancesDir, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const instanceName = entry.name;
+  const instanceDir = path.join(instancesDir, instanceName);
+  for (const kind of ["im", "task"]) {
+    const configFile = path.join(instanceDir, kind, "config.json");
+    const config = readJson(configFile);
+    if (!config || !matchesApp(instanceName, config)) continue;
+    if (!config.mailbox) continue;
+
+    const cliProfile = profile || String(config?.feishu?.cliProfile || "").trim();
+    if (kind === "task") {
+      config.feishu = {
+        appId,
+        authMode: "lark-cli",
+        ...(cliProfile ? { cliProfile } : {}),
+        userIdType: config?.feishu?.userIdType || "open_id",
+        eventNames: Array.isArray(config?.feishu?.eventNames) && config.feishu.eventNames.length
+          ? config.feishu.eventNames
+          : ["task.task.update_user_access_v2"],
+      };
+    } else {
+      config.feishu = {
+        appId,
+        authMode: "lark-cli",
+        ...(cliProfile ? { cliProfile } : {}),
+      };
+    }
+    writeJson(configFile, config);
+    cleaned += 1;
+  }
+}
+if (cleaned) {
+  console.log(`[aamp-one-click] cleaned ${cleaned} Feishu instance config file(s) for ${appId}, mailbox preserved`);
 }
 '
 }
@@ -1400,7 +1485,8 @@ ensure_lark_cli_profile() {
 forget_current_bot_after_feishu_start_failure() {
   agent_log "Feishu bridge failed before ready; removing local bot config for $APP_ID"
   remove_bot_config "$APP_ID"
-  agent_log "Removed local bot config. Re-run this script and choose 新建应用/选择其他应用 to recreate it."
+  clean_bot_instance_configs_preserve_mailbox "$APP_ID" "$LARK_CLI_PROFILE"
+  agent_log "Removed local bot config and cleaned stale instance Feishu config while preserving mailbox. Re-run this script and choose 新建应用/选择其他应用 to recreate it."
 }
 
 should_forget_bot_after_feishu_failure() {
@@ -1425,16 +1511,18 @@ select_existing_bot_or_create() {
   local app_ids=()
   local names=()
   local profiles=()
+  local app_secrets=()
   local bot_labels=()
-  local app_id name profile
+  local app_id name profile app_secret
   local index create_index selected
 
   acquire_bot_selection_lock
-  while IFS=$'\t' read -r app_id name profile; do
+  while IFS=$'\t' read -r app_id name profile app_secret; do
     [ -n "$app_id" ] || continue
     app_ids+=("$app_id")
     names+=("${name:-$app_id}")
     profiles+=("$profile")
+    app_secrets+=("$app_secret")
     bot_labels+=("${name:-$app_id} ($app_id)")
   done < <(load_bot_configs)
 
@@ -1472,7 +1560,7 @@ select_existing_bot_or_create() {
   APP_ID="${app_ids[$index]}"
   BOT_NAME="${names[$index]}"
   LARK_CLI_PROFILE="${profiles[$index]}"
-  APP_SECRET=""
+  APP_SECRET="${app_secrets[$index]:-}"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$BOT_NAME"
   release_bot_selection_lock
   agent_log "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
@@ -1614,7 +1702,7 @@ NODE
   LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
   ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
   acquire_bot_selection_lock
-  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE"
+  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$bot_name"
   release_bot_selection_lock
   agent_log "saved Feishu task profile config: $bot_name ($APP_ID, profile=$LARK_CLI_PROFILE)"

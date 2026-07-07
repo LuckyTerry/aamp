@@ -5,21 +5,25 @@ import {
   buildTaskProfileFeishuConfig,
   dedupeTaskProfiles,
   normalizeTaskProfile,
+  resolveTaskProfileSelection,
   resolveTaskProfileName,
 } from './task-runtime-profile.js'
+import { isRetryableAampNetworkError, isSmtpAuthError } from './task-runtime-errors.js'
 
 test('resolveTaskProfileName uses the app id as the profile suffix', () => {
   assert.equal(resolveTaskProfileName(' cli_a123456 '), 'aamp-feishu-task-cli_a123456')
 })
 
-test('normalizeTaskProfile derives lark-cli profile config without app secret', () => {
+test('normalizeTaskProfile derives lark-cli profile config', () => {
   const profile = normalizeTaskProfile({
     app_id: ' cli_a123456 ',
+    app_secret: ' runtime-secret ',
     display_name: ' 飞书 CLI ',
   })
 
   assert.deepEqual(profile, {
     app_id: 'cli_a123456',
+    app_secret: 'runtime-secret',
     profile: 'aamp-feishu-task-cli_a123456',
     display_name: '飞书 CLI',
     auth_mode: 'lark-cli',
@@ -78,7 +82,7 @@ test('buildTaskProfileFeishuConfig uses app-secret websocket when runtime app se
   })
 })
 
-test('buildTaskProfileTaskFeishuConfig keeps runtime app secret out of profile metadata', () => {
+test('buildTaskProfileTaskFeishuConfig passes runtime app secret to task bridge config', () => {
   assert.deepEqual(buildTaskProfileTaskFeishuConfig({
     app_id: 'cli_a123456',
     profile: 'aamp-feishu-task-cli_a123456',
@@ -97,9 +101,10 @@ test('buildTaskProfileTaskFeishuConfig keeps runtime app secret out of profile m
 })
 
 test('dedupeTaskProfiles preserves existing display name when updating by app id', () => {
-  assert.deepEqual(dedupeTaskProfiles([
+  const profiles = dedupeTaskProfiles([
     {
       app_id: 'cli_a123456',
+      app_secret: 'cached-secret',
       profile: 'aamp-feishu-task-cli_a123456',
       display_name: '真实 Bot 名称',
       updated_at: '2026-07-03T00:00:00.000Z',
@@ -109,5 +114,42 @@ test('dedupeTaskProfiles preserves existing display name when updating by app id
       profile: 'aamp-feishu-task-cli_a123456',
       updated_at: '2026-07-03T00:01:00.000Z',
     },
-  ])[0]?.display_name, '真实 Bot 名称')
+  ])
+  assert.deepEqual(profiles[0]?.display_name, '真实 Bot 名称')
+  assert.deepEqual(profiles[0]?.app_secret, 'cached-secret')
+})
+
+test('resolveTaskProfileSelection preserves saved app secret in non-interactive app id path', () => {
+  const selected = resolveTaskProfileSelection([
+    {
+      app_id: 'cli_a123456',
+      app_secret: 'cached-secret',
+      profile: 'aamp-feishu-task-cli_a123456',
+      display_name: '缓存 Bot',
+      updated_at: '2026-07-03T00:00:00.000Z',
+    },
+  ], {
+    app_id: 'cli_a123456',
+    profile: 'aamp-feishu-task-cli_a123456',
+    updated_at: '2026-07-03T00:01:00.000Z',
+  })
+
+  assert.equal(selected.app_secret, 'cached-secret')
+  assert.equal(selected.display_name, '缓存 Bot')
+})
+
+test('isRetryableAampNetworkError detects transient AAMP connect timeout errors', () => {
+  const error = new Error('fetch failed', {
+    cause: Object.assign(new Error('Connect Timeout Error'), {
+      code: 'UND_ERR_CONNECT_TIMEOUT',
+    }),
+  })
+
+  assert.equal(isRetryableAampNetworkError(error), true)
+  assert.equal(isRetryableAampNetworkError(new Error('400 bad request')), false)
+})
+
+test('isSmtpAuthError detects stale mailbox SMTP credentials', () => {
+  assert.equal(isSmtpAuthError(new Error('Invalid login: 535 5.7.8 Authentication credentials invalid.')), true)
+  assert.equal(isSmtpAuthError(new Error('fetch failed')), false)
 })

@@ -22,6 +22,7 @@ export const TASK_PROFILE_DOMAINS = [
 
 export interface TaskProfileConfig {
   app_id: string
+  app_secret?: string
   profile: string
   display_name?: string
   auth_mode: 'lark-cli'
@@ -32,6 +33,7 @@ export interface TaskProfileConfig {
 
 export interface TaskProfileInput {
   app_id: string
+  app_secret?: string
   profile?: string
   display_name?: string
   capabilities?: Array<'im' | 'task'>
@@ -53,6 +55,7 @@ export function normalizeTaskProfile(input: TaskProfileInput): TaskProfileConfig
   if (!appId) throw new Error('Feishu App ID is required.')
   return {
     app_id: appId,
+    ...(input.app_secret?.trim() ? { app_secret: input.app_secret.trim() } : {}),
     profile: input.profile?.trim() || resolveTaskProfileName(appId),
     ...(input.display_name?.trim() ? { display_name: input.display_name.trim() } : {}),
     auth_mode: 'lark-cli',
@@ -70,10 +73,25 @@ export function dedupeTaskProfiles(profiles: TaskProfileInput[]): TaskProfileCon
     byAppId.set(normalized.app_id, {
       ...(existing ?? {}),
       ...normalized,
+      app_secret: normalized.app_secret ?? existing?.app_secret,
       display_name: normalized.display_name ?? existing?.display_name,
     })
   }
   return [...byAppId.values()].sort((left, right) => left.app_id.localeCompare(right.app_id))
+}
+
+export function resolveTaskProfileSelection(
+  profiles: TaskProfileInput[],
+  input: TaskProfileInput,
+): TaskProfileConfig {
+  const appId = input.app_id.trim()
+  const existing = profiles.find((profile) => profile.app_id.trim() === appId)
+  return normalizeTaskProfile({
+    ...existing,
+    ...input,
+    profile: input.profile?.trim() || existing?.profile,
+    display_name: input.display_name?.trim() || existing?.display_name,
+  })
 }
 
 export function buildTaskProfileFeishuConfig(
