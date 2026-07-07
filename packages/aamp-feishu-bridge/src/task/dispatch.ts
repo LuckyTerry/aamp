@@ -178,6 +178,17 @@ function renderSourceDocumentGuidance(): string[] {
   ]
 }
 
+function renderCriticalFinalResponseProtocol(): string[] {
+  return [
+    'Critical final-response protocol:',
+    '- Do not violate the Final Result Contract.',
+    '- Your final answer MUST be a single AAMP_RESULT_JSON block.',
+    '- Never end with plain natural language, Markdown, or a question outside AAMP_RESULT_JSON.',
+    '- If you need the user to choose, confirm, or provide more information, return status=need_help inside FEISHU_TASK_RESULT_JSON.',
+    '- If you completed work, return status=succeeded or status=answered inside FEISHU_TASK_RESULT_JSON; do not write a normal final reply.',
+  ]
+}
+
 function renderFeishuLarkCliProfileRules(profile: string | undefined): string[] {
   const normalized = profile?.trim()
   if (!normalized) return []
@@ -368,6 +379,8 @@ export function buildFeishuTaskContext(
   const comments = renderComments(task)
 
   return [
+    ...renderCriticalFinalResponseProtocol(),
+    '',
     'Feishu Event:',
     `- normalized_kind: ${eventKind}`,
     `- raw_event_types: ${event.eventTypes.join(',') || '(unknown)'}`,

@@ -56,7 +56,7 @@ test('buildFeishuTaskContext renders compact event, task, and source context', (
     },
   } as unknown as FeishuTaskDetails, 'task_create')
 
-  assert.match(context, /^Feishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\nFeishu Task:/)
+  assert.match(context, /Critical final-response protocol:[\s\S]*\n\nFeishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\nFeishu Task:/)
   assert.doesNotMatch(context, /event_id:/)
   assert.doesNotMatch(context, /task_guid:/)
   assert.doesNotMatch(context, /timestamp:/)
@@ -77,6 +77,16 @@ test('buildFeishuTaskContext renders compact event, task, and source context', (
   assert.doesNotMatch(context, /Child task attachments:/)
   assert.doesNotMatch(context, /Comments:/)
   assert.doesNotMatch(context, /\(none/)
+})
+
+test('buildFeishuTaskContext puts final-response protocol before task details', () => {
+  const context = buildFeishuTaskContext(event, task, 'task_create')
+
+  assert.match(context, /^Critical final-response protocol:\n/)
+  assert.ok(context.indexOf('Critical final-response protocol:') < context.indexOf('Feishu Event:'))
+  assert.match(context, /MUST be a single AAMP_RESULT_JSON block/)
+  assert.match(context, /Never end with plain natural language, Markdown, or a question outside AAMP_RESULT_JSON/)
+  assert.match(context, /status=need_help inside FEISHU_TASK_RESULT_JSON/)
 })
 
 test('buildFeishuTaskPromptRules tells agents how to read source document links', () => {

@@ -7,6 +7,7 @@ import {
   type TaskCancel,
   type TaskDispatch,
 } from 'aamp-sdk'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import type { AgentConfig, BridgeConfig } from './config.js'
@@ -29,6 +30,7 @@ import type { BridgeRuntimeEvent } from './bridge.js'
 
 const IDENTITY_AUTH_RETRY_COUNT = 5
 const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
+const PROMPT_MATERIALIZATION_THRESHOLD_CHARS = 8_000
 
 export interface AgentIdentity {
   email: string
@@ -149,6 +151,66 @@ export function formatDebugPromptLog(options: {
     options.prompt,
     '--- END CLI PROMPT ---',
   ].join('\n')
+}
+
+export interface MaterializedPrompt {
+  prompt: string
+  materializedPath?: string
+  originalLength: number
+}
+
+function sanitizePromptFilePart(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'task'
+}
+
+function promptHash(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex').slice(0, 12)
+}
+
+function buildMaterializedPromptWrapper(filePath: string): string {
+  return [
+    '## AAMP Prompt File',
+    '',
+    'The complete AAMP task prompt was materialized to this local file:',
+    '',
+    filePath,
+    '',
+    'Read the entire file before acting. Treat the file content as the current task prompt and follow all instructions, rules, and final-result contracts in it.',
+    '',
+    'Do not answer from this wrapper alone. If the file cannot be read, finish with exactly `AAMP_RESULT_JSON: {"output":"Unable to read materialized AAMP prompt file: <exact read failure>"}`.',
+  ].join('\n')
+}
+
+export function materializePromptIfNeeded(options: {
+  taskId: string
+  prompt: string
+  thresholdChars?: number
+  baseDir?: string
+  now?: Date
+}): MaterializedPrompt {
+  const thresholdChars = options.thresholdChars ?? PROMPT_MATERIALIZATION_THRESHOLD_CHARS
+  if (options.prompt.length <= thresholdChars) {
+    return {
+      prompt: options.prompt,
+      originalLength: options.prompt.length,
+    }
+  }
+
+  const promptDir = join(options.baseDir ?? getBridgeHomeDir(), 'prompt-files')
+  mkdirSync(promptDir, { recursive: true, mode: 0o700 })
+
+  const timestamp = (options.now ?? new Date()).toISOString().replace(/[:.]/g, '-')
+  const filePath = join(
+    promptDir,
+    `${sanitizePromptFilePart(options.taskId)}-${timestamp}-${promptHash(options.prompt)}.md`,
+  )
+  writeFileSync(filePath, options.prompt, { encoding: 'utf8', mode: 0o600 })
+
+  return {
+    prompt: buildMaterializedPromptWrapper(filePath),
+    materializedPath: filePath,
+    originalLength: options.prompt.length,
+  }
 }
 
 interface HandleEventOptions {
@@ -718,12 +780,22 @@ export class AgentBridge {
         }
       }
 
-      const prompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
+      const builtPrompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
+      const materializedPrompt = materializePromptIfNeeded({
+        taskId: task.taskId,
+        prompt: builtPrompt,
+      })
+      const prompt = materializedPrompt.prompt
       const sessionKey = resolveTaskSessionKey(task, hydratedTask)
       if (sessionKey !== hydratedTask.sessionKey) {
         console.log(`[${this.name}] using dispatch session for ${task.taskId}: ${sessionKey}`)
       }
       if (this.debugPrompt) {
+        if (materializedPrompt.materializedPath) {
+          console.log(
+            `[${this.name}] CLI prompt materialized task=${task.taskId} file=${materializedPrompt.materializedPath} original_chars=${materializedPrompt.originalLength}`,
+          )
+        }
         console.log(formatDebugPromptLog({
           agentName: this.name,
           taskId: task.taskId,
