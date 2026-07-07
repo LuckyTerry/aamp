@@ -155,7 +155,7 @@ function createPairingForAgent(configPathValue: string, agentName: string) {
 
 async function startBridge(
   configPathValue: string,
-  options: { quiet?: boolean; agent?: string; json?: boolean } = {},
+  options: { quiet?: boolean; agent?: string; json?: boolean; debug?: boolean } = {},
 ): Promise<void> {
   if (options.json) {
     redirectConsoleToStderr()
@@ -182,6 +182,7 @@ async function startBridge(
   await bridge.start({
     quiet: options.quiet || options.json,
     onEvent: options.json ? writeJsonEvent : undefined,
+    debug: options.debug,
   })
   setInterval(() => {}, 60_000)
 }
@@ -205,12 +206,12 @@ async function main() {
         console.log(`Run: npx aamp-cli-bridge start\n`)
         break
       }
-      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent') })
+      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent'), debug: args.includes('--debug') })
       break
     }
 
     case 'start': {
-      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent') })
+      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent'), debug: args.includes('--debug') })
       break
     }
 
@@ -220,12 +221,12 @@ async function main() {
       if (jsonOutput) {
         console.log(JSON.stringify(createPairingForAgent(configPath, agentName), null, 2))
         if (args.includes('--no-start')) break
-        await startBridge(configPath, { quiet: true, agent: agentName, json: true })
+        await startBridge(configPath, { quiet: true, agent: agentName, json: true, debug: args.includes('--debug') })
         break
       }
       renderPairingForAgent(configPath, agentName)
       if (args.includes('--no-start')) break
-      await startBridge(configPath, { quiet: true, agent: agentName })
+      await startBridge(configPath, { quiet: true, agent: agentName, debug: args.includes('--debug') })
       break
     }
 
@@ -396,10 +397,10 @@ async function main() {
 AAMP CLI Bridge -- Connect direct CLI agents to the AAMP email network
 
 Usage:
-  aamp-cli-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start]
+  aamp-cli-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]
   aamp-cli-bridge init --json --input -  Non-interactive setup for desktop clients
-  aamp-cli-bridge start [--agent NAME] [--config X] [--json]  Start the bridge (default: ~/.aamp/cli-bridge/config.json)
-  aamp-cli-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
+  aamp-cli-bridge start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ~/.aamp/cli-bridge/config.json)
+  aamp-cli-bridge pair --agent NAME [--config X] [--no-start] [--debug]  Show a pairing QR code, then start that agent
   aamp-cli-bridge list  [--config X]   List configured agents
   aamp-cli-bridge discover [--config X] [--json]  Discover local CLI agent candidates
   aamp-cli-bridge status               Show live connection status

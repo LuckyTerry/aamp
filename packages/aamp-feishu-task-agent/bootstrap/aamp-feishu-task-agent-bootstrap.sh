@@ -2534,10 +2534,17 @@ start_cli_bridge_and_capture_pairing_url() {
   CLI_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-cli-bridge.XXXXXX")"
   agent_log "starting CLI bridge; log: $CLI_LOG"
 
-  start_logged_bridge "$CLI_LOG" CLI_TAIL_PID write run_cli_bridge init \
-    --agent "$AGENT" \
-    --aamp-host "$AAMP_HOST" \
+  local command=(
+    init
+    --agent "$AGENT"
+    --aamp-host "$AAMP_HOST"
     --connection-setup pairing-code
+  )
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
+
+  start_logged_bridge "$CLI_LOG" CLI_TAIL_PID write run_cli_bridge "${command[@]}"
   CLI_PID="$STARTED_BRIDGE_PID"
 
   for _ in $(seq 1 90); do

@@ -134,6 +134,21 @@ function toBasicAuth(email: string, password: string): string {
 export interface AgentBridgeStartOptions {
   quiet?: boolean
   onEvent?: (event: BridgeRuntimeEvent) => void
+  debug?: boolean
+}
+
+export function formatDebugPromptLog(options: {
+  agentName: string
+  taskId: string
+  sessionKey: string | undefined
+  prompt: string
+}): string {
+  return [
+    `[${options.agentName}] CLI prompt debug task=${options.taskId} session=${options.sessionKey ?? '(none)'}`,
+    '--- BEGIN CLI PROMPT ---',
+    options.prompt,
+    '--- END CLI PROMPT ---',
+  ].join('\n')
 }
 
 interface HandleEventOptions {
@@ -264,6 +279,7 @@ export class AgentBridge {
   private senderPolicies: SenderPolicy[] = []
   private isHistoricalReconcile = false
   private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
+  private debugPrompt = false
 
   constructor(
     private readonly agentConfig: AgentConfig,
@@ -320,6 +336,7 @@ export class AgentBridge {
 
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
     this.onEvent = options.onEvent
+    this.debugPrompt = options.debug === true
     let quietStartup = options.quiet === true
     this.identity = await this.resolveIdentity()
     this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
@@ -705,6 +722,14 @@ export class AgentBridge {
       const sessionKey = resolveTaskSessionKey(task, hydratedTask)
       if (sessionKey !== hydratedTask.sessionKey) {
         console.log(`[${this.name}] using dispatch session for ${task.taskId}: ${sessionKey}`)
+      }
+      if (this.debugPrompt) {
+        console.log(formatDebugPromptLog({
+          agentName: this.name,
+          taskId: task.taskId,
+          sessionKey,
+          prompt,
+        }))
       }
       const result = await this.cli.prompt(sessionKey, prompt, {
         onStreamUpdate: handleStreamUpdate,

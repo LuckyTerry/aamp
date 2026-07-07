@@ -38,7 +38,7 @@ Defaults:
 - Feishu bridge: `@zengxingyuan/aamp-feishu-bridge@0.1.27` with `--enable-task`
 - lark-cli minimum version: `1.0.64`
 - Authorization method: `pairing-code`
-- Debug mode: disabled by default; pass `--debug` to enable bridge debug logs
+- Debug mode: disabled by default; pass `--debug` to enable bridge debug logs and print the prompt sent by the ACP/CLI bridge to the selected agent
 - Codex ACP command: refreshed on every launch; macOS prefers the signed Codex.app binary and pins `@agentclientprotocol/codex-acp`
 
 The launcher writes its embedded environment helper to `~/lark-env-task.sh` on
