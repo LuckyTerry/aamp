@@ -61,6 +61,7 @@ const STREAM_STEP_FLUSH_INTERVAL_MS = 5000
 const MAX_DELIVERY_FILE_SIZE_BYTES = 50 * 1024 * 1024
 const MAX_FEISHU_COMMENT_CHARACTERS = 3000
 const MAX_FEISHU_COMMENT_BYTES = 10000
+const MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH = 1200
 const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
 const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
 const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
@@ -167,6 +168,32 @@ function buildOversizedCommentDeliveryNotice(content: string): string {
     `限制为 ${MAX_FEISHU_COMMENT_CHARACTERS} characters / ${MAX_FEISHU_COMMENT_BYTES} bytes），`,
     '已作为 Markdown 附件上传。',
   ].join('')
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function truncateForFeishuWriteFailureNotice(message: string): string {
+  const characters = Array.from(message)
+  if (characters.length <= MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH) return message
+  return `${characters.slice(0, MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH).join('')}...`
+}
+
+function buildFeishuWriteFailureNotice(error: unknown, completionError?: unknown): string {
+  const lines = [
+    completionError
+      ? '桥接器写入飞书失败，但自动流转已完成也失败，请人工确认任务处理状态。'
+      : '桥接器写入飞书失败，已将任务流转到已完成。',
+    '',
+    '智能体可能已经完成处理，但桥接器在回写评论、交付物或完成状态时遇到网络错误。',
+    '',
+    `错误信息：${truncateForFeishuWriteFailureNotice(formatUnknownError(error))}`,
+  ]
+  if (completionError) {
+    lines.push(`已完成流转错误：${truncateForFeishuWriteFailureNotice(formatUnknownError(completionError))}`)
+  }
+  return lines.join('\n')
 }
 
 function describeFeishuAttachment(attachment: FeishuTaskAttachment): string {
@@ -1789,103 +1816,134 @@ export class FeishuTaskBridgeRuntime {
       }
 
       const disposition = classifyTaskResult(result)
-      if (disposition.kind === 'answered') {
-        if (disposition.replyWritten === false && disposition.summary) {
-          await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
-        }
-
-        await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
-
-        const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
-        const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
-        resultHandledTaskIds.add(result.taskId)
-        this.state.tasks[result.taskId] = {
-          ...latestTaskState,
-          status: 'completed',
-          resultHandledTaskIds: [...resultHandledTaskIds],
-          lastError: undefined,
-          updatedAt: new Date().toISOString(),
-        }
-        await this.persistState()
-        this.logger.log(`[aamp result] answered task=${result.taskId}`)
-        return
-      }
-
-      if (disposition.kind === 'help_needed') {
-        await this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message)
-        await this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
-        const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
-        const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
-        resultHandledTaskIds.add(result.taskId)
-        this.state.tasks[result.taskId] = {
-          ...latestTaskState,
-          status: 'help_needed',
-          resultHandledTaskIds: [...resultHandledTaskIds],
-          updatedAt: new Date().toISOString(),
-        }
-        await this.persistState()
-        this.logger.log(`[aamp result] help-needed task=${result.taskId}`)
-        return
-      }
-
-      if (disposition.kind === 'succeeded') {
-        this.logger.log(`${formatTaskLogPrefix(flushedTaskState.taskGuid)} result outputs ${formatOutputCounts(disposition.outputs)}`)
-        try {
-          await this.applyTaskResultOutputs(result.taskId, flushedTaskState, disposition.outputs)
-        } catch (error) {
-          if (isRetryableFeishuError(error)) {
-            await this.recordRetryableTaskResultError(
-              result.taskId,
-              this.state.tasks[result.taskId] ?? flushedTaskState,
-              error,
-            )
-            return
+      try {
+        if (disposition.kind === 'answered') {
+          if (disposition.replyWritten === false && disposition.summary) {
+            await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
           }
-          await this.closeTaskResultAsFailure(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState, {
-            kind: 'failure',
-            summary: disposition.summary,
-            message: error instanceof Error ? error.message : String(error),
-          })
+
+          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+
+          const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
+          const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
+          resultHandledTaskIds.add(result.taskId)
+          this.state.tasks[result.taskId] = {
+            ...latestTaskState,
+            status: 'completed',
+            resultHandledTaskIds: [...resultHandledTaskIds],
+            lastError: undefined,
+            updatedAt: new Date().toISOString(),
+          }
+          await this.persistState()
+          this.logger.log(`[aamp result] answered task=${result.taskId}`)
           return
         }
-        await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
 
-        const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
-        const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
-        resultHandledTaskIds.add(result.taskId)
-        this.state.tasks[result.taskId] = {
-          ...latestTaskState,
-          status: 'completed',
-          resultHandledTaskIds: [...resultHandledTaskIds],
-          lastError: undefined,
-          updatedAt: new Date().toISOString(),
+        if (disposition.kind === 'help_needed') {
+          await this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message)
+          await this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+          const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
+          const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
+          resultHandledTaskIds.add(result.taskId)
+          this.state.tasks[result.taskId] = {
+            ...latestTaskState,
+            status: 'help_needed',
+            resultHandledTaskIds: [...resultHandledTaskIds],
+            updatedAt: new Date().toISOString(),
+          }
+          await this.persistState()
+          this.logger.log(`[aamp result] help-needed task=${result.taskId}`)
+          return
         }
-        await this.persistState()
-        this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=succeeded`)
-        return
-      }
 
-      await this.closeTaskResultAsFailure(result.taskId, flushedTaskState, disposition)
+        if (disposition.kind === 'succeeded') {
+          this.logger.log(`${formatTaskLogPrefix(flushedTaskState.taskGuid)} result outputs ${formatOutputCounts(disposition.outputs)}`)
+          try {
+            await this.applyTaskResultOutputs(result.taskId, flushedTaskState, disposition.outputs)
+          } catch (error) {
+            if (isRetryableFeishuError(error)) throw error
+            await this.closeTaskResultAsFailure(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState, {
+              kind: 'failure',
+              summary: disposition.summary,
+              message: formatUnknownError(error),
+            })
+            return
+          }
+          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+
+          const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
+          const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
+          resultHandledTaskIds.add(result.taskId)
+          this.state.tasks[result.taskId] = {
+            ...latestTaskState,
+            status: 'completed',
+            resultHandledTaskIds: [...resultHandledTaskIds],
+            lastError: undefined,
+            updatedAt: new Date().toISOString(),
+          }
+          await this.persistState()
+          this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=succeeded`)
+          return
+        }
+
+        await this.closeTaskResultAsFailure(result.taskId, flushedTaskState, disposition)
+      } catch (error) {
+        if (isRetryableFeishuError(error)) {
+          await this.closeTaskResultAsFeishuWriteFailure(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState, error)
+          return
+        }
+        throw error
+      }
     } finally {
       this.resultInFlight.delete(result.taskId)
     }
   }
 
-  private async recordRetryableTaskResultError(
+  private async closeTaskResultAsFeishuWriteFailure(
     aampTaskId: string,
     taskState: BridgeTaskState,
     error: unknown,
   ): Promise<void> {
-    const message = error instanceof Error ? error.message : String(error)
+    const message = formatUnknownError(error)
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
-    this.state.lastError = message
+
+    let completionError: unknown
+    try {
+      await this.completeFeishuTasksOnce(aampTaskId, latestTaskState)
+    } catch (caughtError) {
+      completionError = caughtError
+      this.logger.error(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure complete_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`)
+    }
+
+    let commentError: unknown
+    try {
+      await this.feishu.commentTask(
+        (this.state.tasks[aampTaskId] ?? latestTaskState).taskGuid,
+        buildFeishuWriteFailureNotice(error, completionError),
+      )
+    } catch (caughtError) {
+      commentError = caughtError
+      this.logger.error(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure notice_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`)
+    }
+
+    const finalTaskState = this.state.tasks[aampTaskId] ?? latestTaskState
+    const resultHandledTaskIds = new Set(finalTaskState.resultHandledTaskIds ?? [])
+    resultHandledTaskIds.add(aampTaskId)
+    const lastError = [
+      message,
+      completionError ? `已完成流转失败：${formatUnknownError(completionError)}` : '',
+      commentError ? `说明评论失败：${formatUnknownError(commentError)}` : '',
+    ].filter(Boolean).join(' | ')
+    this.state.lastError = lastError
     this.state.tasks[aampTaskId] = {
-      ...latestTaskState,
-      lastError: message,
+      ...finalTaskState,
+      status: 'completed',
+      resultHandledTaskIds: [...resultHandledTaskIds],
+      lastError,
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.logger.error(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result output write retryable_error aamp_task=${aampTaskId} error=${message}`)
+    this.logger.error(`${formatTaskLogPrefix(finalTaskState.taskGuid)} result feishu write failure moved_to_completed aamp_task=${aampTaskId} error=${message}`)
   }
 
   private async closeTaskResultAsFailure(

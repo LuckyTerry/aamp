@@ -182,6 +182,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   textDeliveryFailures = 0
   completeFailures = 0
   blockFailures = 0
+  commentFailures = 0
   commentTaskDelayMs = 0
   getTaskCalls: string[] = []
   listSubtaskCalls: string[] = []
@@ -272,6 +273,10 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   async commentTask(taskGuid: string, content: string): Promise<void> {
     if (this.commentTaskDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.commentTaskDelayMs))
+    }
+    if (this.commentFailures > 0) {
+      this.commentFailures -= 1
+      throw Object.assign(new Error('temporary comment failure'), { code: 'ECONNRESET' })
     }
     this.comments.push({ taskGuid, content })
   }
@@ -2700,6 +2705,65 @@ test('runtime uploads oversized reply comments as markdown delivery attachments'
   }
 })
 
+test('runtime completes result once when a Feishu comment write fails transiently', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.commentFailures = 1
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_comment_failure-evt_comment_failure'
+  const resultOutput = `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+    schema: 'feishu_task_result.v2',
+    status: 'succeeded',
+    summary: '已生成回复。',
+    outputs: [
+      { kind: 'reply_comment', content: '这是原始回复。' },
+    ],
+  })}`
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_comment_failure',
+      taskGuid: 'task_guid_comment_failure',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: resultOutput,
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_comment_failure'])
+      assert.equal(fakeFeishu.comments.length, 1)
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /桥接器写入飞书失败/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /temporary comment failure/)
+    assert.deepEqual(runtime.getStateSnapshot().tasks[aampTaskId]?.resultHandledTaskIds, [aampTaskId])
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: resultOutput,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_comment_failure'])
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.equal(fakeFeishu.comments.length, 1)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime handles v2 delivery outputs and completes child tasks before parent', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const deliveryFilePath = path.join(configDir, 'report.md')
@@ -2980,7 +3044,7 @@ test('runtime retries completion without duplicating already applied v2 delivery
   }
 })
 
-test('runtime leaves succeeded results retryable when a Feishu output write fails transiently', async () => {
+test('runtime completes succeeded results when a Feishu output write fails transiently', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
@@ -3016,26 +3080,26 @@ test('runtime leaves succeeded results retryable when a Feishu output write fail
 
     await waitFor(() => {
       assert.match(runtime.getStateSnapshot().lastError ?? '', /temporary text delivery failure/)
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_transient_delivery'])
+      assert.equal(fakeFeishu.comments.length, 1)
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
     })
 
-    assert.deepEqual(fakeFeishu.comments, [])
-    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
-    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'dispatched')
-    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.resultHandledTaskIds, undefined)
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.textDeliveries, [])
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /桥接器写入飞书失败/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /temporary text delivery failure/)
+    assert.deepEqual(runtime.getStateSnapshot().tasks[aampTaskId]?.resultHandledTaskIds, [aampTaskId])
 
     fakeAamp.emitResult(aampTaskId, {
       output: resultOutput,
     })
+    await new Promise((resolve) => setTimeout(resolve, 20))
 
-    await waitFor(() => {
-      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_transient_delivery'])
-      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
-    })
-
-    assert.deepEqual(fakeFeishu.textDeliveries, [{
-      taskGuid: 'task_guid_transient_delivery',
-      urls: ['https://example.com/transient-report'],
-    }])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_transient_delivery'])
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.equal(fakeFeishu.comments.length, 1)
+    assert.deepEqual(fakeFeishu.textDeliveries, [])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
