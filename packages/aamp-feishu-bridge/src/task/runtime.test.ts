@@ -345,18 +345,18 @@ test('runtime uses reply wording when comment content cannot be read before disp
   }
 })
 
-test('runtime completes comment-triggered answered results when bridge writes the reply', async () => {
+test('runtime treats answered status as a final contract violation', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
-  fakeFeishu.tasks.task_guid_answered_comment = {
-    guid: 'task_guid_answered_comment',
-    taskId: 't_answered_comment',
+  fakeFeishu.tasks.task_guid_answered_contract = {
+    guid: 'task_guid_answered_contract',
+    taskId: 't_answered_contract',
     summary: '继续回答日期问题',
     status: 'todo',
     agentTaskStatus: 3,
     comments: [
-      { id: 'comment_answered', authorType: 'user', authorId: 'ou_human', content: '请直接回复答案。', createdAt: '1775793266100' },
+      { id: 'comment_answered_contract', authorType: 'user', authorId: 'ou_human', content: '请直接回复答案。', createdAt: '1775793266100' },
     ],
   }
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
@@ -369,32 +369,128 @@ test('runtime completes comment-triggered answered results when bridge writes th
   try {
     await runtime.start()
     await fakeFeishu.emit({
-      eventId: 'evt_answered_comment',
-      taskGuid: 'task_guid_answered_comment',
+      eventId: 'evt_answered_contract',
+      taskGuid: 'task_guid_answered_contract',
       eventTypes: ['task_comment_create'],
       timestamp: '1775793266155',
     })
 
-    fakeAamp.emitResult('feishu-task-task_guid_answered_comment-evt_answered_comment', {
+    fakeAamp.emitResult('feishu-task-task_guid_answered_contract-evt_answered_contract', {
       output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"今天是 2026-07-03。","reply_written":false}',
     })
 
     await waitFor(() => {
-      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_answered_comment'])
-      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_comment-evt_answered_comment']?.status, 'completed')
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_answered_contract'])
+      assert.equal(runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_contract-evt_answered_contract']?.status, 'failed')
     })
 
-    assert.deepEqual(fakeFeishu.comments, [{
-      taskGuid: 'task_guid_answered_comment',
-      content: '今天是 2026-07-03。',
-    }])
+    assert.equal(fakeFeishu.comments.length, 1)
+    assert.equal(fakeFeishu.comments[0]?.taskGuid, 'task_guid_answered_contract')
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /智能体返回的结果格式不符合任务协议/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /未知 FEISHU_TASK_RESULT_JSON\.status：answered/)
     assert.deepEqual(
-      runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_comment-evt_answered_comment']?.resultCommentedTaskIds,
-      ['feishu-task-task_guid_answered_comment-evt_answered_comment'],
+      runtime.getStateSnapshot().tasks['feishu-task-task_guid_answered_contract-evt_answered_contract']?.resultCommentedTaskIds,
+      ['feishu-task-task_guid_answered_contract-evt_answered_contract'],
     )
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime normalizes success status aliases', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_success_alias-evt_success_alias'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_success_alias',
+      taskGuid: 'task_guid_success_alias',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'success',
+        summary: '已回复。',
+        outputs: [
+          { kind: 'reply_comment', content: '别名 success 已按 succeeded 处理。' },
+        ],
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_success_alias'])
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_success_alias',
+      content: '别名 success 已按 succeeded 处理。',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime normalizes help status aliases', async () => {
+  for (const [index, status] of ['help_needed', 'help'].entries()) {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+    const fakeAamp = new FakeAampClient()
+    const fakeFeishu = new FakeFeishuTaskClient()
+    const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+      configDir,
+      aampClient: fakeAamp,
+      feishuClient: fakeFeishu,
+      logger: { log: () => {}, error: () => {} },
+    })
+    const taskGuid = `task_guid_help_alias_${index}`
+    const aampTaskId = `feishu-task-${taskGuid}-evt_help_alias_${index}`
+
+    try {
+      await runtime.start()
+      await fakeFeishu.emit({
+        eventId: `evt_help_alias_${index}`,
+        taskGuid,
+        eventTypes: ['task_create'],
+        timestamp: '1775793266155',
+      })
+
+      fakeAamp.emitResult(aampTaskId, {
+        output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+          schema: 'feishu_task_result.v2',
+          status,
+          summary: '需要补充城市。',
+          question: '请提供要查询天气的城市。',
+        })}`,
+      })
+
+      await waitFor(() => {
+        assert.deepEqual(fakeFeishu.blockedTaskGuids, [taskGuid])
+        assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'help_needed')
+      })
+
+      assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+      assert.deepEqual(fakeFeishu.comments, [{
+        taskGuid,
+        content: '智能体需要更多信息才能继续处理该任务。\n\n请提供要查询天气的城市。',
+      }])
+    } finally {
+      await runtime.stop()
+      await rm(configDir, { recursive: true, force: true })
+    }
   }
 })
 

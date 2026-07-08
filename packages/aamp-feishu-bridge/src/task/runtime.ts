@@ -548,7 +548,6 @@ function describeFeishuTaskSubscription(
 
 type TaskResultDisposition =
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
-  | { kind: 'answered'; summary?: string; replyWritten?: boolean }
   | { kind: 'failure'; reason: TaskResultFailureReason; summary?: string; message: string }
   | { kind: 'help_needed'; message: string }
 
@@ -560,6 +559,23 @@ type FeishuTaskResultOutput =
 
 const FEISHU_RESULT_MARKER = 'FEISHU_TASK_RESULT_JSON:'
 const AAMP_RESULT_MARKER = 'AAMP_RESULT_JSON:'
+
+type NormalizedTaskResultStatus = 'succeeded' | 'need_help' | 'failed'
+
+const SUCCEEDED_STATUS_ALIASES = new Set(['succeeded', 'success', 'done', 'completed', 'complete', 'ok'])
+const HELP_NEEDED_STATUS_ALIASES = new Set([
+  'need_help',
+  'needs_help',
+  'help_needed',
+  'needs_input',
+  'need_input',
+  'input_required',
+  'user_input_required',
+  'blocked',
+  'waiting_for_user',
+  'help',
+])
+const FAILED_STATUS_ALIASES = new Set(['failed', 'failure', 'fail', 'error'])
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -585,8 +601,13 @@ function getRawString(value: unknown): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
-function getBoolean(value: unknown): boolean | undefined {
-  return typeof value === 'boolean' ? value : undefined
+function normalizeTaskResultStatus(status: string | undefined): NormalizedTaskResultStatus | undefined {
+  const normalized = status?.trim().toLowerCase().replace(/[\s-]+/g, '_')
+  if (!normalized) return undefined
+  if (SUCCEEDED_STATUS_ALIASES.has(normalized)) return 'succeeded'
+  if (HELP_NEEDED_STATUS_ALIASES.has(normalized)) return 'need_help'
+  if (FAILED_STATUS_ALIASES.has(normalized)) return 'failed'
+  return undefined
 }
 
 function sanitizeDeliveryFileName(value: string): string {
@@ -793,7 +814,8 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
 
   if (payload) {
     const schema = getString(payload.schema)
-    const status = getString(payload.status)
+    const rawStatus = getString(payload.status)
+    const status = normalizeTaskResultStatus(rawStatus)
     const summary = getString(payload.summary)
     const error = getString(payload.error)
     const question = getString(payload.question)
@@ -802,27 +824,13 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
       return { kind: 'failure', reason: 'final_contract', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
     }
 
-    const replyWritten = getBoolean(payload.reply_written)
-    if (status === 'answered') {
-      const outputs = parsePayloadDeliveryOutputs(payload)
-      if (outputs) {
-        if (typeof outputs === 'string') return { kind: 'failure', reason: 'final_contract', message: outputs }
-        return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
-      }
-      return {
-        kind: 'answered',
-        ...(summary ? { summary } : {}),
-        ...(replyWritten != null ? { replyWritten } : {}),
-      }
-    }
-
     if (status === 'succeeded') {
       const outputs = parsePayloadDeliveryOutputs(payload)
       if (!outputs) return { kind: 'failure', reason: 'final_contract', message: 'status=succeeded 时 outputs 必须是数组。' }
       if (typeof outputs === 'string') return { kind: 'failure', reason: 'final_contract', message: outputs }
       return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
     }
-    if (status === 'need_help' || status === 'needs_input') {
+    if (status === 'need_help') {
       return { kind: 'help_needed', message: question ?? firstQuestion ?? summary ?? error ?? '智能体需要更多信息才能继续处理该任务。' }
     }
     if (status === 'failed') {
@@ -836,7 +844,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     return {
       kind: 'failure',
       reason: 'final_contract',
-      message: `智能体返回了未知 FEISHU_TASK_RESULT_JSON.status：${status ?? '(missing)'}`,
+      message: `智能体返回了未知 FEISHU_TASK_RESULT_JSON.status：${rawStatus ?? '(missing)'}`,
     }
   }
 
@@ -2049,29 +2057,6 @@ export class FeishuTaskBridgeRuntime {
 
       const disposition = classifyTaskResult(result)
       try {
-        if (disposition.kind === 'answered') {
-          if (disposition.replyWritten === false && disposition.summary) {
-            const summary = disposition.summary
-            await withPostPromptFeishuFailure('result_comment', () => this.commentAnsweredResultOnce(result.taskId, flushedTaskState, summary))
-          }
-
-          await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState))
-
-          const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
-          const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
-          resultHandledTaskIds.add(result.taskId)
-          this.state.tasks[result.taskId] = {
-            ...latestTaskState,
-            status: 'completed',
-            resultHandledTaskIds: [...resultHandledTaskIds],
-            lastError: undefined,
-            updatedAt: new Date().toISOString(),
-          }
-          await this.persistState()
-          this.logger.log(`[aamp result] answered task=${result.taskId}`)
-          return
-        }
-
         if (disposition.kind === 'help_needed') {
           await withPostPromptFeishuFailure('help_comment', () => this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message))
           await withPostPromptFeishuFailure('waiting_for_human_status', () => this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState))
@@ -2400,27 +2385,6 @@ export class FeishuTaskBridgeRuntime {
     }
     await this.persistState()
     this.debugLog(`[aamp result ${aampTaskId}] commented help-needed on Feishu task ${latestTaskState.taskGuid}`)
-  }
-
-  private async commentAnsweredResultOnce(aampTaskId: string, taskState: BridgeTaskState, summary: string): Promise<void> {
-    const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
-    if ((latestTaskState.resultCommentedTaskIds ?? []).includes(aampTaskId)) {
-      this.logger.log(`[aamp result ${aampTaskId}] answered comment already recorded`)
-      return
-    }
-
-    this.debugLog(`[aamp result ${aampTaskId}] commenting answered result on Feishu task ${latestTaskState.taskGuid}`)
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result')
-
-    const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
-    resultCommentedTaskIds.add(aampTaskId)
-    this.state.tasks[aampTaskId] = {
-      ...latestTaskState,
-      resultCommentedTaskIds: [...resultCommentedTaskIds],
-      updatedAt: new Date().toISOString(),
-    }
-    await this.persistState()
-    this.debugLog(`[aamp result ${aampTaskId}] commented answered result on Feishu task ${latestTaskState.taskGuid}`)
   }
 
   private async commentTaskResultOnce(

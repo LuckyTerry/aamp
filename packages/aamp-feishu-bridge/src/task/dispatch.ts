@@ -185,7 +185,7 @@ function renderCriticalFinalResponseProtocol(): string[] {
     '- Your final answer MUST be a single AAMP_RESULT_JSON block.',
     '- Never end with plain natural language, Markdown, or a question outside AAMP_RESULT_JSON.',
     '- If you need the user to choose, confirm, or provide more information, return status=need_help inside FEISHU_TASK_RESULT_JSON.',
-    '- If you completed work, return status=succeeded or status=answered inside FEISHU_TASK_RESULT_JSON; do not write a normal final reply.',
+    '- If you completed work, return status=succeeded inside FEISHU_TASK_RESULT_JSON; do not write a normal final reply.',
   ]
 }
 
@@ -236,7 +236,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   const replyCommentExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
-    summary: 'Answered the latest Feishu task comment.',
+    summary: '已回复用户问题。',
     outputs: [
       {
         kind: 'reply_comment',
@@ -244,22 +244,10 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
       },
     ],
   })
-  const answeredBridgeCommentExample = buildFinalResultExample({
-    schema: 'feishu_task_result.v2',
-    status: 'answered',
-    summary: 'The direct reply text that the bridge should write as a Feishu task comment.',
-    reply_written: false,
-  })
-  const multilineAnsweredBridgeCommentExample = buildFinalResultExample({
-    schema: 'feishu_task_result.v2',
-    status: 'answered',
-    summary: '第一行\n\n第二行\n- item',
-    reply_written: false,
-  })
   const deliveryExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
-    summary: 'Completed the requested Feishu document deliverable.',
+    summary: '已创建飞书文档交付。',
     outputs: [
       {
         kind: 'link_delivery',
@@ -271,25 +259,38 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   const fileDeliveryExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
-    summary: 'Completed the requested non-document artifact.',
+    summary: '已生成文件交付。',
     outputs: [
       {
         kind: 'file_delivery',
-        path: '/absolute/path/to/non-document-artifact.png',
+        path: '/absolute/path/to/result.csv',
+      },
+    ],
+  })
+  const textDeliveryExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'succeeded',
+    summary: '已生成短文本交付。',
+    outputs: [
+      {
+        kind: 'text_delivery',
+        format: 'markdown',
+        title: '交付摘要',
+        content: '# 交付摘要\n\n这里是短文本交付内容。',
       },
     ],
   })
   const failureExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'failed',
-    summary: 'Tried to execute the task but hit a blocker.',
-    error: '<exact blocker>',
+    summary: '任务执行失败。',
+    error: '具体失败原因',
   })
   const helpExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'need_help',
-    summary: 'Need user input before continuing.',
-    question: '<question for the user>',
+    summary: '需要用户补充信息。',
+    question: '需要用户回答的问题',
   })
 
   return [
@@ -320,7 +321,8 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     ...renderSourceDocumentGuidance(),
     '',
     'Feishu Write Contract:',
-    '- Do not write current-task comments, status, steps, or deliverables directly.',
+    '- Never write comments, status, steps, or deliverables directly to the current Feishu task, including through lark-cli, MCP tools, OpenAPI, browser automation, or user-authenticated Feishu sessions.',
+    '- Do not use lark-cli task comment/create/reply/update commands for the current task.',
     '- The bridge marks parent and child tasks in progress from stream events.',
     '- The bridge writes reply_comment outputs as Feishu task comments.',
     '- The bridge writes link_delivery, file_delivery, and text_delivery outputs to the parent task.',
@@ -334,8 +336,8 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '',
     'Outcome Rules:',
     '- Normal successful outcomes use status=succeeded with one or more outputs.',
-    '- Use status=answered when the user-visible result is just a normal direct reply. If you wrote the reply as a normal Feishu task comment yourself, set reply_written=true and the bridge will not add another result comment. If you cannot write the Feishu comment, set reply_written=false and put the exact reply text in summary; the bridge will comment summary.',
-    '- Use reply_comment output only for backward compatibility when returning status=succeeded.',
+    '- For direct user-visible replies, return status=succeeded with exactly one outputs item kind=reply_comment and put the exact reply text in that output content; the bridge will write the Feishu task comment.',
+    '- Use reply_comment output only for direct user-visible replies.',
     '- Use deliverable outputs according to the Deliverable Rules priority: prefer Feishu document link_delivery for human-readable document deliverables; use file_delivery only for native file/image artifacts; use text_delivery only for short text.',
     '- Use status=need_help when user input is required before continuing. Do not write the help comment yourself; the bridge will comment the question field.',
     '- Use status=failed only for exceptional execution failures. Do not write the failure comment yourself; the bridge will comment it.',
@@ -346,37 +348,39 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- For status=succeeded with deliverables, include one output item per delivery. Do not paste large deliverable text into summary.',
     '',
     'Final Result Contract:',
-    '- Always finish with a single AAMP_RESULT_JSON block whose JSON object contains only the output field.',
-    '- The output value must start with `FEISHU_TASK_RESULT_JSON:` followed by a compact JSON object.',
-    '- The AAMP_RESULT_JSON JSON object must be parseable by JSON.parse.',
-    '- The FEISHU_TASK_RESULT_JSON JSON object after the marker inside output must also be parseable by JSON.parse.',
+    '- Always finish with exactly one AAMP_RESULT_JSON block and no other final text.',
+    '- The AAMP_RESULT_JSON JSON object must contain exactly one key: output.',
+    '- output must start with `FEISHU_TASK_RESULT_JSON:` followed by one compact JSON object.',
+    '- Both the outer AAMP_RESULT_JSON and inner FEISHU_TASK_RESULT_JSON must be valid JSON.parse input.',
     '- Do not wrap AAMP_RESULT_JSON in Markdown fences, add comments, use trailing commas, single-quoted JSON, or extra keys.',
-    '- Inside JSON text, JSON strings must escape line breaks as `\\n`; after parsing, those escapes become actual LF newlines in user-visible fields.',
+    '- Use schema exactly: "feishu_task_result.v2".',
+    '- Use status exactly one of: "succeeded", "need_help", "failed". Do not use "success", "answered", "done", or other aliases.',
+    '- Only use these FEISHU_TASK_RESULT_JSON top-level fields:',
+    '  status=succeeded: schema, status, summary, outputs.',
+    '  status=need_help: schema, status, summary, question.',
+    '  status=failed: schema, status, summary, error.',
+    '- For status=succeeded, outputs is mandatory. Put every reply or delivery inside outputs.',
+    '- Do not put reply_comment, link_delivery, file_delivery, or text_delivery at the FEISHU_TASK_RESULT_JSON top level.',
+    '- Only use these output object fields:',
+    '  reply_comment: kind, content.',
+    '  link_delivery: kind, url, title.',
+    '  file_delivery: kind, path.',
+    '  text_delivery: kind, format, content, title. format must be "markdown" or "plain_text".',
+    '- For human-readable document deliverables, use outputs kind=link_delivery with the Feishu document URL.',
+    '- Do not put deliverable content in summary. summary is only a concise status sentence.',
+    '- For direct user-visible replies, use status=succeeded with exactly one reply_comment output.',
+    '- Do not write placeholder values such as "<optional title>" in final JSON.',
+    '- Do not include ACP attachments or FILE references.',
+    '- Inside JSON strings, escape line breaks as `\\n`; after parsing, those escapes become actual LF newlines in user-visible fields.',
     '- Because FEISHU_TASK_RESULT_JSON is embedded inside AAMP_RESULT_JSON.output, multiline user-visible fields must appear as `\\\\n` in the final visible AAMP_RESULT_JSON text.',
     '- After parsing the outer JSON, the inner FEISHU_TASK_RESULT_JSON must still contain `\\n` escape sequences, not literal LF characters inside JSON strings.',
     '- Before finalizing, validate that JSON.parse(<outer-json>).output starts with `FEISHU_TASK_RESULT_JSON:`, and JSON.parse(output.slice(marker.length)) succeeds.',
-    '- Use schema=feishu_task_result.v2.',
-    '- Use status=answered when there is no separate deliverable. Include reply_written=true if you already wrote a Feishu comment, or reply_written=false if the bridge should comment summary.',
-    '- Use status=succeeded when the task result is ready for the bridge to write.',
-    '- Use status=need_help when you need human input before continuing.',
-    '- Use status=failed only for exceptional execution failures.',
-    '- Include a concise summary.',
-    '- For status=succeeded, include outputs as an array with 1 to 10 items.',
-    '- outputs kind=reply_comment requires content.',
-    '- outputs kind=link_delivery requires url.',
-    '- outputs kind=file_delivery requires absolute path.',
-    '- outputs kind=text_delivery requires format=markdown or format=plain_text plus content, and may include title.',
-    '- For status=need_help, include question.',
-    '- For status=failed, include error.',
-    '- Do not include structuredResult.',
-    '- For human-readable document deliverables, prefer Feishu document link_delivery over file_delivery or text_delivery.',
-    '- Do not include ACP attachments or FILE references; if a deliverable is needed, return file_delivery, link_delivery, or text_delivery.',
-    `- Example reply_comment: ${replyCommentExample}`,
-    `- Example answered bridge-comment: ${answeredBridgeCommentExample}`,
-    `- Example multiline answered bridge-comment: ${multilineAnsweredBridgeCommentExample}`,
+    '- Example labels are explanatory only; your final answer must start directly with AAMP_RESULT_JSON.',
+    `- Example direct reply: ${replyCommentExample}`,
     `- Example Feishu document delivery: ${deliveryExample}`,
-    `- Example file_delivery artifact: ${fileDeliveryExample}`,
-    `- Example failure: ${failureExample}`,
+    `- Example file_delivery: ${fileDeliveryExample}`,
+    `- Example text_delivery: ${textDeliveryExample}`,
+    `- Example failed: ${failureExample}`,
     `- Example need_help: ${helpExample}`,
   ].join('\n')
 }
