@@ -76,6 +76,8 @@ AAMP_RUN_ID=""
 ONE_CLICK_LOG=""
 ERRORS_LOG=""
 AAMP_LOGS_BIN="$AAMP_BIN_DIR/aamp-logs"
+AGENT_BRIDGE_EMAIL=""
+FEISHU_BRIDGE_EMAIL=""
 
 sanitize_inherited_npm_exec_env() {
   local key lower
@@ -166,9 +168,11 @@ json_escape() {
 
 write_run_manifest() {
   [ -n "$AAMP_RUN_LOG_DIR" ] || return 0
-  local app_prefix=""
-  if [ -n "$APP_ID" ]; then
-    app_prefix="${APP_ID:0:12}"
+  local agent_bridge_type="acp"
+  local agent_bridge_name="aamp-acp-bridge"
+  if uses_cli_bridge; then
+    agent_bridge_type="cli"
+    agent_bridge_name="aamp-cli-bridge"
   fi
   cat >"$AAMP_RUN_LOG_DIR/manifest.json" <<EOF
 {
@@ -178,11 +182,73 @@ write_run_manifest() {
   "agent": "$(json_escape "$AGENT")",
   "env": "$(json_escape "$ENV_NAME")",
   "aamp_host": "$(json_escape "$AAMP_HOST")",
-  "app_id_prefix": "$(json_escape "$app_prefix")",
+  "app_id": "$(json_escape "$APP_ID")",
+  "bot_name": "$(json_escape "$BOT_NAME")",
+  "feishu_bridge_name": "aamp-feishu-bridge",
+  "feishu_bridge_email": "$(json_escape "$FEISHU_BRIDGE_EMAIL")",
+  "agent_bridge_type": "$(json_escape "$agent_bridge_type")",
+  "agent_bridge_name": "$(json_escape "$agent_bridge_name")",
+  "agent_bridge_email": "$(json_escape "$AGENT_BRIDGE_EMAIL")",
   "log_dir": "$(json_escape "$AAMP_RUN_LOG_DIR")",
   "errors_log": "$(json_escape "$ERRORS_LOG")"
 }
 EOF
+}
+
+extract_email_from_pairing_url() {
+  local pairing_url="$1"
+  PAIRING_URL_VALUE="$pairing_url" node -e '
+try {
+  const parsed = new URL(String(process.env.PAIRING_URL_VALUE || ""));
+  process.stdout.write(parsed.searchParams.get("mailbox") || "");
+} catch {
+  process.stdout.write("");
+}
+'
+}
+
+extract_agent_email_from_acp_init_output() {
+  node -e '
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const start = input.indexOf("{");
+  const end = input.lastIndexOf("}");
+  if (start < 0 || end < start) return;
+  try {
+    const data = JSON.parse(input.slice(start, end + 1));
+    process.stdout.write(data.agents?.[0]?.email || data.agents?.[0]?.pairing?.mailbox || "");
+  } catch {}
+});
+'
+}
+
+extract_feishu_email_from_log() {
+  local log_file="$1"
+  [ -f "$log_file" ] || return 0
+  LOG_FILE="$log_file" node -e '
+const fs = require("node:fs");
+const file = process.env.LOG_FILE;
+let content = "";
+try {
+  content = fs.readFileSync(file, "utf8");
+} catch {
+  process.exit(0);
+}
+for (const line of content.split(/\r?\n/)) {
+  if (!line.trim()) continue;
+  let message = line;
+  try {
+    const record = JSON.parse(line);
+    message = String(record.message ?? record.msg ?? line);
+  } catch {}
+  const match = /\bmailbox=([^\s,]+)/.exec(message);
+  if (match?.[1]) {
+    process.stdout.write(match[1]);
+    break;
+  }
+}
+'
 }
 
 init_log_run() {
@@ -1590,24 +1656,141 @@ console.log([...new Set(excludes)].join(","));
 '
 }
 
+auth_scope_tokens=()
+auth_scope_capture="false"
+auth_scope_header=""
+
+auth_scope_token_exists() {
+  local expected="$1"
+  local token
+  for token in ${auth_scope_tokens[@]+"${auth_scope_tokens[@]}"}; do
+    if [ "$token" = "$expected" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_auth_scope_tokens() {
+  local text="$1"
+  local token
+
+  text="${text//,/ }"
+  text="${text//[/ }"
+  text="${text//]/ }"
+  text="${text//\"/ }"
+  text="${text//\'/ }"
+  text="${text//;/ }"
+  for token in $text; do
+    token="${token#-}"
+    token="${token#*：}"
+    token="${token#*: }"
+    token="${token//　/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [[ "$token" =~ ^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z0-9_.:-]+$ ]] && ! auth_scope_token_exists "$token"; then
+      auth_scope_tokens+=("$token")
+    fi
+  done
+}
+
+line_has_auth_scope_token() {
+  local text="$1"
+  local token
+
+  text="${text//,/ }"
+  text="${text//[/ }"
+  text="${text//]/ }"
+  text="${text//\"/ }"
+  text="${text//\'/ }"
+  text="${text//;/ }"
+  for token in $text; do
+    token="${token#-}"
+    token="${token#*：}"
+    token="${token#*: }"
+    token="${token//　/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [[ "$token" =~ ^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z0-9_.:-]+$ ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+flush_lark_cli_auth_scopes() {
+  local total sample
+
+  if [ "$auth_scope_capture" != "true" ]; then
+    return 0
+  fi
+
+  total="${#auth_scope_tokens[@]}"
+  if [ "$total" -eq 0 ]; then
+    printf '%s\n' "$auth_scope_header"
+  elif [ "$total" -eq 1 ]; then
+    printf '%s%s，共计 1 个权限。\n' "$auth_scope_header" "${auth_scope_tokens[0]}"
+  elif [ "$total" -eq 2 ]; then
+    printf '%s%s, %s，共计 2 个权限。\n' "$auth_scope_header" "${auth_scope_tokens[0]}" "${auth_scope_tokens[1]}"
+  else
+    sample="${auth_scope_tokens[0]}, ${auth_scope_tokens[1]}"
+    printf '%s%s 等共计 %s 个权限。\n' "$auth_scope_header" "$sample" "$total"
+  fi
+
+  auth_scope_tokens=()
+  auth_scope_capture="false"
+  auth_scope_header=""
+}
+
+print_lark_cli_auth_output_line() {
+  local line="$1"
+  local after_scopes
+
+  if [[ "$line" == *"本次请求 scopes:"* ]]; then
+    flush_lark_cli_auth_scopes
+    auth_scope_capture="true"
+    auth_scope_tokens=()
+    auth_scope_header="${line%%本次请求 scopes:*}本次请求 scopes: "
+    after_scopes="${line#*本次请求 scopes:}"
+    add_auth_scope_tokens "$after_scopes"
+    return 0
+  fi
+
+  if [ "$auth_scope_capture" = "true" ]; then
+    if [ -z "${line//[[:space:]]/}" ]; then
+      return 0
+    fi
+    if line_has_auth_scope_token "$line"; then
+      add_auth_scope_tokens "$line"
+      return 0
+    fi
+    flush_lark_cli_auth_scopes
+  fi
+
+  printf '%s\n' "$line"
+}
+
 run_lark_cli_auth_login_with_browser_open() {
   local opened_url=""
   local line=""
   local auth_url=""
 
   set +e
-  "$@" 2>&1 | while IFS= read -r line; do
-    printf '%s\n' "$line"
-    if [ "${AAMP_AUTO_OPEN_AUTH_URL:-true}" != "false" ] \
-      && [ -z "$opened_url" ] \
-      && command -v open >/dev/null 2>&1 \
-      && [[ "$line" =~ (https://[^[:space:]]+) ]]; then
-      auth_url="${BASH_REMATCH[1]}"
-      opened_url="$auth_url"
-      agent_log "opening Feishu auth URL in browser"
-      open "$auth_url" >/dev/null 2>&1 || agent_log "failed to open auth URL automatically; please open it manually"
-    fi
-  done
+  "$@" 2>&1 | {
+    while IFS= read -r line; do
+      print_lark_cli_auth_output_line "$line"
+      if [ "${AAMP_AUTO_OPEN_AUTH_URL:-true}" != "false" ] \
+        && [ -z "$opened_url" ] \
+        && command -v open >/dev/null 2>&1 \
+        && [[ "$line" =~ (https://[^[:space:]]+) ]]; then
+        auth_url="${BASH_REMATCH[1]}"
+        opened_url="$auth_url"
+        agent_log "opening Feishu auth URL in browser"
+        open "$auth_url" >/dev/null 2>&1 || agent_log "failed to open auth URL automatically; please open it manually"
+      fi
+    done
+    flush_lark_cli_auth_scopes
+  }
   local auth_status=${PIPESTATUS[0]}
   set -e
   return "$auth_status"
@@ -2659,6 +2842,7 @@ validate_codex_acp_command() {
 
 start_acp_bridge_and_capture_pairing_url() {
   ACP_LOG="$(run_log_file "acp-bridge.jsonl")"
+  write_run_manifest
   agent_log "正在启动 $AGENT 本地桥接..."
   agent_detail "initializing ACP bridge; log: $ACP_LOG"
 
@@ -2677,6 +2861,11 @@ start_acp_bridge_and_capture_pairing_url() {
 
   PAIRING_URL="$(printf '%s' "$init_output" | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const start = input.indexOf("{"); const end = input.lastIndexOf("}"); if (start < 0 || end < start) return; const data = JSON.parse(input.slice(start, end + 1)); process.stdout.write(data.agents?.[0]?.pairing?.connectUrl || ""); });')"
   [ -n "$PAIRING_URL" ] || agent_fail "ACP bridge init did not return a pairing URL. Log: $ACP_LOG"
+  AGENT_BRIDGE_EMAIL="$(printf '%s' "$init_output" | extract_agent_email_from_acp_init_output)"
+  if [ -z "$AGENT_BRIDGE_EMAIL" ]; then
+    AGENT_BRIDGE_EMAIL="$(extract_email_from_pairing_url "$PAIRING_URL")"
+  fi
+  write_run_manifest
   agent_detail "captured Pairing URL"
 
   agent_detail "starting ACP bridge; log: $ACP_LOG"
@@ -2707,6 +2896,7 @@ start_acp_bridge_and_capture_pairing_url() {
 
 start_cli_bridge_and_capture_pairing_url() {
   CLI_LOG="$(run_log_file "cli-bridge.jsonl")"
+  write_run_manifest
   agent_log "正在启动 $AGENT 本地桥接..."
   agent_detail "starting CLI bridge; log: $CLI_LOG"
   if [ "$DEBUG_MODE" = "true" ]; then
@@ -2736,6 +2926,8 @@ start_cli_bridge_and_capture_pairing_url() {
     fi
     PAIRING_URL="$(grep -Eo 'aamp://connect[^[:space:]]+' "$CLI_LOG" | tail -1 || true)"
     if [ -n "$PAIRING_URL" ]; then
+      AGENT_BRIDGE_EMAIL="$(extract_email_from_pairing_url "$PAIRING_URL")"
+      write_run_manifest
       agent_detail "captured Pairing URL"
       return 0
     fi
@@ -2747,6 +2939,7 @@ start_cli_bridge_and_capture_pairing_url() {
 
 start_feishu_task_bridge() {
   FEISHU_LOG="$(run_log_file "feishu-bridge.jsonl")"
+  write_run_manifest
   agent_log "正在连接飞书任务..."
   agent_detail "starting Feishu bridge with task enabled; log: $FEISHU_LOG"
   agent_detail "Feishu bridge profile: app=$APP_ID lark-cli-profile=$LARK_CLI_PROFILE use-feishu-cli=yes"
@@ -2783,7 +2976,18 @@ start_feishu_task_bridge() {
       agent_fail "Feishu bridge exited before ready"
     fi
 
+    if [ -z "$FEISHU_BRIDGE_EMAIL" ]; then
+      FEISHU_BRIDGE_EMAIL="$(extract_feishu_email_from_log "$FEISHU_LOG")"
+      if [ -n "$FEISHU_BRIDGE_EMAIL" ]; then
+        write_run_manifest
+      fi
+    fi
+
     if grep -E 'Feishu bridge IM \+ Task is running for|bridge.task_runtime.running|\[feishu\] listener started|\[feishu ws\] connected' "$FEISHU_LOG" >/dev/null 2>&1; then
+      if [ -z "$FEISHU_BRIDGE_EMAIL" ]; then
+        FEISHU_BRIDGE_EMAIL="$(extract_feishu_email_from_log "$FEISHU_LOG")"
+      fi
+      write_run_manifest
       agent_detail "Feishu bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
       agent_success
       return 0
