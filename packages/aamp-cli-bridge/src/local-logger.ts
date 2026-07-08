@@ -5,6 +5,7 @@ import pino, { type Logger as PinoLogger } from 'pino'
 
 type ConsoleMethod = 'log' | 'warn' | 'error'
 type ConsoleTarget = Record<ConsoleMethod, (...values: unknown[]) => void>
+type PinoLogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal'
 
 export interface LocalBridgeLoggerOptions {
   bridge: string
@@ -73,14 +74,117 @@ function extractTaskId(message: string): string | undefined {
   return undefined
 }
 
-function enrichTaskMetadata(record: Record<string, unknown>, message?: string): Record<string, unknown> {
+function stripLeadingLogLevelPrefix(message: string): string {
+  return message.replace(/^\[(?:trace|debug|info|warn|error|fatal)\s*\]\s*/i, '')
+}
+
+function inferMessageLogLevel(message: string | undefined, fallback: PinoLogLevel): PinoLogLevel {
+  if (!message) return fallback
+  const match = /^\[(trace|debug|info|warn|error|fatal)\s*\]/i.exec(message)
+  const level = match?.[1]?.toLowerCase()
+  if (
+    level === 'trace'
+    || level === 'debug'
+    || level === 'info'
+    || level === 'warn'
+    || level === 'error'
+    || level === 'fatal'
+  ) {
+    return level
+  }
+  return fallback
+}
+
+function inferFeishuTaskStage(message: string): string | undefined {
+  const match = /^\[feishu task (?!subscription\b)[^\]]+\]\s*(.*)$/i.exec(message)
+  if (!match) return undefined
+
+  const detail = match[1] ?? ''
+  if (/\b(?:loading base details|loaded base|hydrated|prepared attachments)\b/i.test(detail)) return 'aamp.load'
+  if (/\b(?:marking in progress|marked in progress|marked in_progress)\b/i.test(detail)) return 'aamp.ack'
+  if (/\b(?:completing|completed|completion already recorded)\b/i.test(detail)) return 'aamp.result'
+  if (/\b(?:marking blocked|marked blocked|blocked state already recorded)\b/i.test(detail)) return 'aamp.help'
+  return 'aamp.load'
+}
+
+function inferLogStage(record: Record<string, unknown>, message?: string): string | undefined {
+  if (typeof record.stage === 'string' && record.stage) return record.stage
+
+  const eventType = typeof record.event_type === 'string'
+    ? record.event_type
+    : (typeof record.type === 'string' ? record.type : undefined)
+  if (eventType) {
+    if (eventType.startsWith('pair.')) return 'bridge.pair'
+    if (eventType === 'task.received') return 'aamp.dispatch'
+    if (eventType === 'task.rejected' || eventType === 'task.completed' || eventType === 'task.result') return 'aamp.result'
+    if (eventType.startsWith('agent.') || eventType.startsWith('bridge.')) return 'bridge.init'
+  }
+
+  if (!message) return undefined
+  const searchableMessage = stripLeadingLogLevelPrefix(message)
+  if (/^\[task [^\]]+\]\s*(?:received|dispatch)\b/.test(searchableMessage)) return 'aamp.dispatch'
+  if (/^\[aamp dispatch(?:\s|\])/.test(searchableMessage) || /\bdispatch (sent|failure|payload|comment)/.test(searchableMessage)) return 'aamp.dispatch'
+  if (/^\[aamp ack(?:\s|\])/.test(searchableMessage) || /\b(?:ack (received|comment|commented)|marked in_progress)\b/.test(searchableMessage)) return 'aamp.ack'
+  if (/^\[aamp stream(?:\s|\])/.test(searchableMessage) || /\b(stream opened|steps flushed|stream=|appended \d+ .*step)\b/.test(searchableMessage)) return 'aamp.stream'
+  if (/^\[aamp help(?:\s|\])/.test(searchableMessage) || /\b(help-needed|blocked parent=\d+ children=\d+)\b/.test(searchableMessage)) return 'aamp.help'
+  if (/^\[aamp result(?:\s|\])/.test(searchableMessage) || /\b(result|completed parent=\d+ children=\d+)\b/.test(searchableMessage)) return 'aamp.result'
+  if (/^\[feishu event(?:\s|\])/.test(searchableMessage) || /^\[task [^\]]+ event [^\]]+\]/.test(searchableMessage)) return 'feishu.event'
+  const feishuTaskStage = inferFeishuTaskStage(searchableMessage)
+  if (feishuTaskStage) return feishuTaskStage
+  if (/\b(loading base details|loaded base|hydrated|prepared attachments)\b/.test(searchableMessage)) return 'aamp.load'
+  if (/^\[(?:feishu agent|feishu task subscription|feishu app)(?:\s|\])/.test(searchableMessage) || /^\[feishu\]/.test(searchableMessage)) return 'feishu.init'
+  if (/^\[(?:bridge|state|aamp)(?:\s|\])/.test(searchableMessage)) return 'bridge.init'
+  if (/\b(pairing|pair request|pair\.request|pair\.completed)\b/i.test(searchableMessage)) return 'bridge.pair'
+  return undefined
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function stripStagePrefixFromMessage(message: string): string {
+  return message
+    .replace(/^(\[(?:trace|debug|info|warn|error|fatal)\s*\]\s*)?\[(?:aamp dispatch|aamp ack|aamp stream|aamp help|aamp result|aamp load|bridge init|bridge pair|feishu init|feishu event|bridge|state|aamp|feishu|feishu agent|feishu task subscription|feishu task (?!subscription\b)[^\]]+)\]\s*/i, '$1')
+    .trim()
+}
+
+function stripTaskIdFromMessage(message: string, taskId: string): string {
+  const escapedTaskId = escapeRegExp(taskId)
+  let next = message
+  next = next.replace(new RegExp(`\\s*\\b(?:aamp_task|task_id|taskId|aampTaskId|task)=["']?${escapedTaskId}["']?(?=$|[\\s,}\\]])`, 'g'), '')
+  next = next.replace(/\s*\[task [^\]]+\]\s*/g, ' ')
+  next = next.replace(/\s*\b(?:task_guid|taskGuid|event_id|eventId)=["']?[A-Za-z0-9._:-]+["']?(?=$|[\s,}\]])/g, '')
+  next = next.replace(new RegExp(`\\s*\\bTask ID:\\s*${escapedTaskId}(?=$|[\\s,}\\]])`, 'g'), '')
+  next = next.replace(new RegExp(`\\[aamp (ack|stream|help|result|dispatch) ${escapedTaskId}\\]`, 'g'), '[aamp $1]')
+  next = next.replace(new RegExp(escapedTaskId, 'g'), '<task>')
+  return next
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+,/g, ',')
+    .replace(/\[\s+/g, '[')
+    .trim()
+}
+
+function shouldStripStagePrefix(message: string, taskId: string | undefined): boolean {
+  if (!taskId && /^\[(?:trace|debug|info|warn|error|fatal)\s*\]\s*\[feishu task (?!subscription\b)[^\]]+\]/i.test(message)) return false
+  if (!taskId && /^\[feishu task (?!subscription\b)[^\]]+\]/i.test(message)) return false
+  return true
+}
+
+function buildTaskLogPayload(record: Record<string, unknown>, message?: string): { record: Record<string, unknown>; message?: string } {
+  const stage = inferLogStage(record, message)
   const taskId = typeof record.taskId === 'string'
     ? record.taskId
     : (message ? extractTaskId(message) : undefined)
-  if (!taskId) return record
+  let nextMessage = message
+  if (taskId && nextMessage) nextMessage = stripTaskIdFromMessage(nextMessage, taskId)
+  if (stage && nextMessage && shouldStripStagePrefix(nextMessage, taskId)) nextMessage = stripStagePrefixFromMessage(nextMessage)
   return {
-    ...record,
-    taskId,
+    record: {
+      ...record,
+      ...(stage ? { stage } : {}),
+      ...(taskId ? { taskId } : {}),
+    },
+    message: nextMessage,
   }
 }
 
@@ -92,10 +196,38 @@ function createPinoFileLogger(options: LocalBridgeLoggerOptions, logFile: string
       bridge: options.bridge,
       ...(options.component ? { component: options.component } : {}),
     },
-    level: options.level || (options.env ?? process.env).AAMP_LOG_LEVEL || 'info',
+    level: options.level || (options.env ?? process.env).AAMP_LOG_LEVEL || 'trace',
     messageKey: 'message',
     timestamp: pino.stdTimeFunctions.isoTime,
   }, pino.destination({ dest: logFile, mkdir: true, sync: true }))
+}
+
+function writePinoLog(
+  logger: PinoLogger,
+  level: PinoLogLevel,
+  record: Record<string, unknown>,
+  message?: string,
+): void {
+  switch (level) {
+    case 'trace':
+      logger.trace(record, message)
+      return
+    case 'debug':
+      logger.debug(record, message)
+      return
+    case 'warn':
+      logger.warn(record, message)
+      return
+    case 'error':
+      logger.error(record, message)
+      return
+    case 'fatal':
+      logger.fatal(record, message)
+      return
+    case 'info':
+    default:
+      logger.info(record, message)
+  }
 }
 
 export function installLocalBridgeConsoleLogger(
@@ -122,10 +254,11 @@ export function installLocalBridgeConsoleLogger(
 
   function write(method: ConsoleMethod, level: 'info' | 'warn' | 'error', values: unknown[]): void {
     const { message, metadata } = splitConsoleValues(values)
-    logger[level](enrichTaskMetadata({
+    const payload = buildTaskLogPayload({
       stream: method === 'log' ? 'stdout' : 'stderr',
       ...metadata,
-    }, message), message)
+    }, message)
+    writePinoLog(logger, inferMessageLogLevel(message, level), payload.record, payload.message)
     if (mirrorToConsole) {
       original[method].apply(target, values)
     }
@@ -139,10 +272,11 @@ export function installLocalBridgeConsoleLogger(
     enabled: true,
     logFile,
     event: (event) => {
-      logger.info(enrichTaskMetadata({
+      const payload = buildTaskLogPayload({
         ...event,
         event_type: typeof event.type === 'string' ? event.type : 'bridge.event',
-      }), 'bridge event')
+      })
+      logger.info(payload.record, 'bridge event')
     },
     flush: () => {
       logger.flush()

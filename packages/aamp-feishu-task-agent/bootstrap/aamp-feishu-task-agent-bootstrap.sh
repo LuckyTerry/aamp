@@ -135,8 +135,9 @@ agent_success() {
     printf '   飞书 Bot：%s\n' "$BOT_NAME"
   fi
   printf '   保持此终端打开；按 Ctrl+C 停止本地连接。\n'
-  printf '   运行日志：%s\n' "$AAMP_RUN_LOG_DIR"
-  printf '   排障打包：%s collect --latest\n\n' "$AAMP_LOGS_BIN"
+  printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR"
+  printf '   近期日志打包：%s collect --latest\n' "$AAMP_LOGS_BIN"
+  printf '   特定任务日志打包：%s collect --task-guid xx-yy\n\n' "$AAMP_LOGS_BIN"
   write_one_click_log "[aamp-one-click] SUCCESS: $AGENT connected to Feishu tasks"
 }
 

@@ -29,7 +29,11 @@ test('bootstrap terminal UX points users at local logs and success state', () =>
   const source = readFileSync(bootstrap, 'utf8')
 
   assert.match(source, /Logs saved at:/)
+  assert.match(source, /运行日志目录/)
+  assert.match(source, /近期日志打包/)
   assert.match(source, /collect --latest/)
+  assert.match(source, /特定任务日志打包/)
+  assert.match(source, /collect --task-guid xx-yy/)
   assert.match(source, /aamp-logs/)
   assert.match(source, /errors\.jsonl/)
   assert.match(source, /已接入飞书任务，可以开始对话 & 派发任务/)

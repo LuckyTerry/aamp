@@ -34,6 +34,7 @@ function makeRun(logsRoot, name, { taskId, taskGuid, unrelatedTaskId = 'other-ta
     `[aamp-one-click] Task ID: ${taskId}`,
   ].join('\n') + '\n')
   writeJsonl(path.join(runDir, 'feishu-bridge.jsonl'), [
+    { level: 20, component: 'feishu-bridge', taskId, stage: 'aamp.load', message: '[debug] loaded base summary="hello"' },
     { level: 'info', component: 'feishu-bridge', task_id: taskId, task_guid: taskGuid, event_id: 'evt1', msg: 'dispatch sent', appSecret: secret },
     { level: 'error', component: 'feishu-bridge', task_id: taskId, task_guid: taskGuid, event_id: 'evt1', msg: 'write failed', access_token: 'token-value' },
     { level: 'info', component: 'feishu-bridge', task_id: unrelatedTaskId, task_guid: 'other-guid', event_id: 'evt2', msg: 'unrelated' },
@@ -107,6 +108,8 @@ test('collect --task-id creates a redacted archive with matching log lines', () 
 
   assert.match(text, /"schema": "aamp.local_logs.bundle.v1"/)
   assert.match(text, /feishu-task-guid1-evt1/)
+  assert.match(text, /aamp\.load/)
+  assert.match(text, /loaded base summary/)
   assert.match(text, /task\.dispatch received/)
   assert.doesNotMatch(text, /other-task/)
   assert.doesNotMatch(text, /super-secret/)

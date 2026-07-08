@@ -22,7 +22,7 @@ import {
   saveBridgeState,
 } from './config.js'
 import type { FeishuTaskDispatchOptions } from './dispatch.js'
-import { buildFeishuTaskDispatch } from './dispatch.js'
+import { buildFeishuTaskDispatch, buildFeishuTaskId } from './dispatch.js'
 import { classifyFeishuTaskEvent } from './events.js'
 import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
@@ -45,7 +45,7 @@ type Logger = {
   log: (message?: unknown, metadata?: LogMetadata) => void
   error: (message?: unknown, metadata?: LogMetadata) => void
 }
-type LogLevel = 'debug' | 'error' | 'info'
+type LogLevel = 'debug' | 'error' | 'info' | 'warn'
 type BridgeLogger = Logger & { debug: (message?: unknown, metadata?: LogMetadata) => void }
 type ConnectivityKind = keyof BridgeState['connectivity']
 type FeishuTaskEventIgnoreReason =
@@ -121,7 +121,7 @@ interface PreparedFeishuTaskAttachments {
 }
 
 function formatLogMessage(level: LogLevel, message?: unknown): string {
-  return `[${level}] ${String(message)}`
+  return `[${level.padEnd(5, ' ')}] ${String(message)}`
 }
 
 function createBridgeLogger(logger: Logger, debugEnabled: boolean): BridgeLogger {
@@ -1241,8 +1241,7 @@ export class FeishuTaskBridgeRuntime {
   private registerAampHandlers(): void {
     this.aamp.on('connected', () => {
       this.setConnectivity('aamp', 'connected')
-      this.logger.log('[aamp] connected')
-      this.debugLog(`[aamp] connected mailbox=${this.config.mailbox.email}`)
+      this.logger.log(`[aamp] connected mailbox=${this.config.mailbox.email}`)
       this.trackBackgroundTask(this.persistState())
     })
     this.aamp.on('disconnected', (reason) => {
@@ -1271,8 +1270,7 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.lastAampAckAt = new Date().toISOString()
       this.state.lastAampAckTaskId = ack.taskId
-      this.debugLog(`${formatTaskLogPrefix(taskState.taskGuid)} ack received aamp_task=${ack.taskId} from=${ack.from}`, { taskId: ack.taskId })
-      this.debugLog(`[aamp ack ${ack.taskId}] received from=${ack.from}`, { taskId: ack.taskId })
+      this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} ack received aamp_task=${ack.taskId} from=${ack.from}`, { taskId: ack.taskId })
       this.trackBackgroundTask(this.handleTaskAck(ack).catch(async (error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[aamp ack ${ack.taskId}] ${error.message}`, { taskId: ack.taskId })
@@ -1282,11 +1280,10 @@ export class FeishuTaskBridgeRuntime {
     this.aamp.on('task.stream.opened', (stream) => {
       const taskState = this.state.tasks[stream.taskId]
       if (taskState) {
-        this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} stream opened aamp_task=${stream.taskId} stream=${stream.streamId}`, { taskId: stream.taskId })
+        this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} stream opened aamp_task=${stream.taskId} stream=${stream.streamId} from=${stream.from}`, { taskId: stream.taskId })
       } else {
-        this.logger.log(`[aamp stream] ignored reason=unknown_task task=${stream.taskId} stream=${stream.streamId}`, { taskId: stream.taskId })
+        this.logger.log(`[aamp stream] ignored reason=unknown_task task=${stream.taskId} stream=${stream.streamId} from=${stream.from}`, { taskId: stream.taskId })
       }
-      this.debugLog(`[aamp stream ${stream.taskId}] opened stream=${stream.streamId} from=${stream.from}`, { taskId: stream.taskId })
       this.trackBackgroundTask(this.handleTaskStreamOpened(stream).catch(async (error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[aamp stream ${stream.taskId}] ${error.message}`, { taskId: stream.taskId })
@@ -1296,8 +1293,7 @@ export class FeishuTaskBridgeRuntime {
     this.aamp.on('task.help_needed', (help) => {
       this.state.lastAampHelpAt = new Date().toISOString()
       this.state.lastAampHelpTaskId = help.taskId
-      this.logger.log(`[aamp help] received task=${help.taskId}`, { taskId: help.taskId })
-      this.debugLog(`[aamp help ${help.taskId}] received from=${help.from}`, { taskId: help.taskId })
+      this.logger.log(`[aamp help] received task=${help.taskId} from=${help.from}`, { taskId: help.taskId })
       this.trackBackgroundTask(this.handleTaskHelp(help).catch(async (error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[aamp help ${help.taskId}] ${error.message}`, { taskId: help.taskId })
@@ -1312,8 +1308,7 @@ export class FeishuTaskBridgeRuntime {
       }
       this.state.lastAampResultAt = new Date().toISOString()
       this.state.lastAampResultTaskId = result.taskId
-      this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} result received aamp_task=${result.taskId} status=${result.status}`, { taskId: result.taskId })
-      this.debugLog(`[aamp result ${result.taskId}] received from=${result.from} status=${result.status}`, { taskId: result.taskId })
+      this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} result received aamp_task=${result.taskId} from=${result.from} status=${result.status}`, { taskId: result.taskId })
       this.trackBackgroundTask(this.handleTaskResult(result).catch(async (error: Error) => {
         this.state.lastError = error.message
         this.logger.error(`[aamp result ${result.taskId}] ${error.message}`, { taskId: result.taskId })
@@ -1355,14 +1350,15 @@ export class FeishuTaskBridgeRuntime {
   private async loadTaskForDispatchEvent(
     event: FeishuTaskEvent,
     eventKind: FeishuTaskEventKind,
+    aampTaskId: string,
   ): Promise<{ task?: FeishuTaskDetails; ignoreReason?: FeishuTaskEventIgnoreReason }> {
     if (eventKind === 'task_comment') {
-      return this.loadTaskForCommentEvent(event)
+      return this.loadTaskForCommentEvent(event, aampTaskId)
     }
 
-    this.debugLog(`[feishu task ${event.taskGuid}] loading base details`)
+    this.debugLog(`[feishu task ${event.taskGuid}] loading base details`, { taskId: aampTaskId })
     const baseTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
-    this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`)
+    this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`, { taskId: aampTaskId })
 
     const createIgnoreReason = getTaskCreateIgnoreReason(eventKind, baseTask)
     if (createIgnoreReason) return { ignoreReason: createIgnoreReason }
@@ -1370,11 +1366,12 @@ export class FeishuTaskBridgeRuntime {
     const executionIgnoreReason = getNonCommentExecutionIgnoreReason(eventKind, baseTask)
     if (executionIgnoreReason) return { ignoreReason: executionIgnoreReason }
 
-    return { task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask)) }
+    return { task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask, {}, aampTaskId)) }
   }
 
   private async loadTaskForCommentEvent(
     event: FeishuTaskEvent,
+    aampTaskId: string,
   ): Promise<{ task?: FeishuTaskDetails; ignoreReason?: FeishuTaskEventIgnoreReason }> {
     const commentId = event.commentId ?? getEventCommentId(event)
     let changedComment: FeishuTaskComment | undefined
@@ -1393,7 +1390,7 @@ export class FeishuTaskBridgeRuntime {
         return { ignoreReason: ownerIgnoreReason }
       }
     } else {
-      this.debugLog(`[feishu event ${event.eventId}] comment_id missing fallback=list_comments task=${event.taskGuid}`)
+      this.debugLog(`[feishu event ${event.eventId}] comment_id missing fallback=list_comments task=${event.taskGuid}`, { taskId: aampTaskId })
       loadedComments = await withPromptDispatchFailure('read_reply_content', () => this.feishu.listComments(event.taskGuid))
       changedComment = getLatestNonEmptyComment({
         guid: event.taskGuid,
@@ -1412,9 +1409,9 @@ export class FeishuTaskBridgeRuntime {
       }
     }
 
-    this.debugLog(`[feishu task ${event.taskGuid}] loading base details`)
+    this.debugLog(`[feishu task ${event.taskGuid}] loading base details`, { taskId: aampTaskId })
     const baseTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
-    this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`)
+    this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`, { taskId: aampTaskId })
     const executionIgnoreReason = getCommentExecutionIgnoreReason(baseTask, changedComment, this.config.feishu.appId)
     if (executionIgnoreReason) return { ignoreReason: executionIgnoreReason }
 
@@ -1422,7 +1419,7 @@ export class FeishuTaskBridgeRuntime {
       task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask, {
         comments: loadedComments,
         changedComment,
-      })),
+      }, aampTaskId)),
     }
   }
 
@@ -1521,6 +1518,7 @@ export class FeishuTaskBridgeRuntime {
       comments?: FeishuTaskComment[]
       changedComment?: FeishuTaskComment
     } = {},
+    aampTaskId?: string,
   ): Promise<FeishuTaskDetails> {
     const [subtasks, comments] = await Promise.all([
       this.feishu.listSubtasks(baseTask.guid),
@@ -1531,7 +1529,7 @@ export class FeishuTaskBridgeRuntime {
       subtasks,
       comments: mergeComments(comments, options.changedComment),
     }
-    this.debugLog(`[feishu task ${hydratedTask.guid}] hydrated children=${hydratedTask.subtasks.length} comments=${hydratedTask.comments.length}`)
+    this.debugLog(`[feishu task ${hydratedTask.guid}] hydrated children=${hydratedTask.subtasks.length} comments=${hydratedTask.comments.length}`, aampTaskId ? { taskId: aampTaskId } : undefined)
     return hydratedTask
   }
 
@@ -1576,7 +1574,7 @@ export class FeishuTaskBridgeRuntime {
     return refs
   }
 
-  private async prepareFeishuTaskAttachments(task: FeishuTaskDetails): Promise<PreparedFeishuTaskAttachments> {
+  private async prepareFeishuTaskAttachments(task: FeishuTaskDetails, aampTaskId?: string): Promise<PreparedFeishuTaskAttachments> {
     const attachments: AampAttachment[] = []
     const notes: string[] = []
     const seenGuids = new Set<string>()
@@ -1618,7 +1616,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     if (attachments.length > 0 || notes.length > 0) {
-      this.debugLog(`[feishu task ${task.guid}] prepared attachments downloaded=${attachments.length} notes=${notes.length}`)
+      this.debugLog(`[feishu task ${task.guid}] prepared attachments downloaded=${attachments.length} notes=${notes.length}`, aampTaskId ? { taskId: aampTaskId } : undefined)
     }
 
     return { attachments, notes }
@@ -1628,7 +1626,6 @@ export class FeishuTaskBridgeRuntime {
     this.state.lastFeishuEventAt = new Date().toISOString()
     this.state.lastFeishuEventId = event.eventId
     this.state.lastFeishuEventTaskGuid = event.taskGuid
-    this.debugLog(`[feishu event ${event.eventId}] received task=${event.taskGuid} types=${event.eventTypes.join(',') || '(unknown)'}`)
     if (this.state.dedupEventIds[event.eventId]) {
       this.debugLog(`[feishu event ${event.eventId}] duplicate ignored`)
       await this.persistState()
@@ -1647,18 +1644,22 @@ export class FeishuTaskBridgeRuntime {
     }
     this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} received kind=${eventKind} types=${event.eventTypes.join(',') || '(unknown)'}`)
 
+    const aampTaskId = buildFeishuTaskId(event)
     let taskState: BridgeTaskState | undefined
     try {
-      const { task, ignoreReason } = await this.loadTaskForDispatchEvent(event, eventKind)
+      const { task, ignoreReason } = await this.loadTaskForDispatchEvent(event, eventKind, aampTaskId)
       if (ignoreReason || !task) {
         await this.ignoreFeishuTaskEvent(event, ignoreReason ?? 'event_type_not_allowlisted')
         return
       }
-      const preparedAttachments = await this.prepareFeishuTaskAttachments(task)
+      const preparedAttachments = await this.prepareFeishuTaskAttachments(task, aampTaskId)
       const dispatch = buildFeishuTaskDispatch(event, task, eventKind, {
         feishuAppId: this.config.feishu.appId,
         ...buildFeishuTaskDispatchOptions(this.config),
       })
+      if (dispatch.taskId !== aampTaskId) {
+        throw new Error(`Feishu task id mismatch: expected ${aampTaskId}, got ${dispatch.taskId}`)
+      }
       const bodyText = appendAttachmentNotes(dispatch.bodyText, preparedAttachments.notes)
       const now = new Date().toISOString()
       taskState = {
@@ -1675,7 +1676,7 @@ export class FeishuTaskBridgeRuntime {
       this.state.tasks[dispatch.taskId] = taskState
       await this.persistState()
       const feishuCliProfile = this.config.feishu.cliProfile?.trim()
-      this.debugLog([
+      this.logger.log([
         `[aamp dispatch ${dispatch.taskId}] sending`,
         `to=${this.config.targetAgentEmail}`,
         `session=${dispatch.sessionKey}`,
@@ -1714,7 +1715,7 @@ export class FeishuTaskBridgeRuntime {
     } catch (error) {
       const promptFailure = getPromptDispatchFailure(error)
       if (promptFailure) {
-        await this.commentPromptDispatchFailure(event, eventKind, promptFailure.action, promptFailure.originalError, taskState?.aampTaskId)
+        await this.commentPromptDispatchFailure(event, eventKind, promptFailure.action, promptFailure.originalError, taskState?.aampTaskId ?? aampTaskId)
       }
       const message = formatUnknownError(promptFailure?.originalError ?? error)
       this.state.lastError = message
@@ -1939,7 +1940,6 @@ export class FeishuTaskBridgeRuntime {
     }
     await this.persistState()
     this.logger.log(`${formatTaskLogPrefix(latestTaskState.taskGuid)} steps flushed count=${stepsToFlush.length} total=${nextStepCount}`, { taskId: aampTaskId })
-    this.debugLog(`[aamp stream ${aampTaskId}] appended ${stepsToFlush.length} Feishu step(s)`, { taskId: aampTaskId })
   }
 
   private async handleTaskAck(ack: TaskAck): Promise<void> {
@@ -1981,7 +1981,7 @@ export class FeishuTaskBridgeRuntime {
       this.debugLog(`[aamp ack ${ack.taskId}] commenting on Feishu task ${taskState.taskGuid}`, { taskId: ack.taskId })
       await this.feishu.commentTask(taskState.taskGuid, buildAckComment({
         aampTaskId: ack.taskId,
-        bridgeName: this.config.slug,
+        bridgeName: this.config.mailbox.email,
         eventKind: taskState.feishuEventKind,
         debug: this.config.behavior.debug,
       }))
@@ -1999,7 +1999,6 @@ export class FeishuTaskBridgeRuntime {
       }
       await this.persistState()
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} ack commented aamp_task=${ack.taskId}`, { taskId: ack.taskId })
-      this.debugLog(`[aamp ack ${ack.taskId}] commented on Feishu task ${taskState.taskGuid}`, { taskId: ack.taskId })
     } finally {
       this.ackCommentInFlight.delete(ack.taskId)
     }
@@ -2044,7 +2043,6 @@ export class FeishuTaskBridgeRuntime {
       }
       await this.persistState()
       this.logger.log(`[aamp help] commented task=${help.taskId}`, { taskId: help.taskId })
-      this.debugLog(`[aamp help ${help.taskId}] commented on Feishu task ${latestTaskState.taskGuid}`, { taskId: help.taskId })
     } finally {
       this.helpCommentInFlight.delete(help.taskId)
     }
@@ -2337,7 +2335,6 @@ export class FeishuTaskBridgeRuntime {
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.debugLog(`[aamp result ${aampTaskId}] commented reply output on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
   }
 
   private async uploadFileDelivery(taskGuid: string, filePath: string): Promise<void> {
@@ -2417,7 +2414,6 @@ export class FeishuTaskBridgeRuntime {
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.debugLog(`[aamp result ${aampTaskId}] commented help-needed on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
   }
 
   private async commentAnsweredResultOnce(aampTaskId: string, taskState: BridgeTaskState, summary: string): Promise<void> {
@@ -2438,7 +2434,6 @@ export class FeishuTaskBridgeRuntime {
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.debugLog(`[aamp result ${aampTaskId}] commented answered result on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
   }
 
   private async commentTaskResultOnce(
@@ -2468,7 +2463,6 @@ export class FeishuTaskBridgeRuntime {
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.debugLog(`[aamp result ${aampTaskId}] commented result on Feishu task ${latestTaskState.taskGuid}`, { taskId: aampTaskId })
   }
 
   private getTaskGuids(taskState: BridgeTaskState, order: 'parent-first' | 'children-first'): string[] {

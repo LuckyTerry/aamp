@@ -8,6 +8,8 @@ export interface BuildAckCommentOptions {
   debug?: boolean
 }
 
+const AAMP_LOGS_BIN = '/Users/bytedance/.aamp/bin/aamp-logs'
+
 function ackLeadText(eventKind: FeishuTaskEventKind | undefined): string {
   if (eventKind === 'task_comment') {
     return '已收到您的回复'
@@ -29,10 +31,12 @@ export function buildAckComment(options: BuildAckCommentOptions): string {
   return [
     visibleAckText,
     '',
-    `Task ID: ${options.aampTaskId}`,
-    `Bridge: ${options.bridgeName}`,
-    `事件场景: ${options.eventKind ?? 'task_create'}`,
-    `收到时间: ${receivedAt}`,
+    `- Task ID: ${options.aampTaskId}`,
+    `- Bridge: ${options.bridgeName}`,
+    `- 事件场景: ${options.eventKind ?? 'task_create'}`,
+    `- 收到时间: ${receivedAt}`,
+    `- 查看日志: ${AAMP_LOGS_BIN} tail --task-id ${options.aampTaskId}`,
+    `- 导出日志: ${AAMP_LOGS_BIN} collect --task-id ${options.aampTaskId}`,
     '',
     '说明：这只表示本地 bridge 已收到 agent 的接收确认，不代表任务已正式开始执行，也不代表任务状态已经流转完成。',
   ].join('\n')

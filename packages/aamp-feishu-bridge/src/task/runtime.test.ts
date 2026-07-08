@@ -94,6 +94,16 @@ class FakeAampClient {
     return { close: () => {} }
   }
 
+  emitAck(taskId: string, from = 'agent@meshmail.ai'): void {
+    this.ackHandler?.({
+      protocolVersion: '1.1',
+      intent: 'task.ack',
+      taskId,
+      from,
+      to: 'bridge@meshmail.ai',
+    })
+  }
+
   emitResult(taskId: string, result: Partial<TaskResult>): void {
     this.resultHandler?.({
       protocolVersion: '1.1',
@@ -235,17 +245,47 @@ function buildConfig(): BridgeConfig {
   }
 }
 
+test('runtime pads info log prefix for scan-friendly terminal output', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: new FakeAampClient(),
+    feishuClient: new FakeFeishuTaskClient(),
+    logger: {
+      log: (message) => { logs.push(String(message)) },
+      error: (message) => { logs.push(String(message)) },
+    },
+  })
+
+  try {
+    await runtime.start()
+    assert.ok(logs.some((line) => line.startsWith('[info ] [bridge] starting')), logs.join('\n'))
+    assert.equal(logs.some((line) => line.startsWith('[info] ')), false)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime leaves task unchanged and comments when task details cannot be read before dispatch', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
   fakeFeishu.getTaskBaseError = Object.assign(new Error('task api timeout'), { code: 'ETIMEDOUT' })
-  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+  const config = buildConfig()
+  config.behavior.debug = true
+  const logs: Array<{ message: string; metadata?: Record<string, unknown> }> = []
+  const runtime = new FeishuTaskBridgeRuntime(config, {
     configDir,
     aampClient: fakeAamp,
     feishuClient: fakeFeishu,
-    logger: { log: () => {}, error: () => {} },
+    logger: {
+      log: (message, metadata) => { logs.push({ message: String(message), metadata }) },
+      error: (message, metadata) => { logs.push({ message: String(message), metadata }) },
+    },
   })
+  const aampTaskId = 'feishu-task-task_guid_read_failure-evt_task_read_failure'
 
   try {
     await runtime.start()
@@ -263,8 +303,62 @@ test('runtime leaves task unchanged and comments when task details cannot be rea
     assert.deepEqual(fakeFeishu.completedTaskGuids, [])
     assert.deepEqual(fakeFeishu.comments, [{
       taskGuid: 'task_guid_read_failure',
-      content: '已收到任务派发请求，但暂时无法转交智能体处理。桥接器读取任务详情失败。原因：task api timeout',
+      content: [
+        '已收到任务派发请求，但暂时无法转交智能体处理。桥接器读取任务详情失败。原因：task api timeout',
+        `Task ID: ${aampTaskId}`,
+        `日志收集命令：~/.aamp/bin/aamp-logs collect --task-id ${aampTaskId}`,
+      ].join('\n'),
     }])
+    assert.deepEqual(
+      logs.find((entry) => entry.message.includes('[feishu task task_guid_read_failure] loading base details'))?.metadata,
+      { taskId: aampTaskId },
+    )
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime writes debug ack comment with Feishu bridge email and log commands', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const config = buildConfig()
+  config.behavior.debug = true
+  const runtime = new FeishuTaskBridgeRuntime(config, {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_ack-evt_ack'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_ack',
+      taskGuid: 'task_guid_ack',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitAck(aampTaskId, 'codex@meshmail.ai')
+
+    await waitFor(() => {
+      assert.equal(fakeFeishu.comments.length, 1)
+    })
+
+    const content = fakeFeishu.comments[0]?.content ?? ''
+    assert.equal(fakeFeishu.comments[0]?.taskGuid, 'task_guid_ack')
+    assert.match(content, /^已收到任务派发请求/)
+    assert.match(content, /- Task ID: feishu-task-task_guid_ack-evt_ack/)
+    assert.match(content, /- Bridge: bridge@meshmail\.ai/)
+    assert.doesNotMatch(content, /Bridge: codex@meshmail\.ai/)
+    assert.doesNotMatch(content, /Bridge: aamp-feishu-task-bridge/)
+    assert.match(content, /- 事件场景: task_create/)
+    assert.match(content, /- 收到时间: /)
+    assert.match(content, /- 查看日志: \/Users\/bytedance\/\.aamp\/bin\/aamp-logs tail --task-id feishu-task-task_guid_ack-evt_ack/)
+    assert.match(content, /- 导出日志: \/Users\/bytedance\/\.aamp\/bin\/aamp-logs collect --task-id feishu-task-task_guid_ack-evt_ack/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -317,6 +411,7 @@ test('runtime uses reply wording when comment content cannot be read before disp
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
   fakeFeishu.getCommentError = Object.assign(new Error('comment api timeout'), { code: 'ETIMEDOUT' })
+  const aampTaskId = 'feishu-task-task_guid_comment_read_failure-evt_comment_read_failure'
   const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
     configDir,
     aampClient: fakeAamp,
@@ -341,7 +436,11 @@ test('runtime uses reply wording when comment content cannot be read before disp
     assert.deepEqual(fakeFeishu.completedTaskGuids, [])
     assert.deepEqual(fakeFeishu.comments, [{
       taskGuid: 'task_guid_comment_read_failure',
-      content: '已收到您的回复，但暂时无法转交智能体处理。桥接器读取回复内容失败。原因：comment api timeout',
+      content: [
+        '已收到您的回复，但暂时无法转交智能体处理。桥接器读取回复内容失败。原因：comment api timeout',
+        `Task ID: ${aampTaskId}`,
+        `日志收集命令：~/.aamp/bin/aamp-logs collect --task-id ${aampTaskId}`,
+      ].join('\n'),
     }])
   } finally {
     await runtime.stop()

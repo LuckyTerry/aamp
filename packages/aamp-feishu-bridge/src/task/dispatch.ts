@@ -17,6 +17,10 @@ function stableIdPart(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, '_') || 'unknown'
 }
 
+export function buildFeishuTaskId(event: Pick<FeishuTaskEvent, 'taskGuid' | 'eventId'>): string {
+  return `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(event.eventId)}`
+}
+
 function nonEmpty(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
   return trimmed || undefined
@@ -424,7 +428,7 @@ export function buildFeishuTaskDispatch(
   eventKind: FeishuTaskEventKind,
   options?: FeishuTaskDispatchOptions,
 ): FeishuTaskDispatch {
-  const taskId = `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(event.eventId)}`
+  const taskId = buildFeishuTaskId(event)
   return {
     taskId,
     sessionKey: `feishu-task:${task.guid}`,
