@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
 import { formatDebugPromptLog, materializePromptIfNeeded } from './agent-bridge.js'
 
@@ -69,10 +69,15 @@ test('materializePromptIfNeeded writes long prompts to a private file and return
     })
 
     assert.ok(result.materializedPath)
+    assert.equal(dirname(result.materializedPath), baseDir)
+    assert.match(basename(result.materializedPath), /^p-[a-f0-9]{12}\.md$/)
+    assert.equal(result.materializedPath.includes('feishu-task'), false)
+    assert.equal(result.materializedPath.includes('2026-07-08'), false)
     assert.equal(readFileSync(result.materializedPath, 'utf8'), prompt)
     assert.equal(statSync(result.materializedPath).mode & 0o777, 0o600)
     assert.match(result.prompt, /^## AAMP Prompt File/)
     assert.match(result.prompt, /Read the entire file before acting/)
+    assert.match(result.prompt, new RegExp(`cat ${result.materializedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
     assert.match(result.prompt, /follow all instructions, rules, and final-result contracts/)
     assert.match(result.prompt, /AAMP_RESULT_JSON: \{"output":"Unable to read materialized AAMP prompt file: <exact read failure>"\}/)
     assert.equal(result.prompt.includes('HELP:'), false)

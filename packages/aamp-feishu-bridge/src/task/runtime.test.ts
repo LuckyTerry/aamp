@@ -398,6 +398,116 @@ test('runtime completes comment-triggered answered results when bridge writes th
   }
 })
 
+test('runtime parses AAMP_RESULT_JSON wrappers after natural language output', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_wrapped_result-evt_wrapped_result'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_wrapped_result',
+      taskGuid: 'task_guid_wrapped_result',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: [
+        '任务意图明确：用户问"今天天气咋样？"，需要回答天气情况。',
+        '',
+        `AAMP_RESULT_JSON: ${JSON.stringify({
+          output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+            schema: 'feishu_task_result.v2',
+            status: 'succeeded',
+            summary: '已回复今天北京天气情况。',
+            outputs: [
+              {
+                kind: 'reply_comment',
+                content: '北京今天多云，28°C。\n下午可能有雷阵雨。',
+              },
+            ],
+          })}`,
+        })}`,
+      ].join('\n'),
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_wrapped_result'])
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_wrapped_result',
+      content: '北京今天多云，28°C。\n下午可能有雷阵雨。',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime parses trailing FEISHU_TASK_RESULT_JSON markers after natural language output', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_trailing_marker-evt_trailing_marker'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_trailing_marker',
+      taskGuid: 'task_guid_trailing_marker',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: [
+        '我先说明一下处理思路。',
+        `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+          schema: 'feishu_task_result.v2',
+          status: 'succeeded',
+          summary: '已回复。',
+          outputs: [
+            {
+              kind: 'reply_comment',
+              content: '结果里可以包含花括号：{ok: true}。',
+            },
+          ],
+        })}`,
+        '这句尾随文本不属于 JSON。',
+      ].join('\n'),
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_trailing_marker'])
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
+    })
+
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_trailing_marker',
+      content: '结果里可以包含花括号：{ok: true}。',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime uploads oversized reply comments as markdown delivery attachments', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()

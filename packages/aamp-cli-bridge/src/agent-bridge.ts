@@ -9,6 +9,7 @@ import {
 } from 'aamp-sdk'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { AgentConfig, BridgeConfig } from './config.js'
 import { CliAgentClient } from './cli-agent-client.js'
@@ -32,6 +33,7 @@ const IDENTITY_AUTH_RETRY_COUNT = 5
 const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
 const PROMPT_MATERIALIZATION_THRESHOLD_CHARS = 8_000
 const STRUCTURED_RESULT_MARKER = 'AAMP_RESULT_JSON:'
+const DEFAULT_PROMPT_FILE_DIR = process.platform === 'win32' ? join(tmpdir(), 'aamp-p') : '/tmp/aamp-p'
 
 function isEnvFlagEnabled(name: string): boolean {
   const value = process.env[name]?.trim().toLowerCase()
@@ -187,10 +189,6 @@ export interface MaterializedPrompt {
   originalLength: number
 }
 
-function sanitizePromptFilePart(value: string): string {
-  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 80) || 'task'
-}
-
 function promptHash(prompt: string): string {
   return createHash('sha256').update(prompt).digest('hex').slice(0, 12)
 }
@@ -202,6 +200,8 @@ function buildMaterializedPromptWrapper(filePath: string): string {
     'The complete AAMP task prompt was materialized to this local file:',
     '',
     filePath,
+    '',
+    `Run this first if needed: cat ${filePath}`,
     '',
     'Read the entire file before acting. Treat the file content as the current task prompt and follow all instructions, rules, and final-result contracts in it.',
     '',
@@ -224,14 +224,10 @@ export function materializePromptIfNeeded(options: {
     }
   }
 
-  const promptDir = join(options.baseDir ?? getBridgeHomeDir(), 'prompt-files')
+  const promptDir = options.baseDir ?? DEFAULT_PROMPT_FILE_DIR
   mkdirSync(promptDir, { recursive: true, mode: 0o700 })
 
-  const timestamp = (options.now ?? new Date()).toISOString().replace(/[:.]/g, '-')
-  const filePath = join(
-    promptDir,
-    `${sanitizePromptFilePart(options.taskId)}-${timestamp}-${promptHash(options.prompt)}.md`,
-  )
+  const filePath = join(promptDir, `p-${promptHash(options.prompt)}.md`)
   writeFileSync(filePath, options.prompt, { encoding: 'utf8', mode: 0o600 })
 
   return {

@@ -559,6 +559,7 @@ type FeishuTaskResultOutput =
   | { kind: 'text_delivery'; title?: string; format: 'markdown' | 'plain_text'; content: string }
 
 const FEISHU_RESULT_MARKER = 'FEISHU_TASK_RESULT_JSON:'
+const AAMP_RESULT_MARKER = 'AAMP_RESULT_JSON:'
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -576,6 +577,12 @@ function getString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const normalized = normalizeResultText(value).trim()
   return normalized ? normalized : undefined
+}
+
+function getRawString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  return trimmed ? trimmed : undefined
 }
 
 function getBoolean(value: unknown): boolean | undefined {
@@ -652,13 +659,73 @@ function getFirstQuestionText(value: unknown): string | undefined {
   return undefined
 }
 
-function parseFeishuResultPayload(output: string): Record<string, unknown> | undefined {
-  const trimmedOutput = output.trimStart()
-  if (!trimmedOutput.startsWith(FEISHU_RESULT_MARKER)) return undefined
-  const jsonText = trimmedOutput.slice(FEISHU_RESULT_MARKER.length).trim()
+function extractJsonObjectAfterMarker(text: string, marker: string, markerIndex: number): string | undefined {
+  let cursor = markerIndex + marker.length
+  while (cursor < text.length && /\s/.test(text[cursor] ?? '')) cursor += 1
+  if (text[cursor] !== '{') return undefined
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let index = cursor; index < text.length; index += 1) {
+    const character = text[index]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (character === '\\') {
+        escaped = true
+      } else if (character === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (character === '"') {
+      inString = true
+    } else if (character === '{') {
+      depth += 1
+    } else if (character === '}') {
+      depth -= 1
+      if (depth === 0) {
+        return text.slice(cursor, index + 1)
+      }
+    }
+  }
+
+  throw new SyntaxError(`${marker} 后面的 JSON 对象不完整。`)
+}
+
+function parseMarkedJsonObject(text: string, marker: string, markerIndex: number): Record<string, unknown> | undefined {
+  const jsonText = extractJsonObjectAfterMarker(text, marker, markerIndex)
   if (!jsonText) return undefined
   const parsed = JSON.parse(jsonText) as unknown
   return asRecord(parsed)
+}
+
+function parseMarkedJsonObjectAtStart(text: string, marker: string): Record<string, unknown> | undefined {
+  const trimmedText = text.trimStart()
+  if (!trimmedText.startsWith(marker)) return undefined
+  return parseMarkedJsonObject(trimmedText, marker, 0)
+}
+
+function parseLastMarkedJsonObject(text: string, marker: string): Record<string, unknown> | undefined {
+  const markerIndex = text.lastIndexOf(marker)
+  if (markerIndex < 0) return undefined
+  return parseMarkedJsonObject(text, marker, markerIndex)
+}
+
+function parseFeishuResultPayload(output: string): Record<string, unknown> | undefined {
+  const directPayload = parseMarkedJsonObjectAtStart(output, FEISHU_RESULT_MARKER)
+  if (directPayload) return directPayload
+
+  const aampPayload = parseLastMarkedJsonObject(output, AAMP_RESULT_MARKER)
+  if (aampPayload) {
+    const wrappedOutput = getRawString(aampPayload.output)
+    if (!wrappedOutput) return undefined
+    return parseMarkedJsonObjectAtStart(wrappedOutput, FEISHU_RESULT_MARKER)
+  }
+
+  return parseLastMarkedJsonObject(output, FEISHU_RESULT_MARKER)
 }
 
 function formatFeishuResultParseError(error: unknown): string {
