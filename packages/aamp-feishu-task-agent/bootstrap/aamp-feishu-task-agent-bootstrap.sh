@@ -37,8 +37,8 @@ FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16}"
-CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.9}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.41}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.11}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.42}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -1443,15 +1443,38 @@ console.log([...new Set(excludes)].join(","));
 '
 }
 
+run_lark_cli_auth_login_with_browser_open() {
+  local opened_url=""
+  local line=""
+  local auth_url=""
+
+  set +e
+  "$@" 2>&1 | while IFS= read -r line; do
+    printf '%s\n' "$line"
+    if [ "${AAMP_AUTO_OPEN_AUTH_URL:-true}" != "false" ] \
+      && [ -z "$opened_url" ] \
+      && command -v open >/dev/null 2>&1 \
+      && [[ "$line" =~ (https://[^[:space:]]+) ]]; then
+      auth_url="${BASH_REMATCH[1]}"
+      opened_url="$auth_url"
+      agent_log "opening Feishu auth URL in browser"
+      open "$auth_url" >/dev/null 2>&1 || agent_log "failed to open auth URL automatically; please open it manually"
+    fi
+  done
+  local auth_status=${PIPESTATUS[0]}
+  set -e
+  return "$auth_status"
+}
+
 run_lark_cli_auth_login() {
   local profile="$1"
   local auth_excludes="$2"
 
   auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes")"
   if [ -z "$auth_excludes" ]; then
-    lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    run_lark_cli_auth_login_with_browser_open lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
   else
-    lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
+    run_lark_cli_auth_login_with_browser_open lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
   fi
 }
 
@@ -1493,6 +1516,9 @@ should_forget_bot_after_feishu_failure() {
   [ -n "$FEISHU_LOG" ] && [ -f "$FEISHU_LOG" ] || return 1
 
   if grep -F 'does not contain a readable app secret' "$FEISHU_LOG" >/dev/null 2>&1; then
+    return 0
+  fi
+  if grep -E 'code=99991672|应用尚未开通所需的应用身份权限|action_scope_required' "$FEISHU_LOG" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -2533,6 +2559,13 @@ start_acp_bridge_and_capture_pairing_url() {
 start_cli_bridge_and_capture_pairing_url() {
   CLI_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-cli-bridge.XXXXXX")"
   agent_log "starting CLI bridge; log: $CLI_LOG"
+  if [ "$DEBUG_MODE" = "true" ]; then
+    export AAMP_CLI_BRIDGE_DEBUG_TASK=1
+    export AAMP_CLI_BRIDGE_DEBUG_PROMPT=1
+    export AAMP_CLI_BRIDGE_DEBUG_RESULT=1
+    export AAMP_CLI_BRIDGE_DEBUG_CLI=1
+    agent_log "CLI bridge debug logging enabled: raw prompt/result will be written to $CLI_LOG"
+  fi
 
   local command=(
     init
@@ -2593,6 +2626,7 @@ start_feishu_task_bridge() {
   for _ in $(seq 1 90); do
     if ! kill -0 "$FEISHU_PID" 2>/dev/null; then
       agent_log "Feishu bridge exited before becoming ready. Log: $FEISHU_LOG"
+      agent_log "last 80 lines from Feishu bridge log:"
       tail -80 "$FEISHU_LOG" >&2 || true
       forget_current_bot_after_feishu_failure_if_needed
       agent_fail "Feishu bridge exited before ready"

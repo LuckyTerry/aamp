@@ -167,6 +167,40 @@ function getErrorCode(error: unknown): string | undefined {
   return getString(record?.code)
 }
 
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function formatFeishuHttpError(error: unknown): string {
+  const record = asRecord(error)
+  const response = asRecord(record?.response)
+  const parts = [
+    error instanceof Error ? error.message : String(error),
+  ]
+
+  const status = getNumber(response?.status) ?? getNumber(record?.status) ?? getNumber(record?.statusCode)
+  if (status !== undefined) parts.push(`status=${status}`)
+
+  const statusText = getString(response?.statusText)
+  if (statusText) parts.push(`statusText=${statusText}`)
+
+  if (response && Object.prototype.hasOwnProperty.call(response, 'data')) {
+    parts.push(`response.data=${safeJsonStringify(response.data)}`)
+  }
+  if (response && Object.prototype.hasOwnProperty.call(response, 'headers')) {
+    parts.push(`response.headers=${safeJsonStringify(response.headers)}`)
+  }
+  if (record && Object.prototype.hasOwnProperty.call(record, 'code')) {
+    parts.push(`code=${safeJsonStringify(record.code)}`)
+  }
+
+  return parts.join(' | ')
+}
+
 function resolveRuntimeFeishuConfig(config: FeishuConfig): FeishuConfig {
   if ((config.authMode ?? 'app-secret') !== 'lark-cli' || config.appSecret?.trim()) return config
   const credentials = resolveLarkCliProfileCredentialsFromDisk({
@@ -741,13 +775,22 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await withRetry(() => rawClient.httpInstance.request({
-      method: 'POST',
-      url: `${rawClient.domain}/open-apis/task/v2/agent/register_agent`,
-      params: formatted.params,
-      data: formatted.data,
-      headers: formatted.headers,
-    }), this.retry, this.logger, 'agent.register_agent')
+    const requestUrl = `${rawClient.domain}/open-apis/task/v2/agent/register_agent`
+    try {
+      await withRetry(() => rawClient.httpInstance.request({
+        method: 'POST',
+        url: requestUrl,
+        params: formatted.params,
+        data: formatted.data,
+        headers: formatted.headers,
+      }), this.retry, this.logger, 'agent.register_agent')
+    } catch (error) {
+      this.logger.error(
+        `[feishu agent] register failed url=${requestUrl} params=${safeJsonStringify(formatted.params ?? {})} ` +
+        `data=${safeJsonStringify(formatted.data ?? {})} error=${formatFeishuHttpError(error)}`,
+      )
+      throw error
+    }
   }
 
   private async subscribeV2TaskEventsWithRawRequest(payload: TaskSubscriptionPayload): Promise<void> {

@@ -6,7 +6,7 @@
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.0-dev.121",
+  "version": "0.1.0-dev.125",
   "description": "One-click launcher for AAMP ACP bridge and Feishu task bridge.",
   "type": "module",
   "bin": {

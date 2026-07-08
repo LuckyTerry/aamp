@@ -88,6 +88,20 @@ function sanitizeSessionKey(value: string | undefined, fallback: string): string
   return normalized || fallback
 }
 
+function isEnvFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on'
+}
+
+function shouldLogCliDebug(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_CLI')
+}
+
+function redactPromptArgs(args: string[], prompt: string): string[] {
+  return args.map((arg) => (arg === prompt ? `<prompt chars=${prompt.length}>` : arg))
+}
+
 export class CliAgentClient {
   constructor(
     private readonly profile: CliProfileDefinition,
@@ -118,6 +132,14 @@ export class CliAgentClient {
     const streamEnabled = this.profile.stream?.enabled !== false && Boolean(streamParser)
 
     return await new Promise<CliRunResult>((resolve, reject) => {
+      if (shouldLogCliDebug()) {
+        const safeArgs = redactPromptArgs(args, text)
+        console.log(
+          `[${this.agentName}] ~~ debug.cli_spawn profile=${this.profile.name ?? this.agentName} ` +
+          `command=${command} args=${JSON.stringify(safeArgs)} stdinChars=${stdin?.length ?? 0} ` +
+          `session=${sessionKey ?? '(none)'} safeSession=${context.safeSessionKey}`,
+        )
+      }
       const proc = spawn(command, args, {
         cwd: this.profile.cwd ? expandHomePath(renderTemplate(this.profile.cwd, context)) : process.cwd(),
         env: {
@@ -176,6 +198,13 @@ export class CliAgentClient {
         }
         const streamOutput = finalStreamOutput || streamedOutput
         const exitCode = code ?? 0
+        if (shouldLogCliDebug()) {
+          console.log(
+            `[${this.agentName}] ~~ debug.cli_close profile=${this.profile.name ?? this.agentName} ` +
+            `exit=${exitCode} stdoutChars=${stdout.length} stderrChars=${stderr.length} ` +
+            `formattedChars=${output.length} streamChars=${streamOutput.length} events=${events.length}`,
+          )
+        }
         if (!successExitCodes.has(exitCode)) {
           reject(new Error(
             `CLI profile "${this.profile.name ?? this.agentName}" exited with code ${exitCode}: ${stderr.trim() || output || 'no output'}`,

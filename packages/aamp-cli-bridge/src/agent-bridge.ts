@@ -31,6 +31,34 @@ import type { BridgeRuntimeEvent } from './bridge.js'
 const IDENTITY_AUTH_RETRY_COUNT = 5
 const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
 const PROMPT_MATERIALIZATION_THRESHOLD_CHARS = 8_000
+const STRUCTURED_RESULT_MARKER = 'AAMP_RESULT_JSON:'
+
+function isEnvFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on'
+}
+
+function isCliTaskDebugEnabled(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_PROMPT')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_RESULT')
+}
+
+function shouldLogRawPrompt(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_PROMPT')
+}
+
+function shouldLogRawResult(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_RESULT')
+}
+
+function logDebugBlock(agentName: string, taskId: string, label: string, content: string): void {
+  console.log(`[${agentName}] ~~ debug.${label}.begin task=${taskId} chars=${content.length}`)
+  console.log(content)
+  console.log(`[${agentName}] ~~ debug.${label}.end task=${taskId}`)
+}
 
 export interface AgentIdentity {
   email: string
@@ -787,6 +815,16 @@ export class AgentBridge {
       })
       const prompt = materializedPrompt.prompt
       const sessionKey = resolveTaskSessionKey(task, hydratedTask)
+      const promptMarkerIndex = prompt.lastIndexOf(STRUCTURED_RESULT_MARKER)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.task_prompt task=${task.taskId} session=${sessionKey ?? '(none)'} chars=${prompt.length} ` +
+          `hasStructuredMarker=${promptMarkerIndex >= 0} markerIndex=${promptMarkerIndex}`,
+        )
+      }
+      if (shouldLogRawPrompt()) {
+        logDebugBlock(this.name, task.taskId, 'raw_prompt', prompt)
+      }
       if (sessionKey !== hydratedTask.sessionKey) {
         console.log(`[${this.name}] using dispatch session for ${task.taskId}: ${sessionKey}`)
       }
@@ -812,7 +850,25 @@ export class AgentBridge {
       }
       await flushStreamWrites()
 
+      const resultMarkerIndex = result.output.lastIndexOf(STRUCTURED_RESULT_MARKER)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.cli_result task=${task.taskId} chars=${result.output.length} ` +
+          `streamed=${result.streamedText} events=${result.events.length} ` +
+          `hasStructuredMarker=${resultMarkerIndex >= 0} markerIndex=${resultMarkerIndex}`,
+        )
+      }
+      if (shouldLogRawResult()) {
+        logDebugBlock(this.name, task.taskId, 'raw_cli_result', result.output)
+      }
       const parsed = parseResponse(result.output)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.parsed_result task=${task.taskId} isHelp=${parsed.isHelp} ` +
+          `outputChars=${parsed.output.length} files=${parsed.files.length} ` +
+          `structuredFields=${parsed.structuredResult?.length ?? 0} attachments=${parsed.attachments?.length ?? 0}`,
+        )
+      }
       if (!parsed.isHelp
         && !parsed.output
         && parsed.files.length === 0
