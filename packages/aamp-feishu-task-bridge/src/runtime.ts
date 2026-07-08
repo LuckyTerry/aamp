@@ -303,6 +303,7 @@ function isFeishuPpeHeaderEnabled(headers: Record<string, string> | undefined): 
 
 function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatchOptions {
   const feishuEnv = getFeishuEnvHeader(config.feishu.headers)
+  const feishuLarkCliProfile = getFeishuLarkCliProfile(config.feishu.cliProfile)
   const ppeEnabled = isFeishuPpeHeaderEnabled(config.feishu.headers)
   const feishuEnvMode = feishuEnv
     ? isFeishuBoeDomain(config.feishu.domain)
@@ -316,6 +317,7 @@ function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatc
   return {
     ...(feishuEnv ? { feishuEnv } : {}),
     ...(feishuEnvMode ? { feishuEnvMode } : {}),
+    ...(feishuLarkCliProfile ? { feishuLarkCliProfile } : {}),
   }
 }
 
@@ -1419,23 +1421,18 @@ export class FeishuTaskBridgeRuntime {
       this.state.tasks[dispatch.taskId] = taskState
       await this.persistState()
       const feishuCliProfile = this.config.feishu.cliProfile?.trim()
-      const injectedFeishuCliProfile = getFeishuLarkCliProfile(feishuCliProfile)
-      const dispatchContext = {
-        ...dispatch.dispatchContext,
-        ...(injectedFeishuCliProfile
-          ? { feishu_lark_cli_profile: injectedFeishuCliProfile }
-          : {}),
-      }
+      const promptFeishuCliProfile = getFeishuLarkCliProfile(feishuCliProfile)
+      const dispatchContext = dispatch.dispatchContext
       this.debugLog([
         `[aamp dispatch ${dispatch.taskId}] sending`,
         `to=${this.config.targetAgentEmail}`,
         `session=${dispatch.sessionKey}`,
         `source=${dispatch.dispatchContext.source ?? '(none)'}`,
-        `event_kind=${dispatch.dispatchContext.feishu_event_kind ?? '(none)'}`,
-        `event_types=${dispatch.dispatchContext.feishu_task_event_types ?? '(none)'}`,
+        `event_kind=${eventKind}`,
+        `event_types=${event.eventTypes.join(',') || '(unknown)'}`,
         `feishu_auth_mode=${this.config.feishu.authMode ?? '(none)'}`,
         `feishu_cli_profile=${feishuCliProfile || '(none)'}`,
-        `dispatch_feishu_lark_cli_profile=${dispatchContext.feishu_lark_cli_profile ?? '(none)'}`,
+        `prompt_feishu_lark_cli_profile=${promptFeishuCliProfile ?? '(none)'}`,
         `attachments=${preparedAttachments.attachments.length}`,
       ].join(' '))
 

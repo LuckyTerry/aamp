@@ -623,7 +623,8 @@ test('runtime dispatches Feishu task events and comments on task.ack once', asyn
     assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.required_skill, undefined)
     assert.equal(fakeAamp.sentTasks[0]?.promptRules, buildFeishuTaskPromptRules())
     assert.equal(fakeAamp.sentTasks[0]?.rawBodyText, fakeAamp.sentTasks[0]?.bodyText)
-    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /^Feishu Task:/)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /^Critical final-response protocol:/)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /Execution Ownership Contract:[\s\S]*\n\nFeishu Event:[\s\S]*\n\nFeishu Task:/)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /existing Feishu task delegation/)
     assert.doesNotMatch(fakeAamp.sentTasks[0]?.bodyText ?? '', /existing Feishu task delegation/)
     assert.doesNotMatch(fakeAamp.sentTasks[0]?.rawBodyText ?? '', /This email was sent by AAMP/)
@@ -641,7 +642,7 @@ test('runtime dispatches Feishu task events and comments on task.ack once', asyn
   }
 })
 
-test('runtime injects configured Feishu lark-cli profile into task dispatch context', async () => {
+test('runtime keeps configured Feishu lark-cli profile out of dispatch context and puts it in prompt rules', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
   const fakeAamp = new FakeAampClient()
   const fakeFeishu = new FakeFeishuTaskClient()
@@ -665,7 +666,10 @@ test('runtime injects configured Feishu lark-cli profile into task dispatch cont
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, 'custom-feishu-profile')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /Feishu lark-cli profile rules:/)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /--profile custom-feishu-profile/)
+    assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /unset -f git 2>\/dev\/null \|\| true; env -u 'BASH_FUNC_git%%' lark-cli --profile custom-feishu-profile/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1203,8 +1207,8 @@ test('runtime dispatches reminder fire Feishu task events', async () => {
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_reminder_fire')
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_task_event_types, 'task_reminder_fire')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, undefined)
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_task_event_types, undefined)
     assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /normalized_kind: task_reminder_fire/)
     assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /raw_event_types: task_reminder_fire/)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /task_reminder_fire/)
@@ -1248,7 +1252,8 @@ test('runtime dispatches task execution events without assignment gating', async
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_reminder_fire')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /normalized_kind: task_reminder_fire/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1282,7 +1287,8 @@ test('runtime dispatches task execution events for active todo tasks', async () 
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_reminder_fire')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /normalized_kind: task_reminder_fire/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1364,7 +1370,8 @@ test('runtime dispatches comment events and writes reply ack comments', async ()
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_comment')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /normalized_kind: task_comment/)
     assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.skill_trigger_type, undefined)
 
     fakeAamp.emitAck('feishu-task-task_guid_comment-evt_comment')
@@ -1768,7 +1775,8 @@ test('runtime dispatches comment events from non-current app authors', async () 
     })
 
     assert.equal(fakeAamp.sentTasks.length, 1)
-    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, 'task_comment')
+    assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_event_kind, undefined)
+    assert.match(fakeAamp.sentTasks[0]?.bodyText ?? '', /normalized_kind: task_comment/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

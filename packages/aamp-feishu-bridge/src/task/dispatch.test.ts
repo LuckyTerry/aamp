@@ -56,7 +56,7 @@ test('buildFeishuTaskContext renders compact event, task, and source context', (
     },
   } as unknown as FeishuTaskDetails, 'task_create')
 
-  assert.match(context, /Critical final-response protocol:[\s\S]*\n\nFeishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\nFeishu Task:/)
+  assert.match(context, /^Critical final-response protocol:[\s\S]*\n\nExecution Ownership Contract:[\s\S]*\n\nFeishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\n\nFeishu Task:/)
   assert.doesNotMatch(context, /event_id:/)
   assert.doesNotMatch(context, /task_guid:/)
   assert.doesNotMatch(context, /timestamp:/)
@@ -84,6 +84,15 @@ test('buildFeishuTaskContext puts final-response protocol before task details', 
 
   assert.match(context, /^Critical final-response protocol:\n/)
   assert.ok(context.indexOf('Critical final-response protocol:') < context.indexOf('Feishu Event:'))
+  assert.match(context, /\n\nExecution Ownership Contract:\n/)
+  assert.ok(context.indexOf('Critical final-response protocol:') < context.indexOf('Execution Ownership Contract:'))
+  assert.ok(context.indexOf('Execution Ownership Contract:') < context.indexOf('Feishu Event:'))
+  assert.ok(context.indexOf('Feishu Event:') < context.indexOf('Feishu Task:'))
+  assert.match(context, /raw_event_types: task_create\n\nFeishu Task:/)
+  assert.match(context, /Do not start background agents, dispatch this task to another agent, fork a thread, hand off, or use subagents/)
+  assert.match(context, /You must do all work directly in this turn/)
+  assert.match(context, /Do not end the turn while any delegated\/background work is still running/)
+  assert.match(context, /Return AAMP_RESULT_JSON only after your direct work is complete/)
   assert.match(context, /MUST be a single AAMP_RESULT_JSON block/)
   assert.match(context, /Never end with plain natural language, Markdown, or a question outside AAMP_RESULT_JSON/)
   assert.match(context, /status=need_help inside FEISHU_TASK_RESULT_JSON/)
@@ -92,6 +101,7 @@ test('buildFeishuTaskContext puts final-response protocol before task details', 
 test('buildFeishuTaskPromptRules tells agents how to read source document links', () => {
   const rules = buildFeishuTaskPromptRules()
 
+  assert.match(rules, /Context Compression Contract:/)
   assert.match(rules, /Source Document Rules:/)
   assert.match(rules, /Source document links in Task source context are task input, not deliverables/i)
   assert.match(rules, /Before relying on a source document link from Task source context, read it with lark-cli/i)
@@ -100,6 +110,7 @@ test('buildFeishuTaskPromptRules tells agents how to read source document links'
   assert.match(rules, /cannot be accessed after a concrete lark-cli attempt/i)
   assert.match(rules, /Treat the Description section as the complete Feishu task context, including Task source context when present/i)
   assert.match(rules, /source documents read via lark-cli from source document links in Task source context/i)
+  assert.match(rules, /preserve Critical final-response protocol and Execution Ownership Contract verbatim/i)
 })
 
 test('buildFeishuTaskPromptRules requires Codem-safe prefix for any lark-cli command with task profile', () => {

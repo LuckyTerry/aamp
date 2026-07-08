@@ -77,13 +77,6 @@ test('buildFeishuTaskDispatchContext records task routing without skill-runtime 
 
   assert.deepEqual(context, {
     source: 'feishu-task',
-    feishu_task_guid: 'task_guid_123',
-    feishu_task_id: 't123',
-    feishu_task_status: 'todo',
-    feishu_task_event_id: 'evt_123',
-    feishu_task_event_types: 'task_create',
-    feishu_event_kind: 'task_create',
-    feishu_task_has_children: 'true',
   })
   assert.equal(context.required_skill, undefined)
   assert.equal(context.skill_source, undefined)
@@ -93,7 +86,11 @@ test('buildFeishuTaskDispatchContext records task routing without skill-runtime 
 test('buildFeishuTaskContext includes only task, child, comment, and event facts', () => {
   const context = buildFeishuTaskContext(event, task, 'task_create')
 
-  assert.match(context, /^Feishu Task:/)
+  assert.match(context, /^Critical final-response protocol:\n/)
+  assert.match(context, /^Critical final-response protocol:[\s\S]*\n\nExecution Ownership Contract:[\s\S]*\n\nFeishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create\n\nFeishu Task:/)
+  assert.ok(context.indexOf('Critical final-response protocol:') < context.indexOf('Execution Ownership Contract:'))
+  assert.ok(context.indexOf('Execution Ownership Contract:') < context.indexOf('Feishu Event:'))
+  assert.ok(context.indexOf('Feishu Event:') < context.indexOf('Feishu Task:'))
   assert.match(context, /task_guid_123/)
   assert.match(context, /child_1/)
   assert.match(context, /需求确认/)
@@ -101,24 +98,33 @@ test('buildFeishuTaskContext includes only task, child, comment, and event facts
   assert.match(context, /Latest effective comment:/)
   assert.match(context, /normalized_kind: task_create/)
   assert.match(context, /raw_event_types: task_create/)
+  assert.doesNotMatch(context, /^\- task_id:/m)
+  assert.doesNotMatch(context, /^\- status:/m)
+  assert.doesNotMatch(context, /^\- parent_guid:/m)
+  assert.doesNotMatch(context, /^\- url:/m)
+  assert.doesNotMatch(context, /Task attachments:/)
+  assert.doesNotMatch(context, /Task delivery attachments:/)
+  assert.doesNotMatch(context, /Child task attachments:/)
+  assert.doesNotMatch(context, /\(none/)
   assert.doesNotMatch(context, /Intent Rules/i)
   assert.doesNotMatch(context, /Feishu Write Contract/i)
   assert.doesNotMatch(context, /Outcome Rules/i)
   assert.doesNotMatch(context, /Deliverable Rules/i)
-  assert.doesNotMatch(context, /Final Result Contract/i)
+  assert.doesNotMatch(context, /Final Result Contract:\n/i)
+  assert.doesNotMatch(context, /Context Compression Contract/i)
   assert.doesNotMatch(context, /existing Feishu task delegation/i)
   assert.doesNotMatch(context, /not an ACP direct-answer shortcut/i)
   assert.doesNotMatch(context, /lark-cli/i)
   assert.doesNotMatch(context, /FEISHU_TASK_RESULT_JSON:/)
   assert.doesNotMatch(context, /AAMP_RESULT_JSON:/)
-  assert.doesNotMatch(context, /status=answered/)
+  assert.match(context, /status=succeeded or status=answered inside FEISHU_TASK_RESULT_JSON/)
   assert.doesNotMatch(context, /deliverable_written/)
   assert.doesNotMatch(context, /required_skill/i)
   assert.doesNotMatch(context, /aily-feishu-task-agent/i)
   assert.doesNotMatch(context, /runtime next_action_specs/i)
 })
 
-test('buildFeishuTaskContext includes source message context and only document links', () => {
+test('buildFeishuTaskContext includes only source message content for source context', () => {
   const context = buildFeishuTaskContext(event, {
     ...task,
     origin: {
@@ -141,15 +147,14 @@ test('buildFeishuTaskContext includes source message context and only document l
   }, 'task_create')
 
   assert.match(context, /Task source context:/)
-  assert.match(context, /resource_id=refer_resource_1/)
-  assert.match(context, /message_id=om_message_1/)
   assert.match(context, /复选消息 1：请参考文档/)
-  assert.match(context, /Detected source document links:/)
   assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/docx\/DOCX123/)
   assert.match(context, /https:\/\/example\.feishu\.cn\/docs\/DOCS456/)
   assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/wiki\/WIKI789/)
-  const detectedLinksSection = context.slice(context.indexOf('Detected source document links:'), context.indexOf('Task attachments:'))
-  assert.doesNotMatch(detectedLinksSection, /https:\/\/bytedance\.larkoffice\.com\/sheets\/SHEET123/)
+  assert.match(context, /https:\/\/bytedance\.larkoffice\.com\/sheets\/SHEET123/)
+  assert.doesNotMatch(context, /resource_id=/)
+  assert.doesNotMatch(context, /message_id=/)
+  assert.doesNotMatch(context, /Detected source document links:/)
 })
 
 test('buildFeishuTaskContext uses user or non-current app comments as effective comments', () => {
@@ -194,7 +199,8 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.match(rules, /Final Result Contract:/)
   assert.match(rules, /Context Compression Contract:/)
   assert.match(rules, /^Context Compression Contract:/)
-  assert.match(rules, /before continuing\.\n\nFeishu Task Rules:\n- Treat the Description section/)
+  assert.ok(rules.indexOf('Context Compression Contract:') < rules.indexOf('Feishu Task Rules:'))
+  assert.doesNotMatch(rules, /Execution Ownership Contract:/)
   assert.doesNotMatch(rules, /Context Retention Contract:/)
   assert.doesNotMatch(rules, /Feishu Task Rules:\n\nContext Compression Contract:/)
   assert.doesNotMatch(rules, /Feishu Task Rules:\nContext Compression Contract:/)
@@ -279,6 +285,10 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.match(rules, /latest effective comment/i)
   assert.match(rules, /source context/i)
   assert.match(rules, /Source Document Rules:/)
+  assert.match(rules, /source documents read via lark-cli from source document links in Task source context/i)
+  assert.match(rules, /Source document links in Task source context are task input/i)
+  assert.match(rules, /source document link from Task source context/i)
+  assert.doesNotMatch(rules, /detected source document links/i)
   assert.match(rules, /lark-cli docs --help/i)
   assert.match(rules, /lark-cli skills read lark-doc/i)
   assert.match(rules, /cannot be accessed after a concrete lark-cli attempt/i)
@@ -286,6 +296,7 @@ test('buildFeishuTaskPromptRules includes complete handling and result rules', (
   assert.equal(countOccurrences(rules, /Newline Rules:/g), 1)
   assert.equal(countOccurrences(rules, /Source Document Rules:/g), 1)
   assert.equal(countOccurrences(rules, /Context Compression Contract:/g), 1)
+  assert.equal(countOccurrences(rules, /Execution Ownership Contract:/g), 0)
   assert.equal(countOccurrences(rules, /Final Result Contract:/g), 1)
   assert.doesNotMatch(rules, /latest effective human comment/i)
   assert.doesNotMatch(rules, /task_guid_123/)
@@ -393,8 +404,9 @@ test('buildFeishuTaskPromptRules override ACP generic task rules', () => {
 test('buildFeishuTaskDispatchContext maps comment events without skill intent fields', () => {
   const context = buildFeishuTaskDispatchContext(commentEvent, task, 'task_comment')
 
-  assert.equal(context.feishu_event_kind, 'task_comment')
-  assert.equal(context.feishu_task_event_types, 'task_comment_create')
+  assert.deepEqual(context, { source: 'feishu-task' })
+  assert.equal(context.feishu_event_kind, undefined)
+  assert.equal(context.feishu_task_event_types, undefined)
   assert.equal(context.skill_intent_type, undefined)
   assert.doesNotMatch(JSON.stringify(context), /aily/i)
 })
@@ -402,9 +414,10 @@ test('buildFeishuTaskDispatchContext maps comment events without skill intent fi
 test('buildFeishuTaskDispatchContext maps reminder fire events', () => {
   const context = buildFeishuTaskDispatchContext(reminderFireEvent, task, 'task_reminder_fire')
 
-  assert.equal(context.feishu_event_kind, 'task_reminder_fire')
-  assert.equal(context.feishu_task_event_types, 'task_reminder_fire')
-  assert.equal(context.feishu_task_guid, 'task_guid_123')
+  assert.deepEqual(context, { source: 'feishu-task' })
+  assert.equal(context.feishu_event_kind, undefined)
+  assert.equal(context.feishu_task_event_types, undefined)
+  assert.equal(context.feishu_task_guid, undefined)
 })
 
 test('buildFeishuTaskDispatch returns stable title, session key, context, and prompt', () => {
@@ -414,11 +427,14 @@ test('buildFeishuTaskDispatch returns stable title, session key, context, and pr
   assert.equal(dispatch.sessionKey, 'feishu-task:task_guid_123')
   assert.equal(dispatch.title, 'Feishu Task: 整理上线方案')
   assert.equal(dispatch.bodyText, buildFeishuTaskContext(event, task, 'task_create'))
-  assert.equal(dispatch.dispatchContext.feishu_task_guid, 'task_guid_123')
+  assert.equal(dispatch.dispatchContext.source, 'feishu-task')
+  assert.equal(dispatch.dispatchContext.feishu_task_guid, undefined)
   assert.equal(dispatch.dispatchContext.required_skill, undefined)
   assert.equal(dispatch.dispatchContext.skill_intent_type, undefined)
   assert.equal(dispatch.dispatchContext.skill_trigger_type, undefined)
   assert.equal(dispatch.promptRules, buildFeishuTaskPromptRules())
+  assert.match(dispatch.bodyText, /Feishu Event:\n- normalized_kind: task_create\n- raw_event_types: task_create/)
+  assert.match(dispatch.bodyText, /Feishu Task:\n- guid: task_guid_123/)
   assert.doesNotMatch(dispatch.bodyText, /aily/i)
 })
 

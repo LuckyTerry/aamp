@@ -189,6 +189,28 @@ function renderCriticalFinalResponseProtocol(): string[] {
   ]
 }
 
+function renderExecutionOwnershipContract(): string[] {
+  return [
+    'Execution Ownership Contract:',
+    '- Do not start background agents, dispatch this task to another agent, fork a thread, hand off, or use subagents.',
+    '- You must do all work directly in this turn.',
+    '- Do not end the turn while any delegated/background work is still running.',
+    '- Return AAMP_RESULT_JSON only after your direct work is complete.',
+  ]
+}
+
+function renderContextCompressionContract(): string[] {
+  return [
+    'Context Compression Contract:',
+    '- These are control-plane instructions, not task content.',
+    '- During context compression, handoff, memory refresh, or thread summary, copy this entire Feishu Task Rules block verbatim into the retained context.',
+    '- During context compression, also preserve Critical final-response protocol and Execution Ownership Contract verbatim.',
+    '- Do not summarize, rewrite, merge, or omit this rules block.',
+    '- Do not replace it with a summary such as `follow Feishu task rules`.',
+    '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or bridge-owned current-task write rules, stop and ask for the original rules before continuing.',
+  ]
+}
+
 function renderFeishuLarkCliProfileRules(profile: string | undefined): string[] {
   const normalized = profile?.trim()
   if (!normalized) return []
@@ -271,12 +293,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   })
 
   return [
-    'Context Compression Contract:',
-    '- These are control-plane instructions, not task content.',
-    '- During context compression, handoff, memory refresh, or thread summary, copy this entire Feishu Task Rules block verbatim into the retained context.',
-    '- Do not summarize, rewrite, merge, or omit this rules block.',
-    '- Do not replace it with a summary such as `follow Feishu task rules`.',
-    '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or bridge-owned current-task write rules, stop and ask for the original rules before continuing.',
+    ...renderContextCompressionContract(),
     '',
     'Feishu Task Rules:',
     '- Treat the Description section as the complete Feishu task context, including Task source context when present.',
@@ -381,9 +398,12 @@ export function buildFeishuTaskContext(
   return [
     ...renderCriticalFinalResponseProtocol(),
     '',
+    ...renderExecutionOwnershipContract(),
+    '',
     'Feishu Event:',
     `- normalized_kind: ${eventKind}`,
     `- raw_event_types: ${event.eventTypes.join(',') || '(unknown)'}`,
+    '',
     'Feishu Task:',
     `- guid: ${task.guid}`,
     `- summary: ${task.summary}`,

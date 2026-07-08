@@ -4,15 +4,13 @@ const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
 type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
-type FeishuTaskOriginReferResource = NonNullable<NonNullable<FeishuTaskDetails['origin']>['referResources']>[number]
-const FEISHU_DOCUMENT_HOST_SUFFIXES = ['larkoffice.com', 'feishu.cn', 'larksuite.com']
-const FEISHU_DOCUMENT_PATH_PREFIXES = ['/docx', '/docs', '/wiki']
 
 export interface FeishuTaskDispatchOptions {
   feishuAppId?: string
   feishuBoe?: boolean
   feishuEnvMode?: 'boe' | 'pre' | 'ppe'
   feishuEnv?: string
+  feishuLarkCliProfile?: string
 }
 
 function stableIdPart(value: string): string {
@@ -25,19 +23,12 @@ function nonEmpty(value: string | undefined): string | undefined {
 }
 
 export function buildFeishuTaskDispatchContext(
-  event: FeishuTaskEvent,
-  task: FeishuTaskDetails,
-  eventKind: FeishuTaskEventKind,
+  _event: FeishuTaskEvent,
+  _task: FeishuTaskDetails,
+  _eventKind: FeishuTaskEventKind,
 ): Record<string, string> {
   return {
     source: DISPATCH_SOURCE,
-    feishu_task_guid: task.guid,
-    ...(task.taskId ? { feishu_task_id: task.taskId } : {}),
-    ...(task.status ? { feishu_task_status: task.status } : {}),
-    feishu_task_event_id: event.eventId,
-    feishu_task_event_types: event.eventTypes.join(','),
-    feishu_event_kind: eventKind,
-    feishu_task_has_children: String(Boolean(task.subtasks?.length)),
   }
 }
 
@@ -56,7 +47,7 @@ function isEffectiveComment(comment: FeishuTaskComment, appId: string | undefine
 }
 
 function renderSubtasks(task: FeishuTaskDetails): string[] {
-  if (!task.subtasks?.length) return ['- (none)']
+  if (!task.subtasks?.length) return []
   return task.subtasks.map((subtask, index) => {
     const parts = [
       `${index + 1}. ${subtask.summary || '(untitled)'}`,
@@ -70,7 +61,7 @@ function renderSubtasks(task: FeishuTaskDetails): string[] {
 }
 
 function renderComments(task: FeishuTaskDetails): string[] {
-  if (!task.comments?.length) return ['- (none loaded)']
+  if (!task.comments?.length) return []
   return task.comments.map((comment, index) => {
     const parts = [
       `${index + 1}. ${comment.content.trim() || '(empty comment)'}`,
@@ -82,78 +73,15 @@ function renderComments(task: FeishuTaskDetails): string[] {
   })
 }
 
-function trimUrlCandidate(value: string): string {
-  return value.replace(/[),.;:!?，。）、；：！？\]}]+$/u, '')
-}
-
-function isAllowedFeishuDocumentHost(hostname: string): boolean {
-  const normalized = hostname.toLowerCase()
-  return FEISHU_DOCUMENT_HOST_SUFFIXES.some((suffix) => (
-    normalized === suffix || normalized.endsWith(`.${suffix}`)
-  ))
-}
-
-function isFeishuDocumentPath(pathname: string): boolean {
-  const normalized = pathname.toLowerCase()
-  return FEISHU_DOCUMENT_PATH_PREFIXES.some((prefix) => (
-    normalized === prefix || normalized.startsWith(`${prefix}/`)
-  ))
-}
-
-function extractFeishuDocumentLinks(text: string): string[] {
-  const links: string[] = []
-  const seen = new Set<string>()
-  const matches = text.matchAll(/https?:\/\/[^\s<>"'`]+/gi)
-  for (const match of matches) {
-    const candidate = trimUrlCandidate(match[0])
-    let parsed: URL
-    try {
-      parsed = new URL(candidate)
-    } catch {
-      continue
-    }
-    if (!isAllowedFeishuDocumentHost(parsed.hostname)) continue
-    if (!isFeishuDocumentPath(parsed.pathname)) continue
-    const key = `${parsed.protocol}//${parsed.hostname.toLowerCase()}${parsed.pathname}${parsed.search}${parsed.hash}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    links.push(candidate)
-  }
-  return links
-}
-
-function renderSourceResource(resource: FeishuTaskOriginReferResource, index: number): string[] {
-  const parts = [
-    ...(resource.resourceId ? [`resource_id=${resource.resourceId}`] : []),
-    ...(resource.type ? [`type=${resource.type}`] : []),
-    ...(resource.sourceMessage?.messageId ? [`message_id=${resource.sourceMessage.messageId}`] : []),
-    ...(resource.unavailableReason ? [`unavailable_reason=${resource.unavailableReason}`] : []),
-  ]
-  const lines = [`- ${index + 1}. ${parts.join(' | ') || '(source resource)'}`]
-  const content = nonEmpty(resource.sourceMessage?.content)
-  if (content) {
-    lines.push('  content:')
-    lines.push(...content.split(/\r?\n/).map((line) => `    ${line}`))
-  }
-  return lines
-}
-
 function renderSourceContext(task: FeishuTaskDetails): string[] {
-  const resources = task.origin?.referResources ?? []
-  if (resources.length === 0) return []
-  const sourceText = resources
-    .map((resource) => resource.sourceMessage?.content ?? '')
-    .join('\n')
-  const documentLinks = extractFeishuDocumentLinks(sourceText)
+  const sourceLines = (task.origin?.referResources ?? [])
+    .map((resource) => nonEmpty(resource.sourceMessage?.content))
+    .filter((content): content is string => Boolean(content))
+    .flatMap((content) => content.split(/\r?\n/))
+  if (sourceLines.length === 0) return []
   return [
     'Task source context:',
-    ...resources.flatMap(renderSourceResource),
-    ...(documentLinks.length
-      ? [
-          'Detected source document links:',
-          ...documentLinks.map((link) => `- ${link}`),
-        ]
-      : []),
+    ...sourceLines,
   ]
 }
 
@@ -171,7 +99,7 @@ function renderAttachment(attachment: FeishuTaskAttachment, index: number, sourc
 }
 
 function renderAttachments(attachments: FeishuTaskAttachment[] | undefined): string[] {
-  if (!attachments?.length) return ['- (none)']
+  if (!attachments?.length) return []
   return attachments.map((attachment, index) => renderAttachment(attachment, index))
 }
 
@@ -185,7 +113,7 @@ function renderChildAttachments(task: FeishuTaskDetails): string[] {
       lines.push(renderAttachment(attachment, lines.length, `child:${subtask.guid}`))
     }
   }
-  return lines.length ? lines : ['- (none)']
+  return lines
 }
 
 function getLatestEffectiveComment(task: FeishuTaskDetails, appId: string | undefined): string | undefined {
@@ -242,11 +170,59 @@ function renderNewlineGuidance(): string[] {
 
 function renderSourceDocumentGuidance(): string[] {
   return [
-    '- Source document links detected in Task source context are task input, not deliverables.',
-    '- Before relying on a detected source document link, read it with lark-cli.',
+    '- Source document links in Task source context are task input, not deliverables.',
+    '- Before relying on a source document link from Task source context, read it with lark-cli.',
     '- First run `lark-cli docs --help`, then run `lark-cli skills read lark-doc`, then use the lark-doc workflow to read or export the document content from the URL.',
     '- Do not ask the user to paste document content before trying lark-cli.',
     '- If a required source document cannot be accessed after a concrete lark-cli attempt, use status=need_help and identify the inaccessible URL.',
+  ]
+}
+
+function renderExecutionOwnershipContract(): string[] {
+  return [
+    'Execution Ownership Contract:',
+    '- Do not start background agents, dispatch this task to another agent, fork a thread, hand off, or use subagents.',
+    '- You must do all work directly in this turn.',
+    '- Do not end the turn while any delegated/background work is still running.',
+    '- Return AAMP_RESULT_JSON only after your direct work is complete.',
+  ]
+}
+
+function renderCriticalFinalResponseProtocol(): string[] {
+  return [
+    'Critical final-response protocol:',
+    '- Do not violate the Final Result Contract.',
+    '- Your final answer MUST be a single AAMP_RESULT_JSON block.',
+    '- Never end with plain natural language, Markdown, or a question outside AAMP_RESULT_JSON.',
+    '- If you need the user to choose, confirm, or provide more information, return status=need_help inside FEISHU_TASK_RESULT_JSON.',
+    '- If you completed work, return status=succeeded or status=answered inside FEISHU_TASK_RESULT_JSON; do not write a normal final reply.',
+  ]
+}
+
+function renderContextCompressionContract(): string[] {
+  return [
+    'Context Compression Contract:',
+    '- These are control-plane instructions, not task content.',
+    '- During context compression, handoff, memory refresh, or thread summary, copy this entire Feishu Task Rules block verbatim into the retained context.',
+    '- During context compression, also preserve Critical final-response protocol and Execution Ownership Contract verbatim.',
+    '- Do not summarize, rewrite, merge, or omit this rules block.',
+    '- Do not replace it with a summary such as `follow Feishu task rules`.',
+    '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or bridge-owned current-task write rules, stop and ask for the original rules before continuing.',
+  ]
+}
+
+function renderFeishuLarkCliProfileRules(profile: string | undefined): string[] {
+  const normalized = profile?.trim()
+  if (!normalized) return []
+  return [
+    'Feishu lark-cli profile rules:',
+    `- This task came through a Feishu bot bound to lark-cli profile \`${normalized}\`.`,
+    `- Whenever you run any lark-cli command for this task, you MUST use the prefix \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized}\` followed by the lark-cli subcommand and arguments.`,
+    `- For example, check auth status with \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized} auth status --json\`.`,
+    '- The unset/env prefix prevents Codem exported shell functions from affecting lark-cli credential resolution.',
+    '- Do not use the active/default lark-cli profile for this task.',
+    `- If you ask the user to authorize or rerun a lark-cli command, include the same unset/env prefix and \`--profile ${normalized}\` in the exact command.`,
+    '',
   ]
 }
 
@@ -317,23 +293,19 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   })
 
   return [
-    'Context Compression Contract:',
-    '- These are control-plane instructions, not task content.',
-    '- During context compression, handoff, memory refresh, or thread summary, copy this entire Feishu Task Rules block verbatim into the retained context.',
-    '- Do not summarize, rewrite, merge, or omit this rules block.',
-    '- Do not replace it with a summary such as `follow Feishu task rules`.',
-    '- If a resumed context lacks Final Result Contract, Feishu Write Contract, or bridge-owned current-task write rules, stop and ask for the original rules before continuing.',
+    ...renderContextCompressionContract(),
     '',
     'Feishu Task Rules:',
     '- Treat the Description section as the complete Feishu task context, including Task source context when present.',
     '- Use normalized_kind as the scenario to execute; raw_event_types are reference metadata only.',
     '- This is an existing Feishu task delegation assigned to the app, not a plain chat message and not an ACP direct-answer shortcut.',
-    '- Infer intent only from the Feishu task summary, description, Task source context, source documents read via lark-cli from detected source document links, child tasks, comments, latest effective comment, and event metadata in the Description section.',
+    '- Infer intent only from the Feishu task summary, description, Task source context, source documents read via lark-cli from source document links in Task source context, child tasks, comments, latest effective comment, and event metadata in the Description section.',
     '- Do not reconstruct missing intent from unrelated local files, account state, mailbox, credentials, or remote services.',
     '',
     'Feishu/Lark Authorization Rules:',
+    ...renderFeishuLarkCliProfileRules(options?.feishuLarkCliProfile),
     '- Before using Feishu/Lark APIs or lark-cli capabilities, inspect the current granted user scopes for the provided lark-cli profile and treat those granted scopes as the hard capability boundary.',
-    '- If a lark-cli profile is provided in Dispatch Context, run lark-cli commands with that profile and check its auth status before choosing Feishu/Lark data sources.',
+    '- If a lark-cli profile is provided by the bridge, run lark-cli commands with that profile and check its auth status before choosing Feishu/Lark data sources.',
     '- Do not run lark-cli auth login, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.',
     '- Complete the task using only currently granted scopes and available task context. If a preferred Feishu/Lark source is unavailable, try another already-authorized source or produce the best result possible within the granted scopes.',
     '- If the task truly cannot be completed within the currently granted scopes, use status=need_help only for missing business input, identifiers, documents, groups, or data locations; do not include authorization commands or scope requests.',
@@ -416,37 +388,33 @@ export function buildFeishuTaskContext(
   options?: Pick<FeishuTaskDispatchOptions, 'feishuAppId'>,
 ): string {
   const description = nonEmpty(task.description) ?? EMPTY_DESCRIPTION
-  const taskUrl = nonEmpty(task.url)
-  const taskStatus = nonEmpty(task.status)
   const latestComment = getLatestEffectiveComment(task, options?.feishuAppId)
+  const taskAttachments = renderAttachments(task.attachments)
+  const taskDeliveryAttachments = renderAttachments(task.attachmentDeliveries)
+  const childTasks = renderSubtasks(task)
+  const childTaskAttachments = renderChildAttachments(task)
+  const comments = renderComments(task)
 
   return [
-    'Feishu Task:',
-    `- guid: ${task.guid}`,
-    ...(task.taskId ? [`- task_id: ${task.taskId}`] : []),
-    `- summary: ${task.summary}`,
-    `- description: ${description}`,
-    ...(taskStatus ? [`- status: ${taskStatus}`] : []),
-    ...(task.parentGuid ? [`- parent_guid: ${task.parentGuid}`] : []),
-    ...(taskUrl ? [`- url: ${taskUrl}`] : []),
-    ...renderSourceContext(task),
-    'Task attachments:',
-    ...renderAttachments(task.attachments),
-    'Task delivery attachments:',
-    ...renderAttachments(task.attachmentDeliveries),
-    'Child tasks:',
-    ...renderSubtasks(task),
-    'Child task attachments:',
-    ...renderChildAttachments(task),
-    'Comments:',
-    ...renderComments(task),
-    ...(latestComment ? [`- Latest effective comment: ${latestComment}`] : []),
-    'Event:',
+    ...renderCriticalFinalResponseProtocol(),
+    '',
+    ...renderExecutionOwnershipContract(),
+    '',
+    'Feishu Event:',
     `- normalized_kind: ${eventKind}`,
     `- raw_event_types: ${event.eventTypes.join(',') || '(unknown)'}`,
-    `- event_id: ${event.eventId}`,
-    `- task_guid: ${event.taskGuid}`,
-    ...(event.timestamp ? [`- timestamp: ${event.timestamp}`] : []),
+    '',
+    'Feishu Task:',
+    `- guid: ${task.guid}`,
+    `- summary: ${task.summary}`,
+    `- description: ${description}`,
+    ...renderSourceContext(task),
+    ...(taskAttachments.length ? ['Task attachments:', ...taskAttachments] : []),
+    ...(taskDeliveryAttachments.length ? ['Task delivery attachments:', ...taskDeliveryAttachments] : []),
+    ...(childTasks.length ? ['Child tasks:', ...childTasks] : []),
+    ...(childTaskAttachments.length ? ['Child task attachments:', ...childTaskAttachments] : []),
+    ...(comments.length ? ['Comments:', ...comments] : []),
+    ...(latestComment ? [`- Latest effective comment: ${latestComment}`] : []),
   ].join('\n')
 }
 
