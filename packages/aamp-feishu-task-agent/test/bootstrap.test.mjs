@@ -57,6 +57,16 @@ test('bootstrap manifest includes full app and bridge identity', () => {
   assert.doesNotMatch(source, /"agent_bridge_log":/)
 })
 
+test('bootstrap keeps lark-cli and prompt flows online for pre runtime', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+
+  assert.match(source, /pre selected; lark-cli\/prompt use https:\/\/open\.feishu\.cn/)
+  assert.match(source, /FEISHU_ENV_ARGS=\(--pre\)/)
+  assert.doesNotMatch(source, /open\.feishu-pre\.cn/)
+  assert.doesNotMatch(source, /accounts\.feishu-pre\.cn/)
+  assert.doesNotMatch(source, /retrying pre env setup/)
+})
+
 test('bootstrap extracts bridge emails', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const start = source.indexOf('extract_email_from_pairing_url()')

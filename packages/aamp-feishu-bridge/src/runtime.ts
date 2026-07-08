@@ -102,6 +102,8 @@ interface MarkdownElementContent {
 
 const RECEIVED_REACTION_CANDIDATES = ['Get']
 const TYPING_REACTION_CANDIDATES = ['Typing']
+const FEISHU_OPEN_DOMAIN = 'https://open.feishu.cn'
+const FEISHU_PRE_DOMAIN = 'https://open.feishu-pre.cn'
 const CARD_STREAM_PRINT_FREQUENCY_MS = {
   default: 30,
   android: 30,
@@ -119,6 +121,24 @@ function isTerminalTaskStatus(status: BridgeTaskState['status']): boolean {
   return status === 'completed'
     || status === 'rejected'
     || status === 'failed'
+}
+
+function normalizeFeishuOpenDomain(domain: string | undefined): string | undefined {
+  const normalized = domain?.trim().replace(/\/+$/, '')
+  return normalized || undefined
+}
+
+export function resolveFeishuWebsocketDomain(domain: string | undefined): string | undefined {
+  return normalizeFeishuOpenDomain(domain) === FEISHU_PRE_DOMAIN ? FEISHU_OPEN_DOMAIN : domain
+}
+
+function overrideLarkChannelWebsocketDomain(channel: LarkChannel, websocketDomain: string): void {
+  const internalChannel = channel as unknown as { opts?: { domain?: string } }
+  if (!internalChannel.opts) {
+    throw new Error('Unable to override Feishu websocket domain; unsupported @larksuiteoapi/node-sdk LarkChannel internals.')
+  }
+  // The SDK uses rawClient for HTTP and opts.domain when constructing WSClient.
+  internalChannel.opts.domain = websocketDomain
 }
 
 export class FeishuBridgeRuntime {
@@ -144,13 +164,14 @@ export class FeishuBridgeRuntime {
       smtpPassword: config.mailbox.smtpPassword,
       baseUrl: config.mailbox.baseUrl,
     })
-    this.channel = (config.feishu.authMode ?? 'app-secret') === 'lark-cli'
-      ? new LarkCliChannel({
+    if ((config.feishu.authMode ?? 'app-secret') === 'lark-cli') {
+      this.channel = new LarkCliChannel({
         cliBin: config.feishu.cliBin ?? 'lark-cli',
         profile: config.feishu.cliProfile ?? config.slug,
         logger: this.logger,
       })
-      : createLarkChannel({
+    } else {
+      const channel = createLarkChannel({
         appId: config.feishu.appId,
         appSecret: config.feishu.appSecret ?? '',
         transport: 'websocket',
@@ -163,6 +184,12 @@ export class FeishuBridgeRuntime {
           streamThrottleChars: config.behavior.streamThrottleChars,
         },
       })
+      const websocketDomain = resolveFeishuWebsocketDomain(config.feishu.domain)
+      if (websocketDomain && websocketDomain !== config.feishu.domain) {
+        overrideLarkChannelWebsocketDomain(channel, websocketDomain)
+      }
+      this.channel = channel
+    }
   }
 
   async start(): Promise<void> {

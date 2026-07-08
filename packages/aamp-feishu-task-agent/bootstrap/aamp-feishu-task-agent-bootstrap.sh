@@ -1043,9 +1043,7 @@ build_rules() {
   case "$mode" in
     pre)
       cat <<'RULES'
-/^https:\/\/open\.feishu\.cn\/(.*)$/ https://open.feishu-pre.cn/$1
-https://open.feishu.cn/ reqHeaders://Env=Pre_release
-/^https:\/\/accounts\.feishu\.cn\/(.*)$/ https://accounts.feishu-pre.cn/$1
+# pre runtime keeps lark-cli and prompt flows on feishu.cn.
 RULES
       ;;
     boe)
@@ -1073,16 +1071,11 @@ apply_proxy_env() {
 
   case "$mode" in
     pre)
-      export HTTPS_PROXY="http://127.0.0.1:8899"
-      export https_proxy="$HTTPS_PROXY"
-      export HTTP_PROXY="$HTTPS_PROXY"
-      export http_proxy="$HTTPS_PROXY"
-      export ALL_PROXY="$HTTPS_PROXY"
-      export all_proxy="$HTTPS_PROXY"
+      unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
       mkdir -p "$AAMP_LARK_CLI_CONFIG_DIR"
       export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
       unset LARK_CLI_NO_PROXY
-      log "pre enabled, proxy=$HTTPS_PROXY, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
+      log "pre selected; lark-cli/prompt use https://open.feishu.cn, proxy env cleared, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
       ;;
     boe)
       export HTTPS_PROXY="http://127.0.0.1:8899"
@@ -1134,7 +1127,11 @@ main() {
       apply_proxy_env "online"
       return 0
       ;;
-    pre|boe)
+    pre)
+      apply_proxy_env "pre"
+      return 0
+      ;;
+    boe)
       ;;
     *)
       fail "mode must be online, pre, boe, or off"
@@ -1190,11 +1187,7 @@ source_lark_env() {
       ;;
     pre)
       # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1 || {
-        agent_log "Whistle is not ready; installing whistle and retrying pre env setup"
-        npm_install_global whistle
-        source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1
-      }
+      source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1
       ;;
     boe)
       # shellcheck disable=SC1090
