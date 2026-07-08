@@ -13,6 +13,10 @@ DEBUG_MODE="false"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
+AAMP_LOG_DIR="${AAMP_LOG_DIR:-$HOME/.aamp/logs}"
+AAMP_BIN_DIR="${AAMP_BIN_DIR:-$HOME/.aamp/bin}"
+AAMP_TAIL_BRIDGE_LOGS="${AAMP_TAIL_BRIDGE_LOGS:-false}"
+AAMP_ONE_CLICK_VERBOSE="${AAMP_ONE_CLICK_VERBOSE:-false}"
 BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/task-profiles-v2.json}"
 CURRENT_RUN_FILE="${CURRENT_RUN_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/current.json}"
 ACTIVE_RUNS_FILE="${ACTIVE_RUNS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/active.json}"
@@ -39,6 +43,7 @@ FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.11}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.42}"
+AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.125}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -66,6 +71,11 @@ NPM_BIN=""
 NPX_BIN=""
 CURSOR_LOCAL_BIN="$HOME/.local/bin"
 CODEM_LOCAL_BIN="$HOME/.codem/bin"
+AAMP_RUN_LOG_DIR=""
+AAMP_RUN_ID=""
+ONE_CLICK_LOG=""
+ERRORS_LOG=""
+AAMP_LOGS_BIN="$AAMP_BIN_DIR/aamp-logs"
 
 sanitize_inherited_npm_exec_env() {
   local key lower
@@ -94,13 +104,141 @@ Options:
 USAGE
 }
 
+write_one_click_log() {
+  local line="$1"
+  if [ -n "$ONE_CLICK_LOG" ]; then
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >>"$ONE_CLICK_LOG" 2>/dev/null || true
+  fi
+}
+
 agent_log() {
-  printf '[aamp-one-click] %s\n' "$*"
+  local line
+  line="[aamp-one-click] $*"
+  printf '%s\n' "$line"
+  write_one_click_log "$line"
+}
+
+agent_detail() {
+  local line
+  line="[aamp-one-click] $*"
+  write_one_click_log "$line"
+  if [ "$AAMP_ONE_CLICK_VERBOSE" = "true" ]; then
+    printf '%s\n' "$line"
+  fi
+}
+
+agent_success() {
+  printf '\n🟢 %s 已接入飞书任务，可以开始对话 & 派发任务。\n' "$AGENT"
+  if [ -n "$BOT_NAME" ]; then
+    printf '   飞书 Bot：%s\n' "$BOT_NAME"
+  fi
+  printf '   保持此终端打开；按 Ctrl+C 停止本地连接。\n'
+  printf '   运行日志：%s\n' "$AAMP_RUN_LOG_DIR"
+  printf '   排障打包：%s collect --latest\n\n' "$AAMP_LOGS_BIN"
+  write_one_click_log "[aamp-one-click] SUCCESS: $AGENT connected to Feishu tasks"
 }
 
 agent_fail() {
-  printf '[aamp-one-click] ERROR: %s\n' "$*" >&2
+  local line
+  line="[aamp-one-click] ERROR: $*"
+  printf '%s\n' "$line" >&2
+  write_one_click_log "$line"
+  if [ -n "$ERRORS_LOG" ]; then
+    printf '{"timestamp":"%s","level":"error","component":"one-click","message":"%s"}\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+      "$(json_escape "$*")" >>"$ERRORS_LOG" 2>/dev/null || true
+  fi
+  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
+    printf '[aamp-one-click] Logs saved at: %s\n' "$AAMP_RUN_LOG_DIR" >&2
+    printf '[aamp-one-click] To package logs for troubleshooting:\n' >&2
+    printf '[aamp-one-click]   %s collect --latest\n' "$AAMP_LOGS_BIN" >&2
+  fi
   exit 1
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
+write_run_manifest() {
+  [ -n "$AAMP_RUN_LOG_DIR" ] || return 0
+  local app_prefix=""
+  if [ -n "$APP_ID" ]; then
+    app_prefix="${APP_ID:0:12}"
+  fi
+  cat >"$AAMP_RUN_LOG_DIR/manifest.json" <<EOF
+{
+  "schema": "aamp.local_logs.run.v1",
+  "run_id": "$(json_escape "$AAMP_RUN_ID")",
+  "started_at": "$(date '+%Y-%m-%dT%H:%M:%S%z')",
+  "agent": "$(json_escape "$AGENT")",
+  "env": "$(json_escape "$ENV_NAME")",
+  "aamp_host": "$(json_escape "$AAMP_HOST")",
+  "app_id_prefix": "$(json_escape "$app_prefix")",
+  "log_dir": "$(json_escape "$AAMP_RUN_LOG_DIR")",
+  "errors_log": "$(json_escape "$ERRORS_LOG")"
+}
+EOF
+}
+
+init_log_run() {
+  mkdir -p "$AAMP_LOG_DIR/runs" "$AAMP_LOG_DIR/archives" "$AAMP_BIN_DIR"
+  AAMP_RUN_ID="$(date '+%Y%m%dT%H%M%S')-$$"
+  AAMP_RUN_LOG_DIR="$AAMP_LOG_DIR/runs/$AAMP_RUN_ID"
+  ONE_CLICK_LOG="$AAMP_RUN_LOG_DIR/one-click.log"
+  ERRORS_LOG="$AAMP_RUN_LOG_DIR/errors.jsonl"
+  mkdir -p "$AAMP_RUN_LOG_DIR"
+  : >"$ONE_CLICK_LOG"
+  : >"$ERRORS_LOG"
+  ln -sfn "$AAMP_RUN_LOG_DIR" "$AAMP_LOG_DIR/latest" 2>/dev/null || true
+  export AAMP_LOG_DIR
+  write_run_manifest
+  agent_detail "logs directory: $AAMP_RUN_LOG_DIR"
+}
+
+run_log_file() {
+  local filename="$1"
+  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
+    printf '%s\n' "$AAMP_RUN_LOG_DIR/$filename"
+  else
+    mktemp "${TMPDIR:-/tmp}/${filename}.XXXXXX"
+  fi
+}
+
+install_aamp_logs_bin() {
+  [ -n "$NPM_BIN" ] || return 0
+  mkdir -p "$AAMP_BIN_DIR"
+
+  local script_dir source_bin
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || true)"
+  source_bin=""
+  if [ -n "$script_dir" ] && [ -x "$script_dir/../bin/aamp-logs.mjs" ]; then
+    source_bin="$script_dir/../bin/aamp-logs.mjs"
+  elif [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ]; then
+    source_bin="$NPM_GLOBAL_PREFIX/bin/aamp-logs"
+  else
+    agent_detail "installing aamp-logs command into one-click npm prefix"
+    npm_install_global "$AAMP_TASK_AGENT_PKG" >/dev/null 2>&1 || {
+      agent_log "warning: failed to install aamp-logs command; logs still saved at $AAMP_RUN_LOG_DIR"
+      return 0
+    }
+    if [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ]; then
+      source_bin="$NPM_GLOBAL_PREFIX/bin/aamp-logs"
+    fi
+  fi
+
+  if [ -n "$source_bin" ]; then
+    cp "$source_bin" "$AAMP_LOGS_BIN" 2>/dev/null || {
+      agent_log "warning: failed to copy aamp-logs command to $AAMP_LOGS_BIN"
+      return 0
+    }
+    chmod +x "$AAMP_LOGS_BIN" 2>/dev/null || true
+    agent_detail "logs command: $AAMP_LOGS_BIN"
+  fi
 }
 
 kill_process_tree() {
@@ -123,19 +261,28 @@ start_logged_bridge() {
   local mode="$3"
   shift 3
 
+  local log_level="info"
+  if [ "$DEBUG_MODE" = "true" ]; then
+    log_level="debug"
+  fi
+
   if [ "$mode" = "append" ]; then
-    "$@" >>"$log_file" 2>&1 &
+    AAMP_LOG_FILE="$log_file" AAMP_LOG_LEVEL="$log_level" "$@" >>"$log_file" 2>&1 &
   else
-    "$@" >"$log_file" 2>&1 &
+    AAMP_LOG_FILE="$log_file" AAMP_LOG_LEVEL="$log_level" "$@" >"$log_file" 2>&1 &
   fi
   STARTED_BRIDGE_PID=$!
 
-  if [ "$mode" = "append" ]; then
-    tail -n 0 -f "$log_file" &
+  if [ "$AAMP_TAIL_BRIDGE_LOGS" = "true" ]; then
+    if [ "$mode" = "append" ]; then
+      tail -n 0 -f "$log_file" &
+    else
+      tail -n +1 -f "$log_file" &
+    fi
+    printf -v "$tail_var" '%s' "$!"
   else
-    tail -n +1 -f "$log_file" &
+    printf -v "$tail_var" ''
   fi
-  printf -v "$tail_var" '%s' "$!"
 }
 
 acquire_bot_selection_lock() {
@@ -359,9 +506,9 @@ configure_npm_registry() {
   export npm_config_prefix="$NPM_GLOBAL_PREFIX"
   export NPM_CONFIG_PREFIX="$NPM_GLOBAL_PREFIX"
   "$NPM_BIN" config set registry "$NPM_REGISTRY" >/dev/null 2>&1 || true
-  agent_log "using npm registry: $NPM_REGISTRY"
-  agent_log "using npm cache: $NPM_CACHE_DIR"
-  agent_log "using npm global prefix: $NPM_GLOBAL_PREFIX"
+  agent_detail "using npm registry: $NPM_REGISTRY"
+  agent_detail "using npm cache: $NPM_CACHE_DIR"
+  agent_detail "using npm global prefix: $NPM_GLOBAL_PREFIX"
 }
 
 npm_install_global() {
@@ -961,7 +1108,7 @@ LARK_ENV_TASK_SH
 
 ensure_lark_env_script() {
   local target="$HOME/lark-env-task.sh"
-  agent_log "writing embedded env script: $target"
+  agent_detail "writing embedded env script: $target"
   install_embedded_lark_env "$target"
   chmod +x "$target" 2>/dev/null || true
 }
@@ -972,22 +1119,22 @@ source_lark_env() {
   case "$ENV_NAME" in
     online)
       # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" online
+      source "$HOME/lark-env-task.sh" online >>"$ONE_CLICK_LOG" 2>&1
       ;;
     pre)
       # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" pre || {
+      source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1 || {
         agent_log "Whistle is not ready; installing whistle and retrying pre env setup"
         npm_install_global whistle
-        source "$HOME/lark-env-task.sh" pre
+        source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1
       }
       ;;
     boe)
       # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME" || {
+      source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME" >>"$ONE_CLICK_LOG" 2>&1 || {
         agent_log "Whistle is not ready; installing whistle and retrying boe env setup"
         npm_install_global whistle
-        source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME"
+        source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME" >>"$ONE_CLICK_LOG" 2>&1
       }
       ;;
   esac
@@ -1486,7 +1633,7 @@ ensure_lark_cli_profile() {
   ensure_lark_cli
 
   if lark-cli profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
-    agent_log "lark-cli profile already exists: $profile"
+    agent_detail "lark-cli profile already exists: $profile"
   else
     [ -n "$app_secret" ] || agent_fail "missing app secret for creating lark-cli profile $profile"
     agent_log "creating lark-cli profile: $profile"
@@ -1496,10 +1643,10 @@ ensure_lark_cli_profile() {
       --app-secret-stdin
   fi
 
-  agent_log "ensuring lark-cli user auth domains for profile: $profile"
+  agent_detail "ensuring lark-cli user auth domains for profile: $profile"
   auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
   if lark_cli_user_auth_satisfied "$profile"; then
-    agent_log "lark-cli user auth already has required scopes for profile: $profile"
+    agent_detail "lark-cli user auth already has required scopes for profile: $profile"
   else
     run_lark_cli_auth_login "$profile" "$auth_excludes"
   fi
@@ -1589,7 +1736,8 @@ select_existing_bot_or_create() {
   APP_SECRET="${app_secrets[$index]:-}"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$BOT_NAME"
   release_bot_selection_lock
-  agent_log "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
+  agent_detail "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
+  agent_log "正在检查飞书授权..."
   ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
 }
 
@@ -1657,7 +1805,7 @@ const result = await lark.registerApp({
   source: 'aamp-feishu-task-agent',
   appPreset: {
     name: appName,
-    desc: 'AAMP Feishu task bridge bot',
+    desc: 'AAMP Feishu bridge bot',
   },
   addons,
   onQRCodeReady(info) {
@@ -2003,7 +2151,7 @@ clear_cli_quarantine() {
   command -v xattr >/dev/null 2>&1 || return 0
   [ -n "$bin" ] || return 0
 
-  agent_log "clearing macOS quarantine attributes for $label CLI"
+  agent_detail "clearing macOS quarantine attributes for $label CLI"
   clear_quarantine_path "$bin" || true
 
   local real
@@ -2240,7 +2388,7 @@ run_codem_service_start_with_auto_update() {
 }
 
 run_codem_login() {
-  CODEM_LOGIN_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-codem-login.XXXXXX")"
+  CODEM_LOGIN_LOG="$(run_log_file "codem-login.log")"
   print_codem_login_notice
   set +e
   codem login --server "$CODEM_SERVER_URL" 2>&1 | tee "$CODEM_LOGIN_LOG"
@@ -2256,7 +2404,7 @@ run_codem_login_force_once() {
   fi
 
   CODEM_FORCE_LOGIN_DONE="true"
-  CODEM_LOGIN_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-codem-login-force.XXXXXX")"
+  CODEM_LOGIN_LOG="$(run_log_file "codem-login-force.log")"
   agent_log "codem still reports login is required after normal login; starting codem login --force"
   print_codem_login_notice
   set +e
@@ -2298,7 +2446,7 @@ run_codem_provider_preflight() {
   local waited
   local prompt
   session="aamp-codem-preflight-$(date +%s)-$$"
-  output_file="$(mktemp "${TMPDIR:-/tmp}/aamp-codem-provider-preflight.XXXXXX")"
+  output_file="$(run_log_file "codem-preflight.log")"
   agent_log "checking CodeM provider authorization with isolated session: $session"
   prompt="Use the bash tool to run: echo AAMP_CODEM_PREFLIGHT_TOOL_OK. After the tool result is available, reply exactly: AAMP_CODEM_PREFLIGHT_FINAL_OK"
 
@@ -2491,7 +2639,7 @@ build_acp_agent_command() {
   local codex_bin
   codex_bin="$(resolve_codex_cli_for_acp)" || agent_fail "codex CLI is unavailable after installation"
   ACP_AGENT_COMMAND="env CODEX_PATH=$codex_bin npx -y $CODEX_ACP_PKG"
-  agent_log "using fixed Codex ACP command: CODEX_PATH=$codex_bin $CODEX_ACP_PKG"
+  agent_detail "using fixed Codex ACP command: CODEX_PATH=$codex_bin $CODEX_ACP_PKG"
 }
 
 validate_codex_acp_command() {
@@ -2510,8 +2658,9 @@ validate_codex_acp_command() {
 }
 
 start_acp_bridge_and_capture_pairing_url() {
-  ACP_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-acp-bridge.XXXXXX")"
-  agent_log "initializing ACP bridge; log: $ACP_LOG"
+  ACP_LOG="$(run_log_file "acp-bridge.jsonl")"
+  agent_log "正在启动 $AGENT 本地桥接..."
+  agent_detail "initializing ACP bridge; log: $ACP_LOG"
 
   local init_payload
   local init_output
@@ -2528,9 +2677,9 @@ start_acp_bridge_and_capture_pairing_url() {
 
   PAIRING_URL="$(printf '%s' "$init_output" | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const start = input.indexOf("{"); const end = input.lastIndexOf("}"); if (start < 0 || end < start) return; const data = JSON.parse(input.slice(start, end + 1)); process.stdout.write(data.agents?.[0]?.pairing?.connectUrl || ""); });')"
   [ -n "$PAIRING_URL" ] || agent_fail "ACP bridge init did not return a pairing URL. Log: $ACP_LOG"
-  agent_log "captured Pairing URL"
+  agent_detail "captured Pairing URL"
 
-  agent_log "starting ACP bridge; log: $ACP_LOG"
+  agent_detail "starting ACP bridge; log: $ACP_LOG"
   local command=(
     start
     --agent "$AGENT"
@@ -2547,7 +2696,7 @@ start_acp_bridge_and_capture_pairing_url() {
       agent_fail "ACP bridge exited before becoming ready. Log: $ACP_LOG"
     fi
     if grep -E 'Bridge running with|agent\(s\):' "$ACP_LOG" >/dev/null 2>&1; then
-      agent_log "ACP bridge is ready"
+      agent_detail "ACP bridge is ready"
       return 0
     fi
     sleep 1
@@ -2557,8 +2706,9 @@ start_acp_bridge_and_capture_pairing_url() {
 }
 
 start_cli_bridge_and_capture_pairing_url() {
-  CLI_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-cli-bridge.XXXXXX")"
-  agent_log "starting CLI bridge; log: $CLI_LOG"
+  CLI_LOG="$(run_log_file "cli-bridge.jsonl")"
+  agent_log "正在启动 $AGENT 本地桥接..."
+  agent_detail "starting CLI bridge; log: $CLI_LOG"
   if [ "$DEBUG_MODE" = "true" ]; then
     export AAMP_CLI_BRIDGE_DEBUG_TASK=1
     export AAMP_CLI_BRIDGE_DEBUG_PROMPT=1
@@ -2586,7 +2736,7 @@ start_cli_bridge_and_capture_pairing_url() {
     fi
     PAIRING_URL="$(grep -Eo 'aamp://connect[^[:space:]]+' "$CLI_LOG" | tail -1 || true)"
     if [ -n "$PAIRING_URL" ]; then
-      agent_log "captured Pairing URL"
+      agent_detail "captured Pairing URL"
       return 0
     fi
     sleep 1
@@ -2596,9 +2746,10 @@ start_cli_bridge_and_capture_pairing_url() {
 }
 
 start_feishu_task_bridge() {
-  FEISHU_LOG="$(mktemp "${TMPDIR:-/tmp}/aamp-feishu-bridge.XXXXXX")"
-  agent_log "starting Feishu bridge with task enabled; log: $FEISHU_LOG"
-  agent_log "Feishu bridge profile: app=$APP_ID lark-cli-profile=$LARK_CLI_PROFILE use-feishu-cli=yes"
+  FEISHU_LOG="$(run_log_file "feishu-bridge.jsonl")"
+  agent_log "正在连接飞书任务..."
+  agent_detail "starting Feishu bridge with task enabled; log: $FEISHU_LOG"
+  agent_detail "Feishu bridge profile: app=$APP_ID lark-cli-profile=$LARK_CLI_PROFILE use-feishu-cli=yes"
   local command=(
     start
     --enable-task
@@ -2633,7 +2784,8 @@ start_feishu_task_bridge() {
     fi
 
     if grep -E 'Feishu bridge IM \+ Task is running for|bridge.task_runtime.running|\[feishu\] listener started|\[feishu ws\] connected' "$FEISHU_LOG" >/dev/null 2>&1; then
-      agent_log "Feishu bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
+      agent_detail "Feishu bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
+      agent_success
       return 0
     fi
 
@@ -2677,13 +2829,16 @@ main() {
   trap cleanup EXIT INT TERM
 
   parse_args "$@"
+  init_log_run
   # Do not clean globally by default: users may run one-click scripts in
   # multiple terminals. Cleanup on exit is limited to pids started by this run.
   cleanup_stale_one_click_processes
   ensure_node_toolchain
+  install_aamp_logs_bin
   build_feishu_env_args
   source_lark_env
   resolve_feishu_bot_credentials
+  write_run_manifest
   if ! uses_cli_bridge; then
     ensure_acpx
   fi

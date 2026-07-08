@@ -300,7 +300,11 @@ test('runtime leaves task unchanged and comments when prompt dispatch fails', as
     assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     assert.deepEqual(fakeFeishu.comments, [{
       taskGuid: 'task_guid_dispatch_failure',
-      content: '已收到任务派发请求，但暂时无法转交智能体处理。桥接器派发智能体失败，本次处理尚未开始。原因：mailbox unavailable',
+      content: [
+        '已收到任务派发请求，但暂时无法转交智能体处理。桥接器派发智能体失败，本次处理尚未开始。原因：mailbox unavailable',
+        'Task ID: feishu-task-task_guid_dispatch_failure-evt_dispatch_failure',
+        '日志收集命令：~/.aamp/bin/aamp-logs collect --task-id feishu-task-task_guid_dispatch_failure-evt_dispatch_failure',
+      ].join('\n'),
     }])
   } finally {
     await runtime.stop()
@@ -661,6 +665,9 @@ test('runtime completes and comments briefly when agent result violates the fina
     assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
     assert.match(fakeFeishu.comments[0]?.content ?? '', /^智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。原因：/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /未按 FEISHU_TASK_RESULT_JSON 协议收尾/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /Task ID: feishu-task-task_guid_bad_contract-evt_bad_contract/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /aamp-logs collect --task-id feishu-task-task_guid_bad_contract-evt_bad_contract/)
+    assert.doesNotMatch(fakeFeishu.comments[0]?.content ?? '', /AAMP Task ID/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

@@ -10,10 +10,19 @@ import {
   loadBridgeState,
   removeBridgeConfigEntry,
 } from './config.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { FeishuBridgeRuntime } from './runtime.js'
 import { runTaskEnabledBridge } from './task-runtime.js'
 
 type CommandName = 'init' | 'start' | 'run' | 'status' | 'remove' | 'unbind' | 'help' | 'unknown'
+const rawArgv = process.argv.slice(2)
+const rawOutputIndex = rawArgv.indexOf('--output')
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'feishu-bridge',
+  mirrorToConsole: rawArgv.includes('--json')
+    || rawArgv.includes('--output=json')
+    || (rawOutputIndex >= 0 && rawArgv[rawOutputIndex + 1] === 'json'),
+})
 
 interface ParsedArgs {
   command: CommandName
@@ -65,10 +74,12 @@ function jsonOutput(args: ParsedArgs): boolean {
 }
 
 function writeJsonEvent(event: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({
+  const payload = {
     timestamp: new Date().toISOString(),
     ...event,
-  })}\n`)
+  }
+  if (localBridgeLogger.enabled) localBridgeLogger.event(payload)
+  process.stdout.write(`${JSON.stringify(payload)}\n`)
 }
 
 function bridgeConfigSummary(config: Awaited<ReturnType<typeof initializeBridgeConfig>>) {
@@ -325,6 +336,7 @@ async function runBridge(args: ParsedArgs): Promise<void> {
     if (jsonOutput(args)) {
       writeJsonEvent({ type: 'bridge.stopped', bridge: 'feishu-bridge' })
     }
+    localBridgeLogger.flush()
     process.exit(0)
   }
 
@@ -363,5 +375,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : inspect(error))
+  localBridgeLogger.flush()
   process.exitCode = 1
 })

@@ -83,7 +83,7 @@ test('buildTaskProfileFeishuConfig uses app-secret websocket when runtime app se
   })
 })
 
-test('buildTaskProfileTaskFeishuConfig passes runtime app secret to task bridge config', () => {
+test('buildTaskProfileTaskFeishuConfig passes runtime app secret to Feishu bridge config', () => {
   assert.deepEqual(buildTaskProfileTaskFeishuConfig({
     app_id: 'cli_a123456',
     profile: 'aamp-feishu-task-cli_a123456',

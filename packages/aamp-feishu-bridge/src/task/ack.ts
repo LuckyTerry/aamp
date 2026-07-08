@@ -29,7 +29,7 @@ export function buildAckComment(options: BuildAckCommentOptions): string {
   return [
     visibleAckText,
     '',
-    `AAMP Task ID: ${options.aampTaskId}`,
+    `Task ID: ${options.aampTaskId}`,
     `Bridge: ${options.bridgeName}`,
     `事件场景: ${options.eventKind ?? 'task_create'}`,
     `收到时间: ${receivedAt}`,

@@ -7,6 +7,7 @@ import { AampAcpBridge } from './bridge.js'
 import { renderPairingCode, runInit } from './cli/init.js'
 import { discoverAcpBridgeAgents } from './discovery.js'
 import { runJsonInit } from './json-init.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getAgentSenderPolicy, setAgentSenderPolicy } from './sender-policy.js'
 import { resolveConfigPath, resolveCredentialsFile } from './storage.js'
@@ -17,6 +18,10 @@ const jsonOutput = args.includes('--json') || getOptionValue('--output') === 'js
 const configPath = resolveConfigPath(
   args.includes('--config') ? (args[args.indexOf('--config') + 1] ?? '') : undefined,
 )
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'acp-bridge',
+  mirrorToConsole: jsonOutput,
+})
 
 function getOptionValue(flag: string): string | undefined {
   const idx = args.indexOf(flag)
@@ -164,6 +169,10 @@ async function startBridge(
     ...config,
     agents,
   })
+  const emitRuntimeEvent = (event: Record<string, unknown>) => {
+    if (localBridgeLogger.enabled) localBridgeLogger.event(event)
+    if (options.json) writeJsonEvent(event)
+  }
 
   // Graceful shutdown
   let shuttingDown = false
@@ -171,11 +180,12 @@ async function startBridge(
     if (shuttingDown) return
     shuttingDown = true
     if (options.json) {
-      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'acp-bridge', reason: 'signal' })
+      emitRuntimeEvent({ type: 'bridge.shutdown', bridge: 'acp-bridge', reason: 'signal' })
     } else {
       console.log('\nShutting down...')
     }
     await bridge.stop()
+    localBridgeLogger.flush()
     process.exit(0)
   }
   process.on('SIGTERM', () => { void shutdown() })
@@ -183,7 +193,7 @@ async function startBridge(
 
   await bridge.start({
     quiet: options.quiet || options.json,
-    onEvent: options.json ? writeJsonEvent : undefined,
+    onEvent: (options.json || localBridgeLogger.enabled) ? emitRuntimeEvent : undefined,
     debug: options.debug,
   })
 
@@ -414,5 +424,6 @@ main().catch((err) => {
   } else {
     console.error(`Error: ${(err as Error).message}`)
   }
+  localBridgeLogger.flush()
   process.exit(1)
 })

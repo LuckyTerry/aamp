@@ -9,6 +9,7 @@ import { runProfileMaker } from './cli/profile-maker.js'
 import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
 import { discoverCliBridgeAgents } from './discovery.js'
 import { runJsonInit } from './json-init.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getAgentSenderPolicy, setAgentSenderPolicy } from './sender-policy.js'
 import { getDefaultProfilesDir, resolveConfigPath, resolveCredentialsFile } from './storage.js'
@@ -19,6 +20,10 @@ const jsonOutput = args.includes('--json') || getOptionValue('--output') === 'js
 const configPath = resolveConfigPath(
   args.includes('--config') ? (args[args.indexOf('--config') + 1] ?? '') : undefined,
 )
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'cli-bridge',
+  mirrorToConsole: jsonOutput,
+})
 
 function getOptionValue(flag: string): string | undefined {
   const idx = args.indexOf(flag)
@@ -166,14 +171,19 @@ async function startBridge(
     ...config,
     agents,
   })
+  const emitRuntimeEvent = (event: Record<string, unknown>) => {
+    if (localBridgeLogger.enabled) localBridgeLogger.event(event)
+    if (options.json) writeJsonEvent(event)
+  }
 
   const shutdown = () => {
     if (options.json) {
-      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'cli-bridge', reason: 'signal' })
+      emitRuntimeEvent({ type: 'bridge.shutdown', bridge: 'cli-bridge', reason: 'signal' })
     } else {
       console.log('\nShutting down...')
     }
     bridge.stop()
+    localBridgeLogger.flush()
     process.exit(0)
   }
   process.on('SIGTERM', shutdown)
@@ -181,7 +191,7 @@ async function startBridge(
 
   await bridge.start({
     quiet: options.quiet || options.json,
-    onEvent: options.json ? writeJsonEvent : undefined,
+    onEvent: (options.json || localBridgeLogger.enabled) ? emitRuntimeEvent : undefined,
     debug: options.debug,
   })
   setInterval(() => {}, 60_000)
@@ -436,5 +446,6 @@ main().catch((err) => {
   } else {
     console.error(`Error: ${(err as Error).message}`)
   }
+  localBridgeLogger.flush()
   process.exit(1)
 })

@@ -309,7 +309,7 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
   const mailbox = existing?.mailbox ?? await AampClient.registerMailbox({
     aampHost,
     slug,
-    description: `Feishu task bridge for ${targetAgentEmail}`,
+    description: `Feishu bridge for ${targetAgentEmail}`,
   })
 
   const config: BridgeConfig = {
