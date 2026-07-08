@@ -9,7 +9,7 @@ import {
   resolveTaskProfileName,
 } from './task-runtime-profile.js'
 import { isRetryableAampNetworkError, isSmtpAuthError } from './task-runtime-errors.js'
-import { resolveTaskRuntimeBehavior } from './task-runtime.js'
+import { resolveTaskRuntimeBehavior, resolveTaskRuntimeFeishuDomain } from './task-runtime.js'
 
 test('resolveTaskProfileName uses the app id as the profile suffix', () => {
   assert.equal(resolveTaskProfileName(' cli_a123456 '), 'aamp-feishu-task-cli_a123456')
@@ -157,6 +157,13 @@ test('resolveTaskRuntimeBehavior enables debug only for the current --debug run'
     ackComment: false,
     debug: true,
   })
+})
+
+test('resolveTaskRuntimeFeishuDomain clears persisted pre domain for online runs', () => {
+  assert.equal(resolveTaskRuntimeFeishuDomain({}), undefined)
+  assert.equal(resolveTaskRuntimeFeishuDomain({ pre: true }), 'https://open.feishu-pre.cn')
+  assert.equal(resolveTaskRuntimeFeishuDomain({ boe: true }), 'https://open.feishu-boe.cn')
+  assert.equal(resolveTaskRuntimeFeishuDomain({ domain: ' https://custom.example.com ' }), 'https://custom.example.com')
 })
 
 test('isRetryableAampNetworkError detects transient AAMP connect timeout errors', () => {

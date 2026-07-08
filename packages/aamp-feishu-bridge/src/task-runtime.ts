@@ -218,8 +218,8 @@ function resolveInstanceId(agent: TaskRuntimeAgentConfig, bot: TaskRuntimeBotCon
   return normalizeId(`${agent.type}-${shortHash(agent.target_agent_email)}-${bot.app_id}`)
 }
 
-function resolveFeishuDomain(options: TaskEnabledRunOptions, existing?: string): string | undefined {
-  return (options.domain ?? (options.boe ? FEISHU_BOE_DOMAIN : options.pre ? FEISHU_PRE_DOMAIN : existing) ?? '').trim() || undefined
+export function resolveTaskRuntimeFeishuDomain(options: Pick<TaskEnabledRunOptions, 'boe' | 'domain' | 'pre'>): string | undefined {
+  return (options.domain ?? (options.boe ? FEISHU_BOE_DOMAIN : options.pre ? FEISHU_PRE_DOMAIN : undefined) ?? '').trim() || undefined
 }
 
 function resolveFeishuHeaders(options: TaskEnabledRunOptions, existing?: Record<string, string>): Record<string, string> | undefined {
@@ -484,7 +484,7 @@ async function ensureInstanceConfigs(
   const existingIm = await loadConfigIfExists<ImBridgeConfig>(imConfigPath)
   const existingTask = await loadConfigIfExists<TaskBridgeConfig>(taskConfigPath)
   const aampHost = options.aampHost?.trim() || existingIm?.aampHost || existingTask?.aampHost || 'https://meshmail.ai'
-  const feishuDomain = resolveFeishuDomain(options, existingIm?.feishu.domain ?? existingTask?.feishu.domain)
+  const feishuDomain = resolveTaskRuntimeFeishuDomain(options)
   const feishuHeaders = resolveFeishuHeaders(options, existingTask?.feishu.headers)
   const taskAppSecret = options.appSecret?.trim()
     || existingTask?.feishu.appSecret?.trim()
