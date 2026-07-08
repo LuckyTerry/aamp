@@ -52,6 +52,7 @@ class FakeAampClient {
   streamOpenedHandler?: StreamOpenedHandler
   errorHandler?: ErrorHandler
   sentTasks: SendTaskOptions[] = []
+  sendTaskError?: Error
 
   on(event: 'connected', handler: () => void): void
   on(event: 'disconnected', handler: (reason?: string) => void): void
@@ -79,6 +80,7 @@ class FakeAampClient {
   disconnect(): void {}
 
   async sendTask(opts: SendTaskOptions): Promise<{ taskId: string; messageId: string }> {
+    if (this.sendTaskError) throw this.sendTaskError
     this.sentTasks.push(opts)
     return { taskId: opts.taskId ?? 'generated-task-id', messageId: 'aamp_message_1' }
   }
@@ -114,6 +116,8 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   completedTaskGuids: string[] = []
   blockedTaskGuids: string[] = []
   commentFailures = 0
+  getTaskBaseError?: Error
+  getCommentError?: Error
   tasks: Record<string, FeishuTaskDetails> = {}
   appOwner = { ownerId: 'ou_human' }
 
@@ -145,6 +149,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   }
 
   async getTaskBase(taskGuid: string): Promise<FeishuTaskDetails> {
+    if (this.getTaskBaseError) throw this.getTaskBaseError
     const task = await this.getTask(taskGuid)
     const { comments: _comments, subtasks: _subtasks, ...baseTask } = task
     return baseTask
@@ -159,6 +164,7 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   }
 
   async getComment(_commentId: string): Promise<FeishuTaskComment | null> {
+    if (this.getCommentError) throw this.getCommentError
     return null
   }
 
@@ -228,6 +234,116 @@ function buildConfig(): BridgeConfig {
     },
   }
 }
+
+test('runtime leaves task unchanged and comments when task details cannot be read before dispatch', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.getTaskBaseError = Object.assign(new Error('task api timeout'), { code: 'ETIMEDOUT' })
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await assert.rejects(
+      fakeFeishu.emit({
+        eventId: 'evt_task_read_failure',
+        taskGuid: 'task_guid_read_failure',
+        eventTypes: ['task_create'],
+        timestamp: '1775793266155',
+      }),
+      /task api timeout/,
+    )
+
+    assert.deepEqual(fakeAamp.sentTasks, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_read_failure',
+      content: '已收到任务派发请求，但暂时无法转交智能体处理。桥接器读取任务详情失败。原因：task api timeout',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime leaves task unchanged and comments when prompt dispatch fails', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeAamp.sendTaskError = new Error('mailbox unavailable')
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_dispatch_failure-evt_dispatch_failure'
+
+  try {
+    await runtime.start()
+    await assert.rejects(
+      fakeFeishu.emit({
+        eventId: 'evt_dispatch_failure',
+        taskGuid: 'task_guid_dispatch_failure',
+        eventTypes: ['task_create'],
+        timestamp: '1775793266155',
+      }),
+      /mailbox unavailable/,
+    )
+
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_dispatch_failure',
+      content: '已收到任务派发请求，但暂时无法转交智能体处理。桥接器派发智能体失败，本次处理尚未开始。原因：mailbox unavailable',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime uses reply wording when comment content cannot be read before dispatch', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  fakeFeishu.getCommentError = Object.assign(new Error('comment api timeout'), { code: 'ETIMEDOUT' })
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+
+  try {
+    await runtime.start()
+    await assert.rejects(
+      fakeFeishu.emit({
+        eventId: 'evt_comment_read_failure',
+        taskGuid: 'task_guid_comment_read_failure',
+        eventTypes: ['task_comment_create'],
+        commentId: 'comment_read_failure',
+        timestamp: '1775793266155',
+      }),
+      /comment api timeout/,
+    )
+
+    assert.deepEqual(fakeAamp.sentTasks, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.comments, [{
+      taskGuid: 'task_guid_comment_read_failure',
+      content: '已收到您的回复，但暂时无法转交智能体处理。桥接器读取回复内容失败。原因：comment api timeout',
+    }])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
 
 test('runtime completes comment-triggered answered results when bridge writes the reply', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
@@ -383,7 +499,8 @@ test('runtime completes result once when a Feishu comment write fails transientl
     })
 
     assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
-    assert.match(fakeFeishu.comments[0]?.content ?? '', /桥接器写入飞书失败/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /桥接器写入结果评论失败/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /任务将流转为已完成/)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /temporary comment failure/)
     assert.deepEqual(runtime.getStateSnapshot().tasks[aampTaskId]?.resultHandledTaskIds, [aampTaskId])
 
@@ -395,6 +512,45 @@ test('runtime completes result once when a Feishu comment write fails transientl
     assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_comment_failure'])
     assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
     assert.equal(fakeFeishu.comments.length, 1)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime completes and comments briefly when agent result violates the final contract', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_bad_contract-evt_bad_contract'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_bad_contract',
+      taskGuid: 'task_guid_bad_contract',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: '我已经完成了，但没有按协议返回 JSON。',
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_bad_contract'])
+      assert.equal(fakeFeishu.comments.length, 1)
+    })
+
+    assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /^智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。原因：/)
+    assert.match(fakeFeishu.comments[0]?.content ?? '', /未按 FEISHU_TASK_RESULT_JSON 协议收尾/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

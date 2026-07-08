@@ -62,6 +62,7 @@ const MAX_DELIVERY_FILE_SIZE_BYTES = 50 * 1024 * 1024
 const MAX_FEISHU_COMMENT_CHARACTERS = 3000
 const MAX_FEISHU_COMMENT_BYTES = 10000
 const MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH = 1200
+const MAX_SHORT_FAILURE_REASON_LENGTH = 240
 const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
 const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
 const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
@@ -72,6 +73,24 @@ const APP_OWNER_CACHE_TTL_MS = 60 * 60 * 1000
 const PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS = 1000
 const PERMISSION_DENIED_COMMENT_REPLY = '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。'
+
+type PromptDispatchFailureAction =
+  | 'read_task_details'
+  | 'read_reply_content'
+  | 'read_task_context'
+  | 'verify_task_owner'
+  | 'dispatch_agent'
+
+type PostPromptFeishuFailureAction =
+  | 'result_comment'
+  | 'result_delivery'
+  | 'help_comment'
+  | 'waiting_for_human_status'
+  | 'complete_status'
+  | 'feishu_write'
+
+type TaskResultFailureReason = 'agent_failed' | 'bridge_output_write' | 'final_contract'
+
 function getFeishuLarkCliProfile(profile: string | undefined): string | undefined {
   return profile?.trim() || undefined
 }
@@ -174,26 +193,146 @@ function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function truncateForShortFailureReason(error: unknown): string {
+  const normalized = formatUnknownError(error).replace(/\s+/g, ' ').trim()
+  const characters = Array.from(normalized || '未知错误')
+  if (characters.length <= MAX_SHORT_FAILURE_REASON_LENGTH) return characters.join('')
+  return `${characters.slice(0, MAX_SHORT_FAILURE_REASON_LENGTH).join('')}...`
+}
+
 function truncateForFeishuWriteFailureNotice(message: string): string {
   const characters = Array.from(message)
   if (characters.length <= MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH) return message
   return `${characters.slice(0, MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH).join('')}...`
 }
 
-function buildFeishuWriteFailureNotice(error: unknown, completionError?: unknown): string {
+function getPromptDispatchLeadText(eventKind: FeishuTaskEventKind): string {
+  if (eventKind === 'task_comment') return '已收到您的回复'
+  if (eventKind === 'task_reminder_fire') return '任务提醒已到期'
+  return '已收到任务派发请求'
+}
+
+function describePromptDispatchFailureAction(action: PromptDispatchFailureAction): string {
+  if (action === 'read_task_details') return '桥接器读取任务详情失败'
+  if (action === 'read_reply_content') return '桥接器读取回复内容失败'
+  if (action === 'read_task_context') return '桥接器读取任务上下文失败'
+  if (action === 'verify_task_owner') return '桥接器校验任务归属失败'
+  return '桥接器派发智能体失败，本次处理尚未开始'
+}
+
+function buildPromptDispatchFailureComment(
+  eventKind: FeishuTaskEventKind,
+  action: PromptDispatchFailureAction,
+  error: unknown,
+): string {
+  return [
+    `${getPromptDispatchLeadText(eventKind)}，但暂时无法转交智能体处理。`,
+    `${describePromptDispatchFailureAction(action)}。`,
+    `原因：${truncateForShortFailureReason(error)}`,
+  ].join('')
+}
+
+function describeTaskResultFailure(disposition: Extract<TaskResultDisposition, { kind: 'failure' }>): string {
+  if (disposition.reason === 'agent_failed') {
+    return '智能体处理失败，本次任务已结束。任务将流转为已完成。'
+  }
+  if (disposition.reason === 'bridge_output_write') {
+    return '智能体已完成处理，但桥接器写入部分交付内容失败。任务将流转为已完成。'
+  }
+  return '智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。'
+}
+
+function buildTaskResultFailureComment(disposition: Extract<TaskResultDisposition, { kind: 'failure' }>): string {
+  return `${describeTaskResultFailure(disposition)}原因：${truncateForShortFailureReason(disposition.message)}`
+}
+
+function describePostPromptFeishuFailure(action: PostPromptFeishuFailureAction, completionError?: unknown): string {
+  if (action === 'result_delivery') {
+    return '智能体已完成处理，但桥接器写入部分交付内容失败。任务将流转为已完成。'
+  }
+  if (action === 'result_comment') {
+    return '智能体已返回结果，但桥接器写入结果评论失败。任务将流转为已完成。'
+  }
+  if (action === 'help_comment') {
+    return '智能体需要更多信息，但桥接器写入求助评论失败。任务将流转为已完成。'
+  }
+  if (action === 'waiting_for_human_status') {
+    return '智能体需要更多信息，但桥接器流转“待确认”失败。任务将流转为已完成。'
+  }
+  if (action === 'complete_status' || completionError) {
+    return '智能体处理已结束，但桥接器流转“已完成”失败。请稍后重试或联系维护者。'
+  }
+  return '智能体已返回结果，但桥接器写入飞书失败。任务将流转为已完成。'
+}
+
+function buildFeishuWriteFailureNotice(
+  action: PostPromptFeishuFailureAction,
+  error: unknown,
+  completionError?: unknown,
+): string {
   const lines = [
-    completionError
-      ? '桥接器写入飞书失败，但自动流转已完成也失败，请人工确认任务处理状态。'
-      : '桥接器写入飞书失败，已将任务流转到已完成。',
-    '',
-    '智能体可能已经完成处理，但桥接器在回写评论、交付物或完成状态时遇到网络错误。',
-    '',
-    `错误信息：${truncateForFeishuWriteFailureNotice(formatUnknownError(error))}`,
+    `${describePostPromptFeishuFailure(action, completionError)}原因：${truncateForShortFailureReason(error)}`,
   ]
   if (completionError) {
     lines.push(`已完成流转错误：${truncateForFeishuWriteFailureNotice(formatUnknownError(completionError))}`)
   }
   return lines.join('\n')
+}
+
+class PromptDispatchFailure extends Error {
+  readonly action: PromptDispatchFailureAction
+  readonly originalError: unknown
+
+  constructor(action: PromptDispatchFailureAction, error: unknown) {
+    super(formatUnknownError(error))
+    this.name = 'PromptDispatchFailure'
+    this.action = action
+    this.originalError = error
+  }
+}
+
+class PostPromptFeishuFailure extends Error {
+  readonly action: PostPromptFeishuFailureAction
+  readonly originalError: unknown
+
+  constructor(action: PostPromptFeishuFailureAction, error: unknown) {
+    super(formatUnknownError(error))
+    this.name = 'PostPromptFeishuFailure'
+    this.action = action
+    this.originalError = error
+  }
+}
+
+async function withPromptDispatchFailure<T>(
+  action: PromptDispatchFailureAction,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (error instanceof PromptDispatchFailure) throw error
+    throw new PromptDispatchFailure(action, error)
+  }
+}
+
+async function withPostPromptFeishuFailure<T>(
+  action: PostPromptFeishuFailureAction,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (error instanceof PostPromptFeishuFailure) throw error
+    throw new PostPromptFeishuFailure(action, error)
+  }
+}
+
+function getPromptDispatchFailure(error: unknown): PromptDispatchFailure | undefined {
+  return error instanceof PromptDispatchFailure ? error : undefined
+}
+
+function getPostPromptFeishuFailure(error: unknown): PostPromptFeishuFailure | undefined {
+  return error instanceof PostPromptFeishuFailure ? error : undefined
 }
 
 function describeFeishuAttachment(attachment: FeishuTaskAttachment): string {
@@ -410,7 +549,7 @@ function describeFeishuTaskSubscription(
 type TaskResultDisposition =
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
   | { kind: 'answered'; summary?: string; replyWritten?: boolean }
-  | { kind: 'failure'; summary?: string; message: string }
+  | { kind: 'failure'; reason: TaskResultFailureReason; summary?: string; message: string }
   | { kind: 'help_needed'; message: string }
 
 type FeishuTaskResultOutput =
@@ -569,6 +708,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
   if (result.status === 'rejected') {
     return {
       kind: 'failure',
+      reason: 'agent_failed',
       message: result.errorMsg?.trim() || output || 'ACP agent rejected the task without an error message.',
     }
   }
@@ -579,6 +719,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
   } catch (error) {
     return {
       kind: 'failure',
+      reason: 'final_contract',
       message: `智能体返回了无法解析的 FEISHU_TASK_RESULT_JSON：${formatFeishuResultParseError(error)}`,
     }
   }
@@ -591,14 +732,14 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     const question = getString(payload.question)
     const firstQuestion = getFirstQuestionText(payload.questions)
     if (schema !== 'feishu_task_result.v2') {
-      return { kind: 'failure', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
+      return { kind: 'failure', reason: 'final_contract', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
     }
 
     const replyWritten = getBoolean(payload.reply_written)
     if (status === 'answered') {
       const outputs = parsePayloadDeliveryOutputs(payload)
       if (outputs) {
-        if (typeof outputs === 'string') return { kind: 'failure', message: outputs }
+        if (typeof outputs === 'string') return { kind: 'failure', reason: 'final_contract', message: outputs }
         return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
       }
       return {
@@ -610,8 +751,8 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
 
     if (status === 'succeeded') {
       const outputs = parsePayloadDeliveryOutputs(payload)
-      if (!outputs) return { kind: 'failure', message: 'status=succeeded 时 outputs 必须是数组。' }
-      if (typeof outputs === 'string') return { kind: 'failure', message: outputs }
+      if (!outputs) return { kind: 'failure', reason: 'final_contract', message: 'status=succeeded 时 outputs 必须是数组。' }
+      if (typeof outputs === 'string') return { kind: 'failure', reason: 'final_contract', message: outputs }
       return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
     }
     if (status === 'need_help' || status === 'needs_input') {
@@ -620,18 +761,21 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     if (status === 'failed') {
       return {
         kind: 'failure',
+        reason: 'agent_failed',
         ...(summary ? { summary } : {}),
         message: error ?? summary ?? '智能体报告任务执行失败，但未提供具体错误。',
       }
     }
     return {
       kind: 'failure',
+      reason: 'final_contract',
       message: `智能体返回了未知 FEISHU_TASK_RESULT_JSON.status：${status ?? '(missing)'}`,
     }
   }
 
   return {
     kind: 'failure',
+    reason: 'final_contract',
     message: output
       ? `智能体返回了非预期结果，未按 FEISHU_TASK_RESULT_JSON 协议收尾：${output}`
       : '智能体返回了空结果，未按 FEISHU_TASK_RESULT_JSON 协议收尾。',
@@ -1133,7 +1277,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[feishu task ${event.taskGuid}] loading base details`)
-    const baseTask = await this.feishu.getTaskBase(event.taskGuid)
+    const baseTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
     this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`)
 
     const createIgnoreReason = getTaskCreateIgnoreReason(eventKind, baseTask)
@@ -1142,7 +1286,7 @@ export class FeishuTaskBridgeRuntime {
     const executionIgnoreReason = getNonCommentExecutionIgnoreReason(eventKind, baseTask)
     if (executionIgnoreReason) return { ignoreReason: executionIgnoreReason }
 
-    return { task: await this.hydrateTaskContext(baseTask) }
+    return { task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask)) }
   }
 
   private async loadTaskForCommentEvent(
@@ -1153,19 +1297,20 @@ export class FeishuTaskBridgeRuntime {
     let loadedComments: FeishuTaskComment[] | undefined
 
     if (commentId) {
-      changedComment = await this.feishu.getComment(commentId) ?? undefined
+      changedComment = await withPromptDispatchFailure('read_reply_content', () => this.feishu.getComment(commentId)) ?? undefined
       if (!changedComment) return { ignoreReason: 'comment_without_effective_comment' }
       if (isCommentByCurrentApp(changedComment, this.config.feishu.appId)) {
         return { ignoreReason: 'comment_authored_by_current_app' }
       }
-      const ownerIgnoreReason = await this.getHumanCommentOwnerIgnoreReason(changedComment)
+      const effectiveComment = changedComment
+      const ownerIgnoreReason = await withPromptDispatchFailure('verify_task_owner', () => this.getHumanCommentOwnerIgnoreReason(effectiveComment))
       if (ownerIgnoreReason) {
-        await this.commentPermissionDeniedOnce(event, changedComment)
+        await this.commentPermissionDeniedOnce(event, effectiveComment)
         return { ignoreReason: ownerIgnoreReason }
       }
     } else {
       this.debugLog(`[feishu event ${event.eventId}] comment_id missing fallback=list_comments task=${event.taskGuid}`)
-      loadedComments = await this.feishu.listComments(event.taskGuid)
+      loadedComments = await withPromptDispatchFailure('read_reply_content', () => this.feishu.listComments(event.taskGuid))
       changedComment = getLatestNonEmptyComment({
         guid: event.taskGuid,
         summary: '(comment event)',
@@ -1175,24 +1320,25 @@ export class FeishuTaskBridgeRuntime {
       if (isCommentByCurrentApp(changedComment, this.config.feishu.appId)) {
         return { ignoreReason: 'comment_authored_by_current_app' }
       }
-      const ownerIgnoreReason = await this.getHumanCommentOwnerIgnoreReason(changedComment)
+      const effectiveComment = changedComment
+      const ownerIgnoreReason = await withPromptDispatchFailure('verify_task_owner', () => this.getHumanCommentOwnerIgnoreReason(effectiveComment))
       if (ownerIgnoreReason) {
-        await this.commentPermissionDeniedOnce(event, changedComment)
+        await this.commentPermissionDeniedOnce(event, effectiveComment)
         return { ignoreReason: ownerIgnoreReason }
       }
     }
 
     this.debugLog(`[feishu task ${event.taskGuid}] loading base details`)
-    const baseTask = await this.feishu.getTaskBase(event.taskGuid)
+    const baseTask = await withPromptDispatchFailure('read_task_details', () => this.feishu.getTaskBase(event.taskGuid))
     this.debugLog(`[feishu task ${baseTask.guid}] loaded base summary="${baseTask.summary}"`)
     const executionIgnoreReason = getCommentExecutionIgnoreReason(baseTask, changedComment, this.config.feishu.appId)
     if (executionIgnoreReason) return { ignoreReason: executionIgnoreReason }
 
     return {
-      task: await this.hydrateTaskContext(baseTask, {
+      task: await withPromptDispatchFailure('read_task_context', () => this.hydrateTaskContext(baseTask, {
         comments: loadedComments,
         changedComment,
-      }),
+      })),
     }
   }
 
@@ -1239,6 +1385,21 @@ export class FeishuTaskBridgeRuntime {
     this.prunePermissionDeniedCommentNotices()
     await this.persistState()
     this.debugLog(`[feishu event ${event.eventId}] permission denied notice commented key=${noticeKey}`)
+  }
+
+  private async commentPromptDispatchFailure(
+    event: FeishuTaskEvent,
+    eventKind: FeishuTaskEventKind,
+    action: PromptDispatchFailureAction,
+    error: unknown,
+  ): Promise<void> {
+    const comment = buildPromptDispatchFailureComment(eventKind, action, error)
+    try {
+      await this.feishu.commentTask(event.taskGuid, comment)
+      this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} dispatch failure commented action=${action}`)
+    } catch (caughtError) {
+      this.logger.error(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} dispatch failure comment_error action=${action} error=${formatUnknownError(caughtError)}`)
+    }
   }
 
   private async getAppOwnerId(): Promise<string> {
@@ -1441,7 +1602,7 @@ export class FeishuTaskBridgeRuntime {
         `attachments=${preparedAttachments.attachments.length}`,
       ].join(' '))
 
-      const result = await this.aamp.sendTask({
+      const result = await withPromptDispatchFailure('dispatch_agent', () => this.aamp.sendTask({
         to: this.config.targetAgentEmail,
         taskId: dispatch.taskId,
         sessionKey: dispatch.sessionKey,
@@ -1451,7 +1612,7 @@ export class FeishuTaskBridgeRuntime {
         dispatchContext: dispatch.dispatchContext,
         promptRules: dispatch.promptRules,
         attachments: preparedAttachments.attachments.length ? preparedAttachments.attachments : undefined,
-      })
+      }))
 
       this.state.tasks[dispatch.taskId] = {
         ...taskState,
@@ -1466,7 +1627,11 @@ export class FeishuTaskBridgeRuntime {
       this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} dispatch sent aamp_task=${dispatch.taskId} to=${this.config.targetAgentEmail} attachments=${preparedAttachments.attachments.length} attachment_notes=${preparedAttachments.notes.length}`)
       this.debugLog(`[aamp dispatch ${dispatch.taskId}] sent message=${result.messageId}`)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const promptFailure = getPromptDispatchFailure(error)
+      if (promptFailure) {
+        await this.commentPromptDispatchFailure(event, eventKind, promptFailure.action, promptFailure.originalError)
+      }
+      const message = formatUnknownError(promptFailure?.originalError ?? error)
       this.state.lastError = message
       if (taskState) {
         this.state.tasks[taskState.aampTaskId] = {
@@ -1819,10 +1984,11 @@ export class FeishuTaskBridgeRuntime {
       try {
         if (disposition.kind === 'answered') {
           if (disposition.replyWritten === false && disposition.summary) {
-            await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
+            const summary = disposition.summary
+            await withPostPromptFeishuFailure('result_comment', () => this.commentAnsweredResultOnce(result.taskId, flushedTaskState, summary))
           }
 
-          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+          await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState))
 
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
@@ -1840,8 +2006,8 @@ export class FeishuTaskBridgeRuntime {
         }
 
         if (disposition.kind === 'help_needed') {
-          await this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message)
-          await this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+          await withPostPromptFeishuFailure('help_comment', () => this.commentHelpNeededOnce(result.taskId, flushedTaskState, disposition.message))
+          await withPostPromptFeishuFailure('waiting_for_human_status', () => this.markFeishuTasksBlockedOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState))
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
           resultHandledTaskIds.add(result.taskId)
@@ -1861,15 +2027,18 @@ export class FeishuTaskBridgeRuntime {
           try {
             await this.applyTaskResultOutputs(result.taskId, flushedTaskState, disposition.outputs)
           } catch (error) {
-            if (isRetryableFeishuError(error)) throw error
+            const writeFailure = getPostPromptFeishuFailure(error)
+            const originalError = writeFailure?.originalError ?? error
+            if (isRetryableFeishuError(originalError)) throw error
             await this.closeTaskResultAsFailure(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState, {
               kind: 'failure',
+              reason: 'bridge_output_write',
               summary: disposition.summary,
-              message: formatUnknownError(error),
+              message: formatUnknownError(originalError),
             })
             return
           }
-          await this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState)
+          await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState))
 
           const latestTaskState = this.state.tasks[result.taskId] ?? flushedTaskState
           const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
@@ -1888,8 +2057,15 @@ export class FeishuTaskBridgeRuntime {
 
         await this.closeTaskResultAsFailure(result.taskId, flushedTaskState, disposition)
       } catch (error) {
-        if (isRetryableFeishuError(error)) {
-          await this.closeTaskResultAsFeishuWriteFailure(result.taskId, this.state.tasks[result.taskId] ?? flushedTaskState, error)
+        const writeFailure = getPostPromptFeishuFailure(error)
+        const originalError = writeFailure?.originalError ?? error
+        if (writeFailure || isRetryableFeishuError(originalError)) {
+          await this.closeTaskResultAsFeishuWriteFailure(
+            result.taskId,
+            this.state.tasks[result.taskId] ?? flushedTaskState,
+            originalError,
+            writeFailure?.action ?? 'feishu_write',
+          )
           return
         }
         throw error
@@ -1903,6 +2079,7 @@ export class FeishuTaskBridgeRuntime {
     aampTaskId: string,
     taskState: BridgeTaskState,
     error: unknown,
+    action: PostPromptFeishuFailureAction,
   ): Promise<void> {
     const message = formatUnknownError(error)
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
@@ -1919,7 +2096,7 @@ export class FeishuTaskBridgeRuntime {
     try {
       await this.feishu.commentTask(
         (this.state.tasks[aampTaskId] ?? latestTaskState).taskGuid,
-        buildFeishuWriteFailureNotice(error, completionError),
+        buildFeishuWriteFailureNotice(action, error, completionError),
       )
     } catch (caughtError) {
       commentError = caughtError
@@ -1951,8 +2128,8 @@ export class FeishuTaskBridgeRuntime {
     taskState: BridgeTaskState,
     disposition: Extract<TaskResultDisposition, { kind: 'failure' }>,
   ): Promise<void> {
-    await this.commentTaskResultOnce(aampTaskId, taskState, disposition)
-    await this.completeFeishuTasksOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState)
+    await withPostPromptFeishuFailure('result_comment', () => this.commentTaskResultOnce(aampTaskId, taskState, disposition))
+    await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState))
 
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     const resultHandledTaskIds = new Set(latestTaskState.resultHandledTaskIds ?? [])
@@ -1985,7 +2162,7 @@ export class FeishuTaskBridgeRuntime {
     for (let index = 0; index < outputs.length; index += 1) {
       const output = outputs[index]
       if (output.kind === 'reply_comment') continue
-      await this.applyTaskResultDeliveryOutputOnce(aampTaskId, taskState, index, output)
+      await withPostPromptFeishuFailure('result_delivery', () => this.applyTaskResultDeliveryOutputOnce(aampTaskId, taskState, index, output))
     }
 
     const replyOutputs = outputs
@@ -1994,7 +2171,7 @@ export class FeishuTaskBridgeRuntime {
       .map((output) => output.content)
       .join('\n\n')
     if (replyContent) {
-      await this.commentReplyOutputOnce(aampTaskId, taskState, replyContent, getReplyCommentOutputApplyKey(replyOutputs))
+      await withPostPromptFeishuFailure('result_comment', () => this.commentReplyOutputOnce(aampTaskId, taskState, replyContent, getReplyCommentOutputApplyKey(replyOutputs)))
     }
   }
 
@@ -2191,8 +2368,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const comment = [
-      ...(disposition.summary ? [disposition.summary, ''] : []),
-      `失败原因：${disposition.message}`,
+      buildTaskResultFailureComment(disposition),
     ].join('\n')
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting result on Feishu task ${latestTaskState.taskGuid}`)
