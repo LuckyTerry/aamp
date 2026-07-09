@@ -247,7 +247,7 @@ export function resolveLarkCliProfileCredentialsFromDisk(
 export async function resolveFeishuCliCredentials(
   options: FeishuCliCredentialOptions = {},
 ): Promise<FeishuCliCredentials> {
-  const cliBin = options.cliBin?.trim() || 'lark-cli'
+  const cliBin = options.cliBin?.trim() || process.env.AAMP_LARK_CLI_BIN?.trim() || 'lark-cli'
   let createdCredentials: Partial<Pick<FeishuCliCredentials, 'appId' | 'appSecret'>> = {}
   if (options.createNew) {
     createdCredentials = await createLarkCliApp(options, cliBin)

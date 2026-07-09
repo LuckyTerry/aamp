@@ -6,7 +6,7 @@
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.0-dev.133",
+  "version": "0.1.0-dev.138",
   "description": "One-click launcher for AAMP ACP/CLI bridge and unified Feishu bridge.",
   "type": "module",
   "bin": {

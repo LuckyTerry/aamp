@@ -232,3 +232,21 @@ flush_lark_cli_auth_scopes
     '',
   ].join('\n'))
 })
+
+test('bootstrap pins lark-cli to one absolute binary and serializes writes', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+
+  assert.match(source, /AAMP_LARK_CLI_BIN=/)
+  assert.match(source, /select_lark_cli_bin\(\)/)
+  assert.match(source, /lark_cli_candidate_paths\(\)/)
+  assert.match(source, /LARK_CLI_INSTALL_LOCK_DIR/)
+  assert.match(source, /LARK_CLI_CONFIG_LOCK_DIR/)
+  assert.match(source, /with_lark_cli_install_lock/)
+  assert.match(source, /with_lark_cli_config_lock/)
+  assert.match(source, /export AAMP_LARK_CLI_BIN/)
+  assert.match(source, /export AAMP_LARK_CLI_BIN=\"\$LARK_CLI_CMD\"/)
+  assert.match(source, /\"\$LARK_CLI_CMD\" --profile \"\$profile\" auth status/)
+  assert.match(source, /run_lark_cli_auth_login_with_browser_open \"\$LARK_CLI_CMD\"/)
+  assert.match(source, /\"\$LARK_CLI_CMD\" profile list/)
+  assert.match(source, /\| \"\$LARK_CLI_CMD\" profile add/)
+})

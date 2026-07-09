@@ -146,7 +146,7 @@ export class FeishuBridgeRuntime {
     })
     this.channel = (config.feishu.authMode ?? 'app-secret') === 'lark-cli'
       ? new LarkCliChannel({
-        cliBin: config.feishu.cliBin ?? 'lark-cli',
+        cliBin: config.feishu.cliBin?.trim() || process.env.AAMP_LARK_CLI_BIN?.trim() || 'lark-cli',
         profile: config.feishu.cliProfile ?? config.slug,
         logger: this.logger,
       })

@@ -152,7 +152,7 @@ function renderDeliverableGuidance(): string[] {
     '  1. Prefer Feishu document link_delivery for human-readable deliverables in this Feishu ecosystem.',
     '  2. For document deliverables such as reports, plans, specs, requirements, job descriptions, summaries, meeting notes, research notes, or long-form Markdown/rich-text content, create a Feishu document first and return a link_delivery output with that document URL. Do not create or upload a local .md file for these document deliverables.',
     '  3. Use the available Feishu/Lark document APIs, MCP tools, or lark-cli document commands in the current environment to create the Feishu document.',
-    '  4. lark-cli is an allowed document creation path. For document deliverables, first run `lark-cli docs --help`, then run `lark-cli skills read lark-doc`, then create the document with `lark-cli docs +create --api-version v2 ...` using the workflow described by the lark-doc skill.',
+    '  4. lark-cli is an allowed document creation path. For document deliverables, first run `"$AAMP_LARK_CLI_BIN" docs --help`, then run `"$AAMP_LARK_CLI_BIN" skills read lark-doc`, then create the document with `"$AAMP_LARK_CLI_BIN" docs +create --api-version v2 ...` using the workflow described by the lark-doc skill.',
     '  5. Do not conclude that Feishu document creation is unavailable before trying these lark-cli commands or another concrete Feishu/Lark document creation API.',
     '  6. If document creation is unavailable after a concrete attempt, use status=need_help and explain the missing capability instead of falling back to a .md attachment.',
     '  7. Use file_delivery only for native file/image artifacts that should remain files, such as images, CSV, PDF, zip archives, binaries, generated media, or code bundles. The bridge validates that the file exists, is a regular file, is no larger than 50 MB, and uploads it as a task_delivery attachment.',
@@ -176,9 +176,9 @@ function renderNewlineGuidance(): string[] {
 function renderSourceDocumentGuidance(): string[] {
   return [
     '- Source document links in Task source context are task input, not deliverables.',
-    '- Before relying on a source document link from Task source context, read it with lark-cli.',
-    '- First run `lark-cli docs --help`, then run `lark-cli skills read lark-doc`, then use the lark-doc workflow to read or export the document content from the URL.',
-    '- Do not ask the user to paste document content before trying lark-cli.',
+    '- Before relying on a source document link from Task source context, read it with the lark-cli binary selected by AAMP_LARK_CLI_BIN.',
+    '- First run `"$AAMP_LARK_CLI_BIN" docs --help`, then run `"$AAMP_LARK_CLI_BIN" skills read lark-doc`, then use the lark-doc workflow to read or export the document content from the URL.',
+    '- Do not ask the user to paste document content before trying the lark-cli binary selected by AAMP_LARK_CLI_BIN.',
     '- If a required source document cannot be accessed after a concrete lark-cli attempt, use status=need_help and identify the inaccessible URL.',
   ]
 }
@@ -222,8 +222,9 @@ function renderFeishuLarkCliProfileRules(profile: string | undefined): string[] 
   return [
     'Feishu lark-cli profile rules:',
     `- This task came through a Feishu bot bound to lark-cli profile \`${normalized}\`.`,
-    `- Whenever you run any lark-cli command for this task, you MUST use the prefix \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized}\` followed by the lark-cli subcommand and arguments.`,
-    `- For example, check auth status with \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' lark-cli --profile ${normalized} auth status --json\`.`,
+    `- Whenever you run any lark-cli command for this task, you MUST use the prefix \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile ${normalized}\` followed by the lark-cli subcommand and arguments.`,
+    `- For example, check auth status with \`unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile ${normalized} auth status --json\`.`,
+    '- AAMP_LARK_CLI_BIN is provided by the bridge and points to the exact lark-cli binary selected during one-click startup.',
     '- The unset/env prefix prevents Codem exported shell functions from affecting lark-cli credential resolution.',
     '- Do not use the active/default lark-cli profile for this task.',
     `- If you ask the user to authorize or rerun a lark-cli command, include the same unset/env prefix and \`--profile ${normalized}\` in the exact command.`,
@@ -310,7 +311,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     'Feishu/Lark Authorization Rules:',
     ...renderFeishuLarkCliProfileRules(options?.feishuLarkCliProfile),
     '- Before using Feishu/Lark APIs or lark-cli capabilities, inspect the current granted user scopes for the provided lark-cli profile and treat those granted scopes as the hard capability boundary.',
-    '- If a lark-cli profile is provided by the bridge, run lark-cli commands with that profile and check its auth status before choosing Feishu/Lark data sources.',
+    '- If a lark-cli profile is provided by the bridge, run lark-cli commands through AAMP_LARK_CLI_BIN with that profile and check its auth status before choosing Feishu/Lark data sources.',
     '- Do not run lark-cli auth login, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.',
     '- Complete the task using only currently granted scopes and available task context. If a preferred Feishu/Lark source is unavailable, try another already-authorized source or produce the best result possible within the granted scopes.',
     '- If the task truly cannot be completed within the currently granted scopes, use status=need_help only for missing business input, identifiers, documents, groups, or data locations; do not include authorization commands or scope requests.',

@@ -23,6 +23,10 @@ CURRENT_RUN_FILE="${CURRENT_RUN_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/run
 ACTIVE_RUNS_FILE="${ACTIVE_RUNS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/active.json}"
 BOT_RESERVATIONS_FILE="${BOT_RESERVATIONS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/reservations.json}"
 BOT_SELECTION_LOCK_DIR="${BOT_SELECTION_LOCK_DIR:-$HOME/.aamp/feishu-bridge/task-runtime/runs/selection.lock}"
+LARK_CLI_INSTALL_LOCK_DIR="${LARK_CLI_INSTALL_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-install.lock}"
+LARK_CLI_CONFIG_LOCK_DIR="${LARK_CLI_CONFIG_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-config.lock}"
+AAMP_LARK_CLI_BIN="${AAMP_LARK_CLI_BIN:-}"
+LARK_CLI_CMD=""
 AAMP_LARK_CLI_CONFIG_DIR="${AAMP_LARK_CLI_CONFIG_DIR:-${LARKSUITE_CLI_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-v1}}"
 AAMP_LARK_CLI_BOE_CONFIG_DIR="${AAMP_LARK_CLI_BOE_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-boe-v1}"
 CODEM_SERVER_URL="${CODEM_SERVER_URL:-https://codem.feishu.cn}"
@@ -41,10 +45,10 @@ FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v
 FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16}"
-CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.13}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.44}"
-AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.133}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.17}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.49}"
+AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.138}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -416,6 +420,57 @@ release_bot_selection_lock() {
   [ "$owner" = "$ONE_CLICK_RUN_ID" ] || return 0
   rm -f "$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true
   rmdir "$BOT_SELECTION_LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_dir_lock() {
+  local lock_dir="$1"
+  local label="$2"
+  local attempt owner owner_pid
+  mkdir -p "$(dirname "$lock_dir")"
+  for attempt in $(seq 1 600); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$ONE_CLICK_RUN_ID" >"$lock_dir/owner" 2>/dev/null || true
+      return 0
+    fi
+    owner="$(cat "$lock_dir/owner" 2>/dev/null || true)"
+    owner_pid="${owner##*-}"
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$lock_dir/owner" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.2
+  done
+  agent_fail "timed out waiting for $label lock"
+}
+
+release_dir_lock() {
+  local lock_dir="$1"
+  local owner
+  owner="$(cat "$lock_dir/owner" 2>/dev/null || true)"
+  [ "$owner" = "$ONE_CLICK_RUN_ID" ] || return 0
+  rm -f "$lock_dir/owner" 2>/dev/null || true
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+with_lark_cli_install_lock() {
+  acquire_dir_lock "$LARK_CLI_INSTALL_LOCK_DIR" "lark-cli install"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$LARK_CLI_INSTALL_LOCK_DIR"
+  return "$status"
+}
+
+with_lark_cli_config_lock() {
+  acquire_dir_lock "$LARK_CLI_CONFIG_LOCK_DIR" "lark-cli config"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$LARK_CLI_CONFIG_LOCK_DIR"
+  return "$status"
 }
 
 cleanup_stale_one_click_processes() {
@@ -1636,15 +1691,28 @@ if (cleaned) {
 }
 
 ensure_lark_cli() {
-  if command -v lark-cli >/dev/null 2>&1; then
-    ensure_lark_cli_min_version
-    return 0
+  select_lark_cli_bin
+}
+
+lark_cli_candidate_paths() {
+  if [ -n "$AAMP_LARK_CLI_BIN" ]; then
+    printf '%s\n' "$AAMP_LARK_CLI_BIN"
   fi
-  agent_fail "lark-cli is required for Feishu task profile mode. Install lark-cli first, then rerun this script."
+  if [ -x "$NPM_GLOBAL_PREFIX/bin/lark-cli" ]; then
+    printf '%s\n' "$NPM_GLOBAL_PREFIX/bin/lark-cli"
+  fi
+  type -P -a lark-cli 2>/dev/null || true
+}
+
+lark_cli_version_for() {
+  local cli_bin="$1"
+  [ -x "$cli_bin" ] || return 1
+  "$cli_bin" --version 2>/dev/null | sed -E 's/.*version[[:space:]]+([0-9]+([.][0-9]+){0,2}).*/\1/' | head -n 1
 }
 
 lark_cli_version() {
-  lark-cli --version 2>/dev/null | sed -E 's/.*version[[:space:]]+([0-9]+([.][0-9]+){0,2}).*/\1/' | head -n 1
+  [ -n "$LARK_CLI_CMD" ] || return 1
+  lark_cli_version_for "$LARK_CLI_CMD"
 }
 
 version_lt() {
@@ -1662,34 +1730,83 @@ process.exit(1);
 '
 }
 
-ensure_lark_cli_min_version() {
-  local current_version updated_version
+select_lark_cli_bin_from_candidates() {
+  local candidate version seen=""
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in
+      /*) ;;
+      *)
+        agent_detail "lark-cli candidate is not an absolute path: $candidate"
+        continue
+        ;;
+    esac
+    case "\n$seen\n" in
+      *"\n$candidate\n"*) continue ;;
+    esac
+    seen="$seen\n$candidate"
+    version="$(lark_cli_version_for "$candidate" || true)"
+    if [ -n "$version" ]; then
+      agent_detail "lark-cli candidate: $candidate version=$version"
+      if ! version_lt "$version" "$LARK_CLI_MIN_VERSION"; then
+        LARK_CLI_CMD="$candidate"
+        export AAMP_LARK_CLI_BIN="$LARK_CLI_CMD"
+        path_prepend "$(dirname "$LARK_CLI_CMD")"
+        agent_log "using lark-cli: $LARK_CLI_CMD ($version)"
+        agent_detail "lark-cli config dir: ${LARKSUITE_CLI_CONFIG_DIR:-$AAMP_LARK_CLI_CONFIG_DIR}"
+        return 0
+      fi
+    else
+      agent_detail "lark-cli candidate unavailable: $candidate"
+    fi
+  done < <(lark_cli_candidate_paths)
+  return 1
+}
 
-  current_version="$(lark_cli_version)"
-  if [ -z "$current_version" ]; then
-    agent_fail "failed to detect lark-cli version; please update lark-cli to >= $LARK_CLI_MIN_VERSION and rerun this script."
+install_lark_cli_in_isolated_prefix() {
+  agent_log "installing lark-cli to isolated prefix: $NPM_GLOBAL_PREFIX"
+  npm_install_global @larksuite/cli@latest
+}
+
+ensure_lark_cli_after_install_lock() {
+  if select_lark_cli_bin_from_candidates; then
+    return 0
   fi
+  install_lark_cli_in_isolated_prefix
+}
 
-  if ! version_lt "$current_version" "$LARK_CLI_MIN_VERSION"; then
+select_lark_cli_bin() {
+  if [ -n "$LARK_CLI_CMD" ] && [ -x "$LARK_CLI_CMD" ]; then
     return 0
   fi
 
-  agent_log "lark-cli $current_version is older than required $LARK_CLI_MIN_VERSION; updating lark-cli to latest"
-  lark-cli update || agent_fail "failed to update lark-cli. Please update lark-cli to >= $LARK_CLI_MIN_VERSION manually and rerun this script."
-  hash -r 2>/dev/null || true
-
-  updated_version="$(lark_cli_version)"
-  if [ -z "$updated_version" ] || version_lt "$updated_version" "$LARK_CLI_MIN_VERSION"; then
-    agent_fail "lark-cli version is still ${updated_version:-unknown}; required >= $LARK_CLI_MIN_VERSION."
+  if select_lark_cli_bin_from_candidates; then
+    return 0
   fi
-  agent_log "lark-cli version is ready: $updated_version"
+
+  if [ -n "$AAMP_LARK_CLI_BIN" ]; then
+    agent_fail "AAMP_LARK_CLI_BIN does not point to lark-cli >= $LARK_CLI_MIN_VERSION: $AAMP_LARK_CLI_BIN"
+  fi
+
+  with_lark_cli_install_lock ensure_lark_cli_after_install_lock || agent_fail "failed to install lark-cli to $NPM_GLOBAL_PREFIX"
+  hash -r 2>/dev/null || true
+  if select_lark_cli_bin_from_candidates; then
+    return 0
+  fi
+
+  agent_fail "failed to select lark-cli >= $LARK_CLI_MIN_VERSION after isolated install"
+}
+
+ensure_lark_cli_min_version() {
+  select_lark_cli_bin
 }
 
 lark_cli_user_auth_satisfied() {
   local profile="$1"
   local status_json auth_check
+  LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
 
-  status_json="$(lark-cli --profile "$profile" auth status --json 2>/dev/null)" || return 1
+  status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)" || return 1
 
   set +e
   auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
@@ -1886,25 +2003,29 @@ run_lark_cli_auth_login() {
 
   auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes")"
   if [ -z "$auth_excludes" ]; then
-    run_lark_cli_auth_login_with_browser_open lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
   else
-    run_lark_cli_auth_login_with_browser_open lark-cli --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
   fi
 }
 
 ensure_lark_cli_profile() {
+  ensure_lark_cli
+  with_lark_cli_config_lock ensure_lark_cli_profile_locked "$@"
+}
+
+ensure_lark_cli_profile_locked() {
   local app_id="$1"
   local app_secret="$2"
   local profile="$3"
   local auth_excludes
-  ensure_lark_cli
 
-  if lark-cli profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
+  if "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
     agent_detail "lark-cli profile already exists: $profile"
   else
     [ -n "$app_secret" ] || agent_fail "missing app secret for creating lark-cli profile $profile"
     agent_log "creating lark-cli profile: $profile"
-    printf '%s\n' "$app_secret" | lark-cli profile add \
+    printf '%s\n' "$app_secret" | "$LARK_CLI_CMD" profile add \
       --name "$profile" \
       --app-id "$app_id" \
       --app-secret-stdin
@@ -2983,6 +3104,7 @@ start_feishu_task_bridge() {
     --app-id "$APP_ID" \
     --use-feishu-cli \
     --feishu-cli-profile "$LARK_CLI_PROFILE" \
+    --feishu-cli-bin "$LARK_CLI_CMD" \
     --pairing-url "$PAIRING_URL"
   )
 
