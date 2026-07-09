@@ -35,7 +35,6 @@ final class LauncherStoreTests: XCTestCase {
             XCTFail("Failed to read file permissions for cached launcher")
         }
         #endif
-
         let activeMetadata = try Data(contentsOf: fixture.paths.activeLauncherMetadata)
         let json = try JSONSerialization.jsonObject(with: activeMetadata, options: [])
         let dict = try XCTUnwrap(json as? [String: Any])
@@ -51,6 +50,7 @@ final class LauncherStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: cachedRoot, withIntermediateDirectories: true)
         try Data("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'cached\\n'\n".utf8)
             .write(to: cachedRoot.appendingPathComponent("aamp-feishu-task-agent-bootstrap.sh"))
+        try FileManager.default.createDirectory(at: fixture.paths.launcherRoot, withIntermediateDirectories: true)
         try Data("{{invalid-json}".utf8).write(to: fixture.paths.activeLauncherMetadata)
 
         let active = try store.activeScript()
@@ -128,6 +128,7 @@ final class LauncherStoreTests: XCTestCase {
         let versionRoot = fixture.paths.cachedLauncherRoot.appendingPathComponent("bad", isDirectory: true)
         try FileManager.default.createDirectory(at: versionRoot, withIntermediateDirectories: true)
         try Data("not a shell script".utf8).write(to: versionRoot.appendingPathComponent("aamp-feishu-task-agent-bootstrap.sh"))
+        try FileManager.default.createDirectory(at: fixture.paths.launcherRoot, withIntermediateDirectories: true)
         try Data("{\"version\":\"bad\"}".utf8).write(to: fixture.paths.activeLauncherMetadata)
 
         let active = try store.activeScript()
