@@ -41,9 +41,9 @@ FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.16}"
-CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.11}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.42}"
-AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.125}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.13}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.44}"
+AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.133}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -53,6 +53,7 @@ FEISHU_PID=""
 ACP_TAIL_PID=""
 CLI_TAIL_PID=""
 FEISHU_TAIL_PID=""
+DETECTED_AGENTS=()
 ACP_LOG=""
 CLI_LOG=""
 FEISHU_LOG=""
@@ -739,32 +740,66 @@ read_tty_line() {
   printf '%s' "$value"
 }
 
+agent_cli_detected() {
+  case "$1" in
+    codex)
+      resolve_codex_cli_for_acp >/dev/null 2>&1
+      ;;
+    cursor)
+      find_cursor_agent_cli >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+discover_interactive_agents() {
+  DETECTED_AGENTS=()
+  if agent_cli_detected codex; then
+    DETECTED_AGENTS+=("codex")
+  fi
+  if agent_cli_detected cursor; then
+    DETECTED_AGENTS+=("cursor")
+  fi
+
+  if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
+    agent_fail "暂未检测到本地智能体。请先安装并登录 Codex 或 Cursor CLI 后重试。"
+  fi
+}
+
+move_agent_menu_cursor_up() {
+  local line_count
+  line_count=$(( ${#DETECTED_AGENTS[@]} + 2 ))
+  printf '\033[%dA' "$line_count" >&3
+}
+
 render_agent_menu() {
   local selected="$1"
-  local agents=(codex cursor codem)
   local index
 
   printf '\033[?25l' >&3
   printf '\033[2K\r请选择要启动的 Agent:\n' >&3
-  for index in "${!agents[@]}"; do
+  for index in "${!DETECTED_AGENTS[@]}"; do
     printf '\033[2K\r' >&3
     if [ "$index" -eq "$selected" ]; then
-      printf '  > %s\n' "${agents[$index]}" >&3
+      printf '  > %s\n' "${DETECTED_AGENTS[$index]}" >&3
     else
-      printf '    %s\n' "${agents[$index]}" >&3
+      printf '    %s\n' "${DETECTED_AGENTS[$index]}" >&3
     fi
   done
-  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按 1/2/3 或 j/k。\n' >&3
+  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按数字键或 j/k。\n' >&3
 }
 
 select_agent_interactively() {
-  local agents=(codex cursor codem)
   local selected=0
   local key rest
   local tty_state
 
+  discover_interactive_agents
+
   if ! exec 3<>/dev/tty; then
-    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor|codem"
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor"
   fi
 
   tty_state="$(stty -g <&3)"
@@ -780,7 +815,7 @@ select_agent_interactively() {
 
     case "$key" in
       ""|$'\n'|$'\r')
-        AGENT="${agents[$selected]}"
+        AGENT="${DETECTED_AGENTS[$selected]}"
         stty "$tty_state" <&3
         printf '\033[?25h\n' >&3
         exec 3>&-
@@ -790,13 +825,13 @@ select_agent_interactively() {
         IFS= read -rsn2 -u 3 rest || rest=""
         case "$rest" in
           "[A")
-            selected=$(( (selected + ${#agents[@]} - 1) % ${#agents[@]} ))
-            printf '\033[5A' >&3
+            selected=$(( (selected + ${#DETECTED_AGENTS[@]} - 1) % ${#DETECTED_AGENTS[@]} ))
+            move_agent_menu_cursor_up
             render_agent_menu "$selected"
             ;;
           "[B")
-            selected=$(( (selected + 1) % ${#agents[@]} ))
-            printf '\033[5A' >&3
+            selected=$(( (selected + 1) % ${#DETECTED_AGENTS[@]} ))
+            move_agent_menu_cursor_up
             render_agent_menu "$selected"
             ;;
           "[C"|"[D")
@@ -804,24 +839,26 @@ select_agent_interactively() {
         esac
         ;;
       k)
-        selected=$(( (selected + ${#agents[@]} - 1) % ${#agents[@]} ))
-        printf '\033[5A' >&3
+        selected=$(( (selected + ${#DETECTED_AGENTS[@]} - 1) % ${#DETECTED_AGENTS[@]} ))
+        move_agent_menu_cursor_up
         render_agent_menu "$selected"
         ;;
       j)
-        selected=$(( (selected + 1) % ${#agents[@]} ))
-        printf '\033[5A' >&3
+        selected=$(( (selected + 1) % ${#DETECTED_AGENTS[@]} ))
+        move_agent_menu_cursor_up
         render_agent_menu "$selected"
         ;;
-      1|2|3)
-        selected=$(( key - 1 ))
-        AGENT="${agents[$selected]}"
-        stty "$tty_state" <&3
-        printf '\033[5A' >&3
-        render_agent_menu "$selected"
-        printf '\033[?25h\n' >&3
-        exec 3>&-
-        return 0
+      [1-9])
+        if [ "$key" -le "${#DETECTED_AGENTS[@]}" ]; then
+          selected=$(( key - 1 ))
+          AGENT="${DETECTED_AGENTS[$selected]}"
+          stty "$tty_state" <&3
+          move_agent_menu_cursor_up
+          render_agent_menu "$selected"
+          printf '\033[?25h\n' >&3
+          exec 3>&-
+          return 0
+        fi
         ;;
     esac
   done
@@ -1286,6 +1323,10 @@ for (const bot of bots) {
   const name = String(bot?.display_name || appId).trim();
   const appSecret = String(bot?.app_secret || "").trim();
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
+  if (!appSecret) {
+    console.error("[aamp-one-click] skipping saved Feishu bot without readable app secret: " + name + " (" + appId + ", profile=" + profile + ")");
+    continue;
+  }
   seen.add(appId);
   console.log([appId, name, profile, appSecret].join("\t"));
 }
@@ -1885,7 +1926,7 @@ select_existing_bot_or_create() {
 
   if [ "${#app_ids[@]}" -eq 0 ]; then
     if has_saved_bot_configs; then
-      agent_log "saved Feishu bot(s) are already running; choose new app to start another instance."
+      agent_log "saved Feishu bot(s) are unavailable or already running; choose new app to continue."
       bot_labels+=("新建应用/选择其他应用")
       set +e
       select_bot_menu
@@ -2078,30 +2119,6 @@ ensure_acpx() {
   acpx --version >/dev/null
 }
 
-install_agent_cli() {
-  case "$AGENT" in
-    codex)
-      npm_install_global @openai/codex
-      ;;
-    claude)
-      npm_install_global @anthropic-ai/claude-code
-      ;;
-    gemini)
-      npm_install_global @google/gemini-cli
-      ;;
-    cursor)
-      install_cursor_agent_cli
-      ;;
-    codem)
-      install_codem_cli
-      ;;
-    *)
-      agent_log "no built-in installer for agent: $AGENT"
-      return 1
-      ;;
-  esac
-}
-
 ensure_node_major_at_least() {
   local required="$1"
   local major
@@ -2203,12 +2220,7 @@ ensure_codem_local_bin_on_path() {
   path_prepend "$CODEM_LOCAL_BIN"
 }
 
-ensure_cursor_local_bin_on_path() {
-  path_prepend "$CURSOR_LOCAL_BIN"
-}
-
 find_cursor_agent_cli() {
-  ensure_cursor_local_bin_on_path
   if command -v agent >/dev/null 2>&1; then
     command -v agent
     return 0
@@ -2228,24 +2240,15 @@ find_cursor_agent_cli() {
   return 1
 }
 
-find_cursor_acp_cli() {
-  ensure_cursor_local_bin_on_path
-  if command -v cursor >/dev/null 2>&1; then
-    command -v cursor
-    return 0
-  fi
-  if [ -x "$CURSOR_LOCAL_BIN/cursor" ]; then
-    printf '%s\n' "$CURSOR_LOCAL_BIN/cursor"
-    return 0
-  fi
-  return 1
+resolve_cursor_cli_for_acp() {
+  command -v cursor
 }
 
 ensure_cursor_acp_command() {
   local cursor_agent
   local cursor_wrapper
 
-  if find_cursor_acp_cli >/dev/null 2>&1; then
+  if resolve_cursor_cli_for_acp >/dev/null 2>&1; then
     return 0
   fi
 
@@ -2260,19 +2263,7 @@ ensure_cursor_acp_command() {
   } > "$cursor_wrapper"
   chmod +x "$cursor_wrapper" 2>/dev/null || true
   hash -r 2>/dev/null || true
-  find_cursor_acp_cli >/dev/null 2>&1
-}
-
-install_cursor_agent_cli() {
-  command -v curl >/dev/null 2>&1 || {
-    agent_log "curl not found; cannot install Cursor CLI automatically"
-    return 1
-  }
-
-  agent_log "installing Cursor CLI"
-  ensure_cursor_local_bin_on_path
-  curl https://cursor.com/install -fsS | bash
-  hash -r 2>/dev/null || true
+  resolve_cursor_cli_for_acp >/dev/null 2>&1
 }
 
 ensure_agent_cli() {
@@ -2281,26 +2272,17 @@ ensure_agent_cli() {
   fi
 
   if [ "$AGENT" = "cursor" ]; then
-    if ! find_cursor_agent_cli >/dev/null 2>&1; then
-      agent_log "Cursor agent CLI not found"
-      agent_log "installing cursor CLI"
-      install_agent_cli || agent_fail "failed to install cursor CLI; install it manually with: curl https://cursor.com/install -fsS | bash"
-    fi
-
-    find_cursor_agent_cli >/dev/null 2>&1 || agent_fail "cursor CLI is still unavailable; check PATH for $CURSOR_LOCAL_BIN/agent"
-    ensure_cursor_acp_command || agent_fail "cursor ACP command is still unavailable; check PATH for $NPM_GLOBAL_PREFIX/bin/cursor"
+    find_cursor_agent_cli >/dev/null 2>&1 || agent_fail "未检测到 cursor CLI。请先安装 Cursor CLI 后重新运行脚本。"
+    ensure_cursor_acp_command || agent_fail "cursor ACP command is unavailable; check PATH for $NPM_GLOBAL_PREFIX/bin/cursor"
     return 0
   fi
 
-  if command -v "$AGENT" >/dev/null 2>&1; then
+  if [ "$AGENT" = "codex" ]; then
+    resolve_codex_cli_for_acp >/dev/null 2>&1 || agent_fail "未检测到 codex CLI。请先安装 Codex CLI 后重新运行脚本。"
     return 0
   fi
 
-  agent_log "agent CLI not found: $AGENT"
-  agent_log "installing $AGENT CLI"
-  install_agent_cli || agent_fail "failed to install $AGENT CLI"
-
-  command -v "$AGENT" >/dev/null 2>&1 || agent_fail "$AGENT CLI is still unavailable; check PATH"
+  command -v "$AGENT" >/dev/null 2>&1 || agent_fail "未检测到 $AGENT CLI。请先安装后重新运行脚本。"
 }
 
 clear_quarantine_path() {
@@ -2389,8 +2371,6 @@ clear_cursor_quarantine() {
   [ -n "$cursor_bin" ] || return 0
 
   clear_cli_quarantine "cursor" "$cursor_bin"
-  clear_quarantine_path "$CURSOR_LOCAL_BIN/agent" || true
-  clear_quarantine_path "$CURSOR_LOCAL_BIN/cursor-agent" || true
 }
 
 print_gatekeeper_help() {
@@ -2431,14 +2411,16 @@ print_codex_gatekeeper_help() {
 }
 
 run_codex_login_status() {
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 127
+
   set +e
-  codex login status >/dev/null 2>&1
+  "$codex_bin" login status >/dev/null 2>&1
   local status=$?
   set -e
   if [ "$status" -eq 137 ] && is_macos; then
-    local codex_bin
     local codex_real
-    codex_bin="$(command -v codex || true)"
     codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
     print_codex_gatekeeper_help "$codex_bin" "$codex_real"
     agent_fail "codex CLI was killed by macOS security policy"
@@ -2447,14 +2429,16 @@ run_codex_login_status() {
 }
 
 run_codex_login() {
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 127
+
   set +e
-  codex login
+  "$codex_bin" login
   local status=$?
   set -e
   if [ "$status" -eq 137 ] && is_macos; then
-    local codex_bin
     local codex_real
-    codex_bin="$(command -v codex || true)"
     codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
     print_codex_gatekeeper_help "$codex_bin" "$codex_real"
     agent_fail "codex CLI was killed by macOS security policy"
@@ -2728,9 +2712,9 @@ ensure_agent_login() {
     codex)
       clear_codex_quarantine
       if ! run_codex_login_status; then
-        agent_log "codex CLI is not logged in; starting codex login"
-        run_codex_login
-        run_codex_login_status || agent_fail "codex CLI is still not logged in"
+        agent_log "codex CLI 未登录，正在启动登录流程。"
+        run_codex_login || agent_fail "codex CLI 登录失败。请先执行 'codex login' 完成登录后重新运行脚本。"
+        run_codex_login_status || agent_fail "codex CLI 仍未登录。请先执行 'codex login' 完成登录后重新运行脚本。"
       fi
       ;;
     cursor)
@@ -2738,9 +2722,9 @@ ensure_agent_login() {
       if run_cursor_login_status; then
         agent_log "cursor CLI is already logged in"
       else
-        agent_log "cursor CLI is not logged in or login status is unavailable; starting cursor login"
-        run_cursor_login
-        run_cursor_login_status || agent_fail "cursor CLI is still not logged in"
+        agent_log "cursor CLI 未登录，正在启动登录流程。"
+        run_cursor_login || agent_fail "cursor CLI 登录失败。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
+        run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
       fi
       ;;
     codem)
@@ -2806,12 +2790,17 @@ uses_cli_bridge() {
 }
 
 resolve_codex_cli_for_acp() {
+  if command -v codex >/dev/null 2>&1; then
+    command -v codex
+    return 0
+  fi
+
   if is_macos && [ -x "$CODEX_APP_CLI" ]; then
     printf '%s\n' "$CODEX_APP_CLI"
     return 0
   fi
 
-  command -v codex
+  return 1
 }
 
 build_acp_agent_command() {
@@ -3042,13 +3031,13 @@ main() {
   install_aamp_logs_bin
   build_feishu_env_args
   source_lark_env
+  ensure_agent_cli
+  ensure_agent_login
   resolve_feishu_bot_credentials
   write_run_manifest
   if ! uses_cli_bridge; then
     ensure_acpx
   fi
-  ensure_agent_cli
-  ensure_agent_login
   if uses_cli_bridge; then
     start_cli_bridge_and_capture_pairing_url
   else
