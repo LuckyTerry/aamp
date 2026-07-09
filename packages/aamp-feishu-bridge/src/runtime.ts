@@ -708,6 +708,7 @@ export class FeishuBridgeRuntime {
   private buildDispatchContext(message: NormalizedMessage): Record<string, string> {
     const raw = (message.raw ?? {}) as SenderRawEvent
     const cliProfile = getFeishuLarkCliProfile(this.config.feishu.cliProfile)
+    const cliBin = this.config.feishu.cliBin?.trim()
     return {
       source: 'feishu',
       chat_id: message.chatId,
@@ -716,6 +717,7 @@ export class FeishuBridgeRuntime {
       sender_name: message.senderName || '',
       bot_open_id: this.channel.botIdentity?.openId || '',
       ...(cliProfile ? { feishu_lark_cli_profile: cliProfile } : {}),
+      ...(cliBin ? { feishu_lark_cli_bin: cliBin } : {}),
       is_group_mention: String(message.chatType === 'group'),
       feishu_message_id: message.messageId,
       feishu_reply_to_message_id: message.replyToMessageId || '',

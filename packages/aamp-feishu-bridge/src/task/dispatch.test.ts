@@ -105,9 +105,9 @@ test('buildFeishuTaskPromptRules tells agents how to read source document links'
   assert.match(rules, /Context Compression Contract:/)
   assert.match(rules, /Source Document Rules:/)
   assert.match(rules, /Source document links in Task source context are task input, not deliverables/i)
-  assert.match(rules, /Before relying on a source document link from Task source context, read it with the lark-cli binary selected by AAMP_LARK_CLI_BIN/i)
-  assert.match(rules, /\"\$AAMP_LARK_CLI_BIN\" docs --help/i)
-  assert.match(rules, /\"\$AAMP_LARK_CLI_BIN\" skills read lark-doc/i)
+  assert.match(rules, /Before relying on a source document link from Task source context, read it with lark-cli/i)
+  assert.match(rules, /lark-cli docs --help/i)
+  assert.match(rules, /lark-cli skills read lark-doc/i)
   assert.match(rules, /cannot be accessed after a concrete lark-cli attempt/i)
   assert.match(rules, /Treat the Description section as the complete Feishu task context, including Task source context when present/i)
   assert.match(rules, /source documents read via lark-cli from source document links in Task source context/i)
@@ -117,34 +117,43 @@ test('buildFeishuTaskPromptRules tells agents how to read source document links'
 test('buildFeishuTaskPromptRules requires Codem-safe prefix for any lark-cli command with task profile', () => {
   const rules = buildFeishuTaskPromptRules({
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
+    feishuLarkCliBin: '/Users/bytedance/.local/bin/lark-cli',
   })
 
   assert.ok(rules.includes(
-    "Whenever you run any lark-cli command for this task, you MUST use the prefix `unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile aamp-feishu-task-cli_aac6764b90f89cd0` followed by the lark-cli subcommand and arguments.",
+    "Whenever you run any lark-cli command for this task, you MUST use the prefix `unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' '/Users/bytedance/.local/bin/lark-cli' --profile aamp-feishu-task-cli_aac6764b90f89cd0` followed by the lark-cli subcommand and arguments.",
   ))
   assert.ok(rules.includes(
-    "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
+    "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' '/Users/bytedance/.local/bin/lark-cli' --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
   ))
   assert.match(rules, /prevents Codem exported shell functions from affecting lark-cli credential resolution/)
 })
 
-test('buildFeishuTaskPromptRules requires fixed AAMP_LARK_CLI_BIN when a task profile is provided', () => {
+test('buildFeishuTaskPromptRules renders the selected lark-cli absolute path when provided', () => {
   const rules = buildFeishuTaskPromptRules({
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
+    feishuLarkCliBin: '/Applications/Test Tools/lark-cli',
   })
 
-  assert.match(rules, /AAMP_LARK_CLI_BIN/)
+  assert.doesNotMatch(rules, /AAMP_LARK_CLI_BIN/)
   assert.ok(rules.includes(
-    "Whenever you run any lark-cli command for this task, you MUST use the prefix `unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile aamp-feishu-task-cli_aac6764b90f89cd0` followed by the lark-cli subcommand and arguments.",
-  ))
-  assert.ok(rules.includes(
-    "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' \"$AAMP_LARK_CLI_BIN\" --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
+    "unset -f git 2>/dev/null || true; env -u 'BASH_FUNC_git%%' '/Applications/Test Tools/lark-cli' --profile aamp-feishu-task-cli_aac6764b90f89cd0 auth status --json",
   ))
 })
 test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing source', () => {
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create')
 
   assert.deepEqual(context, { source: 'feishu-task' })
+})
+
+test('buildFeishuTaskDispatchContext carries lark-cli profile and absolute binary when provided', () => {
+  const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
+    feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
+    feishuLarkCliBin: '/Users/bytedance/.local/bin/lark-cli',
+  })
+
+  assert.equal(context.feishu_lark_cli_profile, 'aamp-feishu-task-cli_aac6764b90f89cd0')
+  assert.equal(context.feishu_lark_cli_bin, '/Users/bytedance/.local/bin/lark-cli')
 })
 
 test('buildFeishuTaskDispatch mirrors session key into dispatch context', () => {

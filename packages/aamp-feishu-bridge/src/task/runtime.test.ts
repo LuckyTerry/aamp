@@ -1167,6 +1167,49 @@ test('runtime completes and comments briefly when agent result violates the fina
   }
 })
 
+test('runtime logs sanitized FEISHU_TASK_RESULT_JSON snippet when inner JSON cannot parse', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const errors: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: (message: unknown) => { errors.push(String(message)) } },
+  })
+  const aampTaskId = 'feishu-task-task_guid_bad_inner_json-evt_bad_inner_json'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_bad_inner_json',
+      taskGuid: 'task_guid_bad_inner_json',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: 'FEISHU_TASK_RESULT_JSON: {schema:"feishu_task_result.v2",status:"answered",summary:"done"}',
+    })
+
+    await waitFor(() => {
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_bad_inner_json'])
+      assert.equal(fakeFeishu.comments.length, 1)
+      assert.ok(errors.some((message) => message.includes('result invalid FEISHU_TASK_RESULT_JSON snippet=')))
+    })
+
+    const diagnostic = errors.find((message) => message.includes('result invalid FEISHU_TASK_RESULT_JSON snippet=')) ?? ''
+    assert.match(diagnostic, /snippet="\{schema:/)
+    assert.match(diagnostic, /status:/)
+    assert.doesNotMatch(fakeFeishu.comments[0]?.content ?? '', /snippet=/)
+    assert.doesNotMatch(fakeFeishu.comments[0]?.content ?? '', /{schema:/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
 test('runtime keeps lark-cli profile out of dispatch context and puts it in prompt rules', async () => {
   const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
   const fakeAamp = new FakeAampClient()

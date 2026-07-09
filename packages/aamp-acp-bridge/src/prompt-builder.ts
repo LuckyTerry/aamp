@@ -376,16 +376,26 @@ function renderTaskPromptRules(promptRules: string | undefined): string[] {
   ]
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function renderLarkCliCommand(cliBin: string | undefined): string {
+  const normalized = cliBin?.trim()
+  return normalized ? shellQuote(normalized) : 'lark-cli'
+}
+
 function renderLarkCliProfileRules(task: TaskDispatch): string[] {
   const profile = asString(task.dispatchContext?.feishu_lark_cli_profile)
   if (!profile) return []
 
+  const larkCli = renderLarkCliCommand(asString(task.dispatchContext?.feishu_lark_cli_bin))
   return [
     `Feishu lark-cli profile rules:`,
     `- This task came through a Feishu bot bound to lark-cli profile \`${profile}\`.`,
-    `- Whenever you run lark-cli for this task, you MUST pass \`--profile ${profile}\` in that command.`,
+    `- Whenever you run lark-cli for this task, you MUST use \`${larkCli} --profile ${profile}\` followed by the lark-cli subcommand and arguments.`,
     `- Do not use the active/default lark-cli profile for this task.`,
-    `- If you ask the user to authorize or rerun a lark-cli command, include \`--profile ${profile}\` in the exact command.`,
+    `- If you ask the user to authorize or rerun a lark-cli command, include \`${larkCli} --profile ${profile}\` in the exact command.`,
     ``,
   ]
 }

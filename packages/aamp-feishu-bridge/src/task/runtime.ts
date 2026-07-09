@@ -491,6 +491,7 @@ function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatc
     ...(feishuEnv ? { feishuEnv } : {}),
     ...(feishuEnvMode ? { feishuEnvMode } : {}),
     ...(getFeishuLarkCliProfile(config.feishu.cliProfile) ? { feishuLarkCliProfile: getFeishuLarkCliProfile(config.feishu.cliProfile) } : {}),
+    ...(config.feishu.cliBin?.trim() ? { feishuLarkCliBin: config.feishu.cliBin.trim() } : {}),
   }
 }
 
@@ -585,7 +586,7 @@ function describeFeishuTaskSubscription(
 type TaskResultDisposition =
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
   | { kind: 'answered'; summary?: string; replyWritten?: boolean }
-  | { kind: 'failure'; reason: TaskResultFailureReason; summary?: string; message: string }
+  | { kind: 'failure'; reason: TaskResultFailureReason; summary?: string; message: string; diagnosticSnippet?: string }
   | { kind: 'help_needed'; message: string }
 
 type FeishuTaskResultOutput =
@@ -732,11 +733,41 @@ function extractJsonObjectAfterMarker(text: string, marker: string, markerIndex:
   throw new SyntaxError(`${marker} 后面的 JSON 对象不完整。`)
 }
 
+function sanitizeResultJsonSnippet(value: string): string {
+  return value
+    .slice(0, 300)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, (character) => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'))
+    .replace(/\r\n|\r|\n/g, '\n')
+    .replace(/\s{2,}/g, ' ')
+}
+
+class MarkedJsonParseError extends SyntaxError {
+  readonly marker: string
+  readonly snippet: string
+
+  constructor(marker: string, message: string, snippet: string) {
+    super(message)
+    this.name = 'MarkedJsonParseError'
+    this.marker = marker
+    this.snippet = snippet
+  }
+}
+
+function getMarkedJsonParseSnippet(error: unknown, marker: string): string | undefined {
+  if (error instanceof MarkedJsonParseError && error.marker === marker) return error.snippet
+  return undefined
+}
+
 function parseMarkedJsonObject(text: string, marker: string, markerIndex: number): Record<string, unknown> | undefined {
   const jsonText = extractJsonObjectAfterMarker(text, marker, markerIndex)
   if (!jsonText) return undefined
-  const parsed = JSON.parse(jsonText) as unknown
-  return asRecord(parsed)
+  try {
+    const parsed = JSON.parse(jsonText) as unknown
+    return asRecord(parsed)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new MarkedJsonParseError(marker, message, sanitizeResultJsonSnippet(jsonText))
+  }
 }
 
 function parseMarkedJsonObjectAtStart(text: string, marker: string): Record<string, unknown> | undefined {
@@ -825,6 +856,7 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
       kind: 'failure',
       reason: 'final_contract',
       message: `智能体返回了无法解析的 FEISHU_TASK_RESULT_JSON：${formatFeishuResultParseError(error)}`,
+      diagnosticSnippet: getMarkedJsonParseSnippet(error, FEISHU_RESULT_MARKER),
     }
   }
 
@@ -2549,6 +2581,9 @@ export class FeishuTaskBridgeRuntime {
     taskState: BridgeTaskState,
     disposition: Extract<TaskResultDisposition, { kind: 'failure' }>,
   ): Promise<void> {
+    if (disposition.diagnosticSnippet) {
+      this.logger.error(formatTaskLogPrefix(taskState.taskGuid) + ' result invalid FEISHU_TASK_RESULT_JSON snippet=' + JSON.stringify(disposition.diagnosticSnippet), { taskId: aampTaskId })
+    }
     await withPostPromptFeishuFailure('result_comment', () => this.commentTaskResultOnce(aampTaskId, taskState, disposition))
     await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState))
 

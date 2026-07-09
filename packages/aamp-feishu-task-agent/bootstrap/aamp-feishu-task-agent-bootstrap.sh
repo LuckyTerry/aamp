@@ -45,10 +45,10 @@ FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v
 FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.17}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.19}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.49}"
-AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.138}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
+AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.142}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -362,6 +362,23 @@ kill_process_tree() {
   done
 
   kill "$pid" 2>/dev/null || true
+}
+
+force_kill_process_tree() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  kill_process_tree "$pid"
+  sleep 0.5
+  if kill -0 "$pid" 2>/dev/null; then
+    local children child
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    for child in $children; do
+      force_kill_process_tree "$child"
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
 }
 
 start_logged_bridge() {
@@ -1381,10 +1398,7 @@ let reservationStore;
 try {
   reservationStore = JSON.parse(fs.readFileSync(reservationsFile, "utf8"));
 } catch {}
-function isRunProcessAlive(runId) {
-  const match = /-(\d+)$/.exec(String(runId || ""));
-  if (!match) return false;
-  const pid = Number(match[1]);
+function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -1392,6 +1406,25 @@ function isRunProcessAlive(runId) {
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+function pidFromRunId(runId) {
+  const match = /-(\d+)$/.exec(String(runId || ""));
+  if (!match) return 0;
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+function isRunProcessAlive(runId) {
+  return isPidAlive(pidFromRunId(runId));
+}
+function reservationPids(record) {
+  return [record?.pid, record?.main_pid, record?.acp_pid, record?.cli_pid, record?.feishu_pid]
+    .map((value) => Number(value))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+function isReservationActive(record) {
+  const pids = reservationPids(record);
+  if (pids.some(isPidAlive)) return true;
+  return isRunProcessAlive(record?.run_id);
 }
 const candidateRuns = [
   ...(Array.isArray(activeRunStore?.runs) ? activeRunStore.runs : []),
@@ -1407,7 +1440,7 @@ for (const run of candidateRuns) {
 }
 for (const reservation of Array.isArray(reservationStore?.reservations) ? reservationStore.reservations : []) {
   const runId = String(reservation?.run_id || "");
-  if (runId === currentRunId || !isRunProcessAlive(runId)) continue;
+  if (runId === currentRunId || !isReservationActive(reservation)) continue;
   const appId = String(reservation?.app_id || "").trim();
   if (appId) activeAppIds.add(appId);
 }
@@ -1420,7 +1453,7 @@ for (const bot of bots) {
   const appSecret = String(bot?.app_secret || "").trim();
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
   if (!appSecret) {
-    console.error("[aamp-one-click] skipping saved Feishu bot without readable app secret: " + name + " (" + appId + ", profile=" + profile + ")");
+    continue;
     continue;
   }
   seen.add(appId);
@@ -1450,10 +1483,7 @@ if (!runId || !appId) process.exit(2);
 function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
-function isRunProcessAlive(value) {
-  const match = /-(\d+)$/.exec(String(value || ""));
-  if (!match) return false;
-  const pid = Number(match[1]);
+function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
@@ -1461,6 +1491,25 @@ function isRunProcessAlive(value) {
   } catch (error) {
     return error?.code === "EPERM";
   }
+}
+function pidFromRunId(runId) {
+  const match = /-(\d+)$/.exec(String(runId || ""));
+  if (!match) return 0;
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+function isRunProcessAlive(runId) {
+  return isPidAlive(pidFromRunId(runId));
+}
+function reservationPids(record) {
+  return [record?.pid, record?.main_pid, record?.acp_pid, record?.cli_pid, record?.feishu_pid]
+    .map((value) => Number(value))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+function isReservationActive(record) {
+  const pids = reservationPids(record);
+  if (pids.some(isPidAlive)) return true;
+  return isRunProcessAlive(record?.run_id);
 }
 const currentRun = readJson(runFile, null);
 const activeRunStore = readJson(activeRunsFile, { version: 1, runs: [] });
@@ -1480,7 +1529,7 @@ for (const run of [
 const reservations = [];
 for (const reservation of Array.isArray(reservationStore?.reservations) ? reservationStore.reservations : []) {
   const reservationRunId = String(reservation?.run_id || "");
-  if (reservationRunId === runId || isRunProcessAlive(reservationRunId)) {
+  if (reservationRunId === runId || isReservationActive(reservation)) {
     reservations.push(reservation);
   }
 }
@@ -1492,6 +1541,8 @@ const next = [
   ...reservations.filter((reservation) => String(reservation?.run_id || "") !== runId),
   {
     run_id: runId,
+    pid: pidFromRunId(runId),
+    main_pid: pidFromRunId(runId),
     app_id: appId,
     profile,
     display_name: name,
@@ -1525,6 +1576,47 @@ try {
 const reservations = Array.isArray(parsed?.reservations) ? parsed.reservations : [];
 const next = reservations.filter((reservation) => String(reservation?.run_id || "") !== runId);
 if (next.length !== reservations.length) {
+  fs.writeFileSync(file, JSON.stringify({ version: 1, reservations: next }, null, 2) + "\n");
+}
+'
+}
+
+update_selected_bot_reservation_pids() {
+  [ "$BOT_RESERVED" = "true" ] || return 0
+  [ -f "$BOT_RESERVATIONS_FILE" ] || return 0
+  BOT_RESERVATIONS_FILE="$BOT_RESERVATIONS_FILE" ONE_CLICK_RUN_ID="$ONE_CLICK_RUN_ID" ACP_PID="$ACP_PID" CLI_PID="$CLI_PID" FEISHU_PID="$FEISHU_PID" ACP_TAIL_PID="$ACP_TAIL_PID" CLI_TAIL_PID="$CLI_TAIL_PID" FEISHU_TAIL_PID="$FEISHU_TAIL_PID" node -e '
+const fs = require("fs");
+const file = process.env.BOT_RESERVATIONS_FILE;
+const runId = String(process.env.ONE_CLICK_RUN_ID || "");
+function numberOrUndefined(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const reservations = Array.isArray(parsed?.reservations) ? parsed.reservations : [];
+let changed = false;
+const next = reservations.map((reservation) => {
+  if (String(reservation?.run_id || "") !== runId) return reservation;
+  changed = true;
+  return {
+    ...reservation,
+    pid: numberOrUndefined(reservation?.pid) || numberOrUndefined(reservation?.main_pid),
+    main_pid: numberOrUndefined(reservation?.main_pid) || numberOrUndefined(reservation?.pid),
+    acp_pid: numberOrUndefined(process.env.ACP_PID),
+    cli_pid: numberOrUndefined(process.env.CLI_PID),
+    feishu_pid: numberOrUndefined(process.env.FEISHU_PID),
+    acp_tail_pid: numberOrUndefined(process.env.ACP_TAIL_PID),
+    cli_tail_pid: numberOrUndefined(process.env.CLI_TAIL_PID),
+    feishu_tail_pid: numberOrUndefined(process.env.FEISHU_TAIL_PID),
+    updated_at: new Date().toISOString(),
+  };
+});
+if (changed) {
   fs.writeFileSync(file, JSON.stringify({ version: 1, reservations: next }, null, 2) + "\n");
 }
 '
@@ -1752,7 +1844,7 @@ select_lark_cli_bin_from_candidates() {
         LARK_CLI_CMD="$candidate"
         export AAMP_LARK_CLI_BIN="$LARK_CLI_CMD"
         path_prepend "$(dirname "$LARK_CLI_CMD")"
-        agent_log "using lark-cli: $LARK_CLI_CMD ($version)"
+        agent_detail "using lark-cli: $LARK_CLI_CMD ($version)"
         agent_detail "lark-cli config dir: ${LARKSUITE_CLI_CONFIG_DIR:-$AAMP_LARK_CLI_CONFIG_DIR}"
         return 0
       fi
@@ -2883,7 +2975,7 @@ ensure_agent_login() {
     cursor)
       clear_cursor_quarantine
       if run_cursor_login_status; then
-        agent_log "cursor CLI is already logged in"
+        agent_detail "cursor CLI is already logged in"
       else
         agent_log "cursor CLI 未登录，正在启动登录流程。"
         run_cursor_login || agent_fail "cursor CLI 登录失败。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
@@ -3032,6 +3124,7 @@ start_acp_bridge_and_capture_pairing_url() {
 
   start_logged_bridge "$ACP_LOG" ACP_TAIL_PID append run_acp_bridge "${command[@]}"
   ACP_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
 
   for _ in $(seq 1 90); do
     if ! kill -0 "$ACP_PID" 2>/dev/null; then
@@ -3072,6 +3165,7 @@ start_cli_bridge_and_capture_pairing_url() {
 
   start_logged_bridge "$CLI_LOG" CLI_TAIL_PID write run_cli_bridge "${command[@]}"
   CLI_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
 
   for _ in $(seq 1 90); do
     if ! kill -0 "$CLI_PID" 2>/dev/null; then
@@ -3120,6 +3214,7 @@ start_feishu_task_bridge() {
 
   start_logged_bridge "$FEISHU_LOG" FEISHU_TAIL_PID write run_feishu_bridge "${command[@]}"
   FEISHU_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
   maybe_mock_fail "feishu-bridge"
 
   for _ in $(seq 1 90); do
@@ -3160,9 +3255,7 @@ start_feishu_task_bridge() {
 
 cleanup() {
   local status=$?
-  trap - EXIT INT TERM
-  release_selected_bot_reservation
-  release_bot_selection_lock
+  trap - EXIT INT TERM HUP
   if [ -n "$FEISHU_TAIL_PID" ]; then
     kill "$FEISHU_TAIL_PID" 2>/dev/null || true
   fi
@@ -3173,19 +3266,21 @@ cleanup() {
     kill "$ACP_TAIL_PID" 2>/dev/null || true
   fi
   if [ -n "$FEISHU_PID" ]; then
-    kill_process_tree "$FEISHU_PID"
+    force_kill_process_tree "$FEISHU_PID"
   fi
   if [ -n "$CLI_PID" ]; then
-    kill_process_tree "$CLI_PID"
+    force_kill_process_tree "$CLI_PID"
   fi
   if [ -n "$ACP_PID" ]; then
-    kill_process_tree "$ACP_PID"
+    force_kill_process_tree "$ACP_PID"
   fi
+  release_selected_bot_reservation
+  release_bot_selection_lock
   exit "$status"
 }
 
 main() {
-  trap cleanup EXIT INT TERM
+  trap cleanup EXIT INT TERM HUP
 
   parse_args "$@"
   init_log_run

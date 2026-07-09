@@ -51,11 +51,12 @@ test('buildPrompt requires the Feishu lark-cli profile when provided by dispatch
     dispatchContext: {
       source: 'feishu',
       feishu_lark_cli_profile: 'aamp-feishu-task-cli_aacddfe1d7b21cb6',
+      feishu_lark_cli_bin: '/Users/bytedance/.local/bin/lark-cli',
     },
   }), undefined, 'codex')
 
   assert.match(prompt, /Feishu lark-cli profile rules:/)
-  assert.match(prompt, /--profile aamp-feishu-task-cli_aacddfe1d7b21cb6/)
+  assert.match(prompt, /'\/Users\/bytedance\/\.local\/bin\/lark-cli' --profile aamp-feishu-task-cli_aacddfe1d7b21cb6/)
   assert.match(prompt, /Do not use the active\/default lark-cli profile/)
 })
 
