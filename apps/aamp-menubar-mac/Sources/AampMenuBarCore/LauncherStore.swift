@@ -38,6 +38,8 @@ public final class LauncherStore {
     private let fileManager: FileManager
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
+    private let maxValidationBytes = 1024
+    private let scriptFileName = "aamp-feishu-task-agent-bootstrap.sh"
 
     public init(paths: AppPaths, bundledScriptURL: URL, fileManager: FileManager = .default) {
         self.paths = paths
@@ -72,7 +74,7 @@ public final class LauncherStore {
         }
         let versionRoot = paths.cachedLauncherRoot.appendingPathComponent(version, isDirectory: true)
         try fileManager.createDirectory(at: versionRoot, withIntermediateDirectories: true)
-        let scriptURL = versionRoot.appendingPathComponent("aamp-feishu-task-agent-bootstrap.sh")
+        let scriptURL = versionRoot.appendingPathComponent(scriptFileName)
         try data.write(to: scriptURL, options: .atomic)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
         return LauncherScript(version: version, url: scriptURL, source: .cached)
@@ -99,7 +101,7 @@ public final class LauncherStore {
     private func cachedScript(version: String) throws -> LauncherScript {
         let scriptURL = paths.cachedLauncherRoot
             .appendingPathComponent(version, isDirectory: true)
-            .appendingPathComponent("aamp-feishu-task-agent-bootstrap.sh")
+            .appendingPathComponent(scriptFileName)
         guard fileManager.fileExists(atPath: scriptURL.path) else {
             throw LauncherStoreError.cachedVersionMissing(version)
         }
@@ -115,12 +117,14 @@ public final class LauncherStore {
 
     private func isValidScript(data: Data) -> Bool {
         guard !data.isEmpty,
-              let prefix = String(data: data.prefix(256), encoding: .utf8)
+              let _ = String(data: data, encoding: .utf8),
+              let header = String(data: data.prefix(maxValidationBytes), encoding: .utf8)
         else {
             return false
         }
-        return prefix.hasPrefix("#!/usr/bin/env bash")
-            || prefix.hasPrefix("#!/bin/bash")
-            || prefix.contains("set -euo pipefail")
+        guard header.hasPrefix("#!/usr/bin/env bash") || header.hasPrefix("#!/bin/bash") else {
+            return false
+        }
+        return header.contains("set -euo pipefail")
     }
 }
