@@ -72,6 +72,55 @@ final class LauncherStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.installCachedScript(version: "0.1.0-dev.139", data: Data("set -euo pipefail\n".utf8)))
     }
 
+    func testRejectsUnsafeVersionsForCachedScriptInstall() throws {
+        let fixture = try makeFixture()
+        let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
+        let data = Data("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'cached\\n'\n".utf8)
+
+        let invalidVersions = ["", "../evil", "nested/version", "evil\\version"]
+        for version in invalidVersions {
+            XCTAssertThrowsError(try store.installCachedScript(version: version, data: data))
+        }
+    }
+
+    func testRejectsUnsafeVersionAndDoesNotEscapeCacheRootOnInstall() throws {
+        let fixture = try makeFixture()
+        let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
+        let data = Data("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'cached\\n'\n".utf8)
+
+        XCTAssertThrowsError(try store.installCachedScript(version: "../evil", data: data))
+
+        let escapedPath = fixture.paths.cachedLauncherRoot
+            .appendingPathComponent("../evil", isDirectory: true)
+            .appendingPathComponent("aamp-feishu-task-agent-bootstrap.sh")
+            .standardized
+            .path
+        let cacheRoot = fixture.paths.cachedLauncherRoot.standardized.path
+        XCTAssertFalse(escapedPath.hasPrefix(cacheRoot + "/"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escapedPath))
+    }
+
+    func testRejectsUnsafeVersionsForActivateCachedVersion() throws {
+        let fixture = try makeFixture()
+        let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
+
+        let invalidVersions = ["", "../evil", "nested/version", "evil\\version"]
+        for version in invalidVersions {
+            XCTAssertThrowsError(try store.activateCachedVersion(version))
+        }
+    }
+
+    func testActiveScriptFallsBackWhenCachedVersionMetadataIsUnsafe() throws {
+        let fixture = try makeFixture()
+        let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
+        try Data("{\"version\":\"../evil\"}".utf8).write(to: fixture.paths.activeLauncherMetadata)
+
+        let active = try store.activeScript()
+
+        XCTAssertEqual(active.source, .bundled)
+        XCTAssertEqual(active.version, LauncherSettings.bundledLauncherVersion)
+    }
+
     func testInvalidCachedScriptFallsBackToBundledScript() throws {
         let fixture = try makeFixture()
         let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)

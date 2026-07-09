@@ -15,6 +15,7 @@ public enum LauncherStoreError: Error, Equatable, LocalizedError {
     case bundledScriptMissing(URL)
     case invalidScript
     case cachedVersionMissing(String)
+    case invalidCachedVersion(String)
 
     public var errorDescription: String? {
         switch self {
@@ -24,6 +25,8 @@ public enum LauncherStoreError: Error, Equatable, LocalizedError {
             return "Launcher script did not pass validation"
         case .cachedVersionMissing(let version):
             return "Cached launcher version \(version) is missing"
+        case .invalidCachedVersion(let version):
+            return "Cached launcher version \"\(version)\" is invalid"
         }
     }
 }
@@ -40,6 +43,11 @@ public final class LauncherStore {
     private let decoder = JSONDecoder()
     private let maxValidationBytes = 1024
     private let scriptFileName = "aamp-feishu-task-agent-bootstrap.sh"
+    private static let cachedLauncherVersionCharacterSet = {
+        var set = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+        set.insert(charactersIn: "._-")
+        return set
+    }()
 
     public init(paths: AppPaths, bundledScriptURL: URL, fileManager: FileManager = .default) {
         self.paths = paths
@@ -69,6 +77,7 @@ public final class LauncherStore {
 
     @discardableResult
     public func installCachedScript(version: String, data: Data) throws -> LauncherScript {
+        try validateCachedVersion(version)
         guard isValidScript(data: data) else {
             throw LauncherStoreError.invalidScript
         }
@@ -81,6 +90,7 @@ public final class LauncherStore {
     }
 
     public func activateCachedVersion(_ version: String) throws {
+        try validateCachedVersion(version)
         let script = try cachedScript(version: version)
         guard isValidScript(at: script.url) else {
             throw LauncherStoreError.invalidScript
@@ -99,6 +109,7 @@ public final class LauncherStore {
     }
 
     private func cachedScript(version: String) throws -> LauncherScript {
+        try validateCachedVersion(version)
         let scriptURL = paths.cachedLauncherRoot
             .appendingPathComponent(version, isDirectory: true)
             .appendingPathComponent(scriptFileName)
@@ -126,5 +137,20 @@ public final class LauncherStore {
             return false
         }
         return header.contains("set -euo pipefail")
+    }
+
+    private func validateCachedVersion(_ version: String) throws {
+        guard isValidCachedVersion(version) else {
+            throw LauncherStoreError.invalidCachedVersion(version)
+        }
+    }
+
+    private func isValidCachedVersion(_ version: String) -> Bool {
+        guard !version.isEmpty else {
+            return false
+        }
+        return version.unicodeScalars.allSatisfy { scalar in
+            Self.cachedLauncherVersionCharacterSet.contains(scalar)
+        }
     }
 }
