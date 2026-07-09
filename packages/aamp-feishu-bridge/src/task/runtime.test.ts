@@ -21,6 +21,7 @@ import type {
   FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskStepInput,
 } from './types.js'
 
 type AckHandler = (ack: TaskAck) => void
@@ -51,6 +52,7 @@ class FakeAampClient {
   resultHandler?: ResultHandler
   streamOpenedHandler?: StreamOpenedHandler
   errorHandler?: ErrorHandler
+  streamHandlers: Record<string, { onEvent: (event: AampStreamEvent) => void; onError?: (error: Error) => void }> = {}
   sentTasks: SendTaskOptions[] = []
   sendTaskError?: Error
 
@@ -88,9 +90,10 @@ class FakeAampClient {
   async updateDirectoryProfile(): Promise<void> {}
 
   async subscribeStream(
-    _streamId: string,
-    _handlers: { onEvent: (event: AampStreamEvent) => void; onError?: (error: Error) => void },
+    streamId: string,
+    handlers: { onEvent: (event: AampStreamEvent) => void; onError?: (error: Error) => void },
   ): Promise<StreamSubscription> {
+    this.streamHandlers[streamId] = handlers
     return { close: () => {} }
   }
 
@@ -116,11 +119,33 @@ class FakeAampClient {
       to: 'bridge@meshmail.ai',
     })
   }
+
+  emitStreamOpened(taskId: string, streamId = 'stream_1'): void {
+    this.streamOpenedHandler?.({
+      protocolVersion: '1.1',
+      intent: 'task.stream.opened',
+      taskId,
+      streamId,
+      from: 'agent@meshmail.ai',
+      to: 'bridge@meshmail.ai',
+    })
+  }
+
+  emitStreamEvent(streamId: string, event: Omit<AampStreamEvent, 'streamId' | 'timestamp'> & { timestamp?: string }): void {
+    const handler = this.streamHandlers[streamId]
+    assert.ok(handler)
+    handler.onEvent({
+      ...event,
+      streamId,
+      timestamp: event.timestamp ?? new Date().toISOString(),
+    })
+  }
 }
 
 class FakeFeishuTaskClient implements FeishuTaskClient {
   eventHandler?: (event: FeishuTaskEvent) => Promise<void>
   comments: Array<{ taskGuid: string; content: string }> = []
+  steps: Array<{ taskGuid: string; step: FeishuTaskStepInput }> = []
   uploadedDeliveries: Array<{ taskGuid: string; filePath: string }> = []
   uploadedDeliveryContents: string[] = []
   completedTaskGuids: string[] = []
@@ -194,9 +219,18 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.comments.push({ taskGuid, content })
   }
 
-  async appendTaskStep(_taskGuid: string, _content: string): Promise<void> {}
+  async appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void> {
+    this.steps.push({
+      taskGuid,
+      step: typeof step === 'string' ? { content: step } : step,
+    })
+  }
 
-  async appendTaskSteps(_taskGuid: string, _contents: string[]): Promise<void> {}
+  async appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void> {
+    for (const step of steps) {
+      await this.appendTaskStep(taskGuid, step)
+    }
+  }
 
   async appendTextDeliveries(_taskGuid: string, _urls: string[]): Promise<void> {}
 
@@ -359,6 +393,366 @@ test('runtime writes debug ack comment with Feishu bridge email and log commands
     assert.match(content, /- 收到时间: /)
     assert.match(content, /- 查看日志: \/Users\/bytedance\/\.aamp\/bin\/aamp-logs tail --task-id feishu-task-task_guid_ack-evt_ack/)
     assert.match(content, /- 导出日志: \/Users\/bytedance\/\.aamp\/bin\/aamp-logs collect --task-id feishu-task-task_guid_ack-evt_ack/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime does not write standalone tool calls as task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 1,
+  })
+  const aampTaskId = 'feishu-task-task_guid_stream-evt_stream'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_stream',
+      taskGuid: 'task_guid_stream',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_tool')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_tool)
+    })
+
+    fakeAamp.emitStreamEvent('stream_tool', {
+      id: 'stream_event_tool_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'tool_call' as AampStreamEvent['type'],
+      payload: {
+        label: "Tool completed: Read file '/Users/bytedance/.agents/skills/lark-im/SKILL.md'",
+        output: '{"title":"Read file","kind":"read","locations":[{"path":"/Users/bytedance/.agents/skills/lark-im/SKILL.md"}]}',
+        locations: [{ path: '/Users/bytedance/.agents/skills/lark-im/SKILL.md' }],
+      },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    assert.deepEqual(fakeFeishu.steps, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime does not write adjacent tool calls as task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_tool_group-evt_tool_group'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_tool_group',
+      taskGuid: 'task_guid_tool_group',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_tool_group')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_tool_group)
+    })
+
+    for (const [seq, label] of [
+      'Tool completed: Web search: weather: China, Sichuan, Chengdu',
+      'Tool completed: Web search: 成都 明天 天气',
+      'Tool completed: Open page: https://weather.com/weather/tomorrow/l/Chengdu+Sichuan+China',
+    ].entries()) {
+      fakeAamp.emitStreamEvent('stream_tool_group', {
+        id: `stream_event_tool_group_${seq + 1}`,
+        taskId: aampTaskId,
+        seq: seq + 1,
+        type: 'tool_call' as AampStreamEvent['type'],
+        payload: {
+          label,
+          status: 'completed',
+          output: `{"title":${JSON.stringify(label)}}`,
+        },
+      })
+    }
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime writes adjacent text deltas as human task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_text_stream-evt_text_stream'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_text_stream',
+      taskGuid: 'task_guid_text_stream',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_text')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_text)
+    })
+
+    fakeAamp.emitStreamEvent('stream_text', {
+      id: 'stream_event_text_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: { text: '我会按当前任务先确认上下文，' },
+    })
+    fakeAamp.emitStreamEvent('stream_text', {
+      id: 'stream_event_text_2',
+      taskId: aampTaskId,
+      seq: 2,
+      type: 'text.delta',
+      payload: { text: '再检查可用工具和授权范围。' },
+    })
+    fakeAamp.emitStreamEvent('stream_text', {
+      id: 'stream_event_tool_between_text',
+      taskId: aampTaskId,
+      seq: 3,
+      type: 'tool_call' as AampStreamEvent['type'],
+      payload: {
+        label: "Tool completed: Read file '/Users/bytedance/.agents/skills/lark-im/SKILL.md'",
+        status: 'completed',
+        output: '{"title":"Read file"}',
+      },
+    })
+    fakeAamp.emitStreamEvent('stream_text', {
+      id: 'stream_event_text_3',
+      taskId: aampTaskId,
+      seq: 4,
+      type: 'text.delta',
+      payload: { text: '我已经确认任务需要参考 IM 的过程展示策略。' },
+    })
+
+    await runtime.stop()
+
+    assert.equal(fakeFeishu.steps.length, 2)
+    assert.deepEqual(fakeFeishu.steps.map(({ taskGuid, step }) => ({ taskGuid, content: step.content })), [
+      {
+        taskGuid: 'task_guid_text_stream',
+        content: '我会按当前任务先确认上下文，再检查可用工具和授权范围。',
+      },
+      {
+        taskGuid: 'task_guid_text_stream',
+        content: '我已经确认任务需要参考 IM 的过程展示策略。',
+      },
+    ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime cleans task text delta markup before writing task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_clean_text-evt_clean_text'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_clean_text',
+      taskGuid: 'task_guid_clean_text',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_clean_text')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_clean_text)
+    })
+
+    fakeAamp.emitStreamEvent('stream_clean_text', {
+      id: 'stream_event_clean_text_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: {
+        text: '[thinking] **Planning weather query for Chengdu** <!-- -->\n\n',
+      },
+    })
+    fakeAamp.emitStreamEvent('stream_clean_text', {
+      id: 'stream_event_clean_text_2',
+      taskId: aampTaskId,
+      seq: 2,
+      type: 'text.delta',
+      payload: {
+        text: '**Requesting Chengdu weather forecast** <!-- -->',
+      },
+    })
+    fakeAamp.emitStreamEvent('stream_clean_text', {
+      id: 'stream_event_clean_text_3',
+      taskId: aampTaskId,
+      seq: 3,
+      type: 'tool_call' as AampStreamEvent['type'],
+      payload: {
+        label: 'Tool completed: Web search: weather Chengdu',
+        status: 'completed',
+        output: '{"title":"Web search: weather Chengdu"}',
+      },
+    })
+    fakeAamp.emitStreamEvent('stream_clean_text', {
+      id: 'stream_event_clean_text_4',
+      taskId: aampTaskId,
+      seq: 4,
+      type: 'text.delta',
+      payload: {
+        text: 'Clarifying JSON output formatting Confirming escaped newline formatting in JSON AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\\"schema\\":\\"feishu_task_result.v2\\",\\"status\\":\\"answered\\"}"}',
+      },
+    })
+
+    await runtime.stop()
+
+    assert.equal(fakeFeishu.steps.length, 2)
+    assert.deepEqual(fakeFeishu.steps, [
+      {
+        taskGuid: 'task_guid_clean_text',
+        step: {
+          content: 'Planning weather query for Chengdu\nRequesting Chengdu weather forecast',
+        },
+      },
+      {
+        taskGuid: 'task_guid_clean_text',
+        step: {
+          content: 'Clarifying JSON output formatting Confirming escaped newline formatting in JSON AAMP_RESULT_JSON',
+        },
+      },
+    ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime drops bare AAMP_RESULT_JSON task text after cleaning', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_drop_marker-evt_drop_marker'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_drop_marker',
+      taskGuid: 'task_guid_drop_marker',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_drop_marker')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_drop_marker)
+    })
+
+    fakeAamp.emitStreamEvent('stream_drop_marker', {
+      id: 'stream_event_drop_marker',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: {
+        text: 'AAMP_RESULT_JSON: {"output":"FEISHU_TASK_RESULT_JSON: {\\"schema\\":\\"feishu_task_result.v2\\",\\"status\\":\\"answered\\"}"}',
+      },
+    })
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime does not write ACP task started as task step', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 1,
+  })
+  const aampTaskId = 'feishu-task-task_guid_acp_started-evt_acp_started'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_acp_started',
+      taskGuid: 'task_guid_acp_started',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_acp_started')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_acp_started)
+    })
+
+    fakeAamp.emitStreamEvent('stream_acp_started', {
+      id: 'stream_event_acp_started',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'status',
+      payload: { label: 'ACP task started' },
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    assert.deepEqual(fakeFeishu.steps, [])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

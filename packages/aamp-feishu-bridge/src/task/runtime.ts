@@ -37,6 +37,7 @@ import type {
   FeishuTaskDetails,
   FeishuTaskEvent,
   FeishuTaskEventKind,
+  FeishuTaskStepInput,
   FeishuTaskSubscriptionState,
 } from './types.js'
 
@@ -67,6 +68,11 @@ const MAX_FEISHU_COMMENT_CHARACTERS = 3000
 const MAX_FEISHU_COMMENT_BYTES = 10000
 const MAX_FEISHU_WRITE_FAILURE_ERROR_LENGTH = 1200
 const MAX_SHORT_FAILURE_REASON_LENGTH = 240
+const MAX_TASK_STEP_CONTENT_LENGTH = 500
+const MAX_TASK_STEP_QUOTE_LENGTH = 4000
+const WRITE_STATUS_STREAM_TASK_STEPS = false
+// Keep tool stream events as text-boundary markers, but temporarily hide them from Feishu task execution records.
+const WRITE_TOOL_STREAM_TASK_STEPS = false
 const MAX_INCOMING_FEISHU_ATTACHMENTS = 20
 const MAX_INCOMING_FEISHU_ATTACHMENT_SIZE_BYTES = MAX_DELIVERY_FILE_SIZE_BYTES
 const COMMENT_DISPATCHABLE_AGENT_TASK_STATUSES = new Set([1, 2, 3, 4])
@@ -77,6 +83,9 @@ const APP_OWNER_CACHE_TTL_MS = 60 * 60 * 1000
 const PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS = 1000
 const PERMISSION_DENIED_COMMENT_REPLY = '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。'
+
+type StreamStepKind = 'status' | 'text' | 'todo' | 'tool'
+type ToolStepStatus = 'completed' | 'failed' | 'pending' | 'running'
 
 type PromptDispatchFailureAction =
   | 'read_task_details'
@@ -101,7 +110,17 @@ function getFeishuLarkCliProfile(profile: string | undefined): string | undefine
 
 interface PendingStreamStep {
   content: string
+  quote?: string
+  kind: StreamStepKind
+  toolName?: string
+  toolStatus?: ToolStepStatus
   normalized: string
+}
+
+interface StreamTaskStep extends FeishuTaskStepInput {
+  kind: StreamStepKind
+  toolName?: string
+  toolStatus?: ToolStepStatus
 }
 
 interface StreamStepBuffer {
@@ -577,6 +596,7 @@ type FeishuTaskResultOutput =
 
 const FEISHU_RESULT_MARKER = 'FEISHU_TASK_RESULT_JSON:'
 const AAMP_RESULT_MARKER = 'AAMP_RESULT_JSON:'
+const AAMP_RESULT_MARKER_TEXT = AAMP_RESULT_MARKER.replace(/:$/, '')
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
@@ -997,8 +1017,8 @@ const STREAM_EXECUTION_START_IGNORED_TEXTS = new Set([
   'Prompt sent to ACP agent',
 ].map(normalizeStepText))
 
-function isStreamExecutionSignal(stepContents: string[]): boolean {
-  return stepContents.some((content) => !STREAM_EXECUTION_START_IGNORED_TEXTS.has(normalizeStepText(content)))
+function isStreamExecutionSignal(steps: StreamTaskStep[]): boolean {
+  return steps.some((step) => !STREAM_EXECUTION_START_IGNORED_TEXTS.has(normalizeStepText(step.content)))
 }
 
 function getPayloadText(payload: Record<string, unknown>, keys: string[]): string | undefined {
@@ -1009,50 +1029,359 @@ function getPayloadText(payload: Record<string, unknown>, keys: string[]): strin
   return undefined
 }
 
+function getPayloadRawText(payload: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = payload[key]
+    if (typeof value !== 'string') continue
+    const normalized = normalizeResultText(value)
+    if (normalized.trim()) return normalized
+  }
+  return undefined
+}
+
 function getTodoItemText(value: unknown): string | undefined {
   const item = asRecord(value)
   if (!item) return undefined
   return getPayloadText(item, ['content', 'text', 'title', 'label', 'summary'])
 }
 
-function uniqueStepContents(contents: Array<string | undefined>): string[] {
+function truncateTaskStepText(value: string, maxLength: number, options: { trim?: boolean } = {}): string {
+  const normalized = options.trim === false ? value : value.trim()
+  if (Array.from(normalized).length <= maxLength) return normalized
+  return `${Array.from(normalized).slice(0, maxLength - 1).join('')}…`
+}
+
+function safeTaskStepDetail(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return normalizeResultText(value).trim() || undefined
+  }
+  if (value == null) return undefined
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function formatTaskStepQuote(payload: Record<string, unknown>, keys: string[]): string | undefined {
+  const labels: Record<string, string> = {
+    label: '标签',
+    title: '标题',
+    name: '名称',
+    toolName: '工具',
+    status: '状态',
+    stage: '阶段',
+    summary: '摘要',
+    message: '消息',
+    text: '文本',
+    input: '输入',
+    output: '输出',
+    error: '错误',
+    reason: '原因',
+    locations: '位置',
+    items: '事项',
+    kind: '类型',
+  }
   const seen = new Set<string>()
-  const result: string[] = []
-  for (const content of contents) {
-    if (!content) continue
-    const normalized = normalizeStepText(content)
+  const lines: string[] = []
+  for (const key of keys) {
+    if (seen.has(key)) continue
+    seen.add(key)
+    const detail = safeTaskStepDetail(payload[key])
+    if (!detail) continue
+    lines.push(`${labels[key] ?? key}：${detail}`)
+  }
+  if (lines.length === 0) return undefined
+  return truncateTaskStepText(lines.join('\n'), MAX_TASK_STEP_QUOTE_LENGTH)
+}
+
+function normalizeTaskStep(step: StreamTaskStep | undefined): StreamTaskStep | undefined {
+  if (!step) return undefined
+  const content = step.kind === 'text'
+    ? step.content.replace(/\r\n/g, '\n')
+    : step.content.trim()
+  if (!content.trim()) return undefined
+  const quote = step.quote?.trim()
+  return {
+    ...step,
+    content: truncateTaskStepText(content, MAX_TASK_STEP_CONTENT_LENGTH, { trim: step.kind !== 'text' }),
+    ...(quote ? { quote: truncateTaskStepText(quote, MAX_TASK_STEP_QUOTE_LENGTH) } : {}),
+  }
+}
+
+function normalizeTaskStepForDedupe(step: FeishuTaskStepInput): string {
+  return normalizeStepText(`${step.content}\n${step.quote ?? ''}`)
+}
+
+function uniqueTaskSteps(steps: Array<StreamTaskStep | undefined>): StreamTaskStep[] {
+  const seen = new Set<string>()
+  const result: StreamTaskStep[] = []
+  for (const rawStep of steps) {
+    const step = normalizeTaskStep(rawStep)
+    if (!step) continue
+    const normalized = normalizeTaskStepForDedupe(step)
     if (seen.has(normalized)) continue
     seen.add(normalized)
-    result.push(content)
+    result.push(step)
   }
   return result
 }
 
-function streamEventToTaskSteps(event: AampStreamEvent): string[] {
+function compactToolName(value: string): string {
+  const compacted = value
+    .replace(/^Tool\s+(?:running|completed|failed|pending):\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const knownTool = /^(Web search|Open page|Read file|List files?|Search|Run command|Edit file|Editing files|Apply patch)\b/i.exec(compacted)?.[1]
+  return knownTool ?? compacted
+}
+
+function readToolStatus(payload: Record<string, unknown>): ToolStepStatus | undefined {
+  const explicit = getPayloadText(payload, ['status', 'state'])
+  const normalized = explicit?.toLowerCase()
+  if (normalized === 'completed' || normalized === 'complete' || normalized === 'done' || normalized === 'succeeded' || normalized === 'success') return 'completed'
+  if (normalized === 'failed' || normalized === 'error' || normalized === 'errored') return 'failed'
+  if (normalized === 'pending') return 'pending'
+  if (normalized === 'running' || normalized === 'in_progress') return 'running'
+
+  const label = getPayloadText(payload, ['label', 'title', 'summary', 'message', 'text'])
+  const match = /^Tool\s+(running|completed|failed|pending):/i.exec(label ?? '')
+  return match?.[1]?.toLowerCase() as ToolStepStatus | undefined
+}
+
+function readToolName(payload: Record<string, unknown>): string {
+  const label = getPayloadText(payload, ['label', 'title', 'summary', 'message', 'text'])
+  const labelMatch = /^Tool\s+(?:running|completed|failed|pending):\s*(.+)$/i.exec(label ?? '')
+  const candidates = [
+    labelMatch?.[1],
+    getPayloadText(payload, ['toolName', 'name', 'tool', 'title', 'label']),
+  ].map((candidate) => candidate ? compactToolName(candidate) : '').filter(Boolean)
+  return candidates[0] || '工具'
+}
+
+function localizeToolName(toolName: string): string {
+  const normalized = toolName.toLowerCase()
+  if (/^web search\b/.test(normalized)) return '网页搜索'
+  if (/^open page\b/.test(normalized)) return '打开网页'
+  if (/^read file\b/.test(normalized)) return '读取文件'
+  if (/^list files?\b/.test(normalized)) return '查看文件'
+  if (/^search\b|grep|ripgrep|rg\b/.test(normalized)) return '搜索内容'
+  if (/^edit\b|editing files?\b|apply patch/.test(normalized)) return '编辑文件'
+  if (/^run command\b|^execute\b|shell|terminal/.test(normalized)) return '执行命令'
+  if (normalized === 'tool' || normalized === '工具') return '工具'
+  return toolName
+}
+
+function isIgnoredToolName(toolName: string): boolean {
+  const normalized = normalizeStepText(toolName)
+  return STREAM_EXECUTION_START_IGNORED_TEXTS.has(normalized)
+    || IGNORED_STREAM_STEP_TEXTS.has(normalized)
+}
+
+function buildTextDeltaTaskStep(payload: Record<string, unknown>): StreamTaskStep | undefined {
+  const content = getPayloadRawText(payload, [
+    'text',
+    'delta',
+    'text_delta',
+    'textDelta',
+    'content_delta',
+    'contentDelta',
+    'content',
+    'message',
+    'output',
+  ])
+  return content ? { kind: 'text', content } : undefined
+}
+
+function buildToolTaskStep(payload: Record<string, unknown>): StreamTaskStep | undefined {
+  const status = readToolStatus(payload)
+  const rawToolName = readToolName(payload)
+  if (isIgnoredToolName(rawToolName)) return undefined
+  const toolName = localizeToolName(rawToolName)
+  const prefix = status === 'completed'
+    ? '已完成工具调用'
+    : status === 'failed'
+      ? '工具调用失败'
+      : '正在执行工具调用'
+  return {
+    kind: 'tool',
+    toolName,
+    ...(status ? { toolStatus: status } : {}),
+    content: `${prefix}：${toolName}`,
+    quote: formatTaskStepQuote(payload, [
+      'label',
+      'title',
+      'name',
+      'toolName',
+      'status',
+      'summary',
+      'message',
+      'input',
+      'output',
+      'locations',
+      'kind',
+    ]),
+  }
+}
+
+function streamEventToTaskSteps(event: AampStreamEvent): StreamTaskStep[] {
   const eventType = String(event.type)
+  if (eventType === 'text.delta' || eventType === 'text_delta' || eventType === 'delta') {
+    return uniqueTaskSteps([buildTextDeltaTaskStep(event.payload)])
+  }
   if (eventType === 'status') {
-    return uniqueStepContents([getPayloadText(event.payload, ['label', 'stage', 'status', 'message', 'text'])])
+    const label = getPayloadText(event.payload, ['label', 'title', 'summary', 'message', 'text'])
+    if (/^Tool\s+(?:running|completed|failed|pending):/i.test(label ?? '')) {
+      return uniqueTaskSteps([buildToolTaskStep(event.payload)])
+    }
+    return WRITE_STATUS_STREAM_TASK_STEPS ? uniqueTaskSteps([{
+      kind: 'status',
+      content: getPayloadText(event.payload, ['label', 'stage', 'status', 'message', 'text']) ?? '',
+      quote: formatTaskStepQuote(event.payload, ['label', 'stage', 'status', 'message', 'text']),
+    }]) : []
   }
   if (eventType === 'progress') {
-    return uniqueStepContents([getPayloadText(event.payload, ['label', 'stage', 'message', 'text'])])
+    const label = getPayloadText(event.payload, ['label', 'title', 'summary', 'message', 'text'])
+    if (/^Tool\s+(?:running|completed|failed|pending):/i.test(label ?? '')) {
+      return uniqueTaskSteps([buildToolTaskStep(event.payload)])
+    }
+    return WRITE_STATUS_STREAM_TASK_STEPS ? uniqueTaskSteps([{
+      kind: 'status',
+      content: getPayloadText(event.payload, ['label', 'stage', 'message', 'text']) ?? '',
+      quote: formatTaskStepQuote(event.payload, ['label', 'stage', 'message', 'text']),
+    }]) : []
   }
   if (eventType === 'todo') {
+    if (!WRITE_STATUS_STREAM_TASK_STEPS) return []
     const itemTexts = Array.isArray(event.payload.items)
       ? event.payload.items.map(getTodoItemText)
       : []
-    return uniqueStepContents([
-      ...itemTexts,
-      itemTexts.length === 0 ? getPayloadText(event.payload, ['summary', 'label', 'message', 'text']) : undefined,
+    return uniqueTaskSteps([
+      ...itemTexts.map((content) => content ? {
+        kind: 'todo' as const,
+        content,
+        quote: formatTaskStepQuote(event.payload, ['items', 'summary', 'label', 'message', 'text']),
+      } : undefined),
+      itemTexts.length === 0 ? {
+        kind: 'todo',
+        content: getPayloadText(event.payload, ['summary', 'label', 'message', 'text']) ?? '',
+        quote: formatTaskStepQuote(event.payload, ['items', 'summary', 'label', 'message', 'text']),
+      } : undefined,
     ])
   }
   if (eventType === 'tool_call') {
-    return uniqueStepContents([getPayloadText(event.payload, ['label', 'summary', 'message', 'text'])])
+    return uniqueTaskSteps([buildToolTaskStep(event.payload)])
   }
   if (eventType === 'error') {
+    if (!WRITE_STATUS_STREAM_TASK_STEPS) return []
     const message = getPayloadText(event.payload, ['message', 'error', 'reason'])
-    return [message ? `执行遇到错误：${message}` : '执行遇到错误。']
+    return uniqueTaskSteps([{
+      kind: 'status',
+      content: '执行遇到错误',
+      quote: message ? formatTaskStepQuote(event.payload, ['message', 'error', 'reason']) : undefined,
+    }])
   }
   return []
+}
+
+function toFeishuTaskStepInput(step: FeishuTaskStepInput): FeishuTaskStepInput {
+  return {
+    content: step.content,
+    ...(step.quote ? { quote: step.quote } : {}),
+  }
+}
+
+function visibleToolSteps(toolSteps: PendingStreamStep[]): PendingStreamStep[] {
+  const hasTerminalToolStep = toolSteps.some((step) => step.toolStatus === 'completed' || step.toolStatus === 'failed')
+  if (!hasTerminalToolStep) return toolSteps
+  return toolSteps.filter((step) => step.toolStatus !== 'running' && step.toolStatus !== 'pending')
+}
+
+function formatAggregatedToolQuote(toolSteps: PendingStreamStep[]): string | undefined {
+  const quote = toolSteps
+    .map((step, index) => {
+      const lines = [`${index + 1}. ${step.content}`]
+      if (step.quote) {
+        lines.push(...step.quote.split('\n').map((line) => `   ${line}`))
+      }
+      return lines.join('\n')
+    })
+    .join('\n\n')
+  return quote ? truncateTaskStepText(quote, MAX_TASK_STEP_QUOTE_LENGTH) : undefined
+}
+
+function aggregateToolSteps(toolSteps: PendingStreamStep[]): FeishuTaskStepInput[] {
+  if (!WRITE_TOOL_STREAM_TASK_STEPS) return []
+  const displaySteps = visibleToolSteps(toolSteps)
+  if (displaySteps.length === 0) return []
+
+  return [{
+    content: `执行了 ${displaySteps.length} 个工具调用`,
+    quote: formatAggregatedToolQuote(displaySteps),
+  }]
+}
+
+function cleanTaskProcessText(value: string): string {
+  const cleaned = normalizeResultText(value)
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/^\s*\[(?:thinking|thought|analysis|reasoning)\]\s*/gim, '')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/\b(AAMP_RESULT_JSON|FEISHU_TASK_RESULT_JSON)\s*:\s*(?=[{\["])[\s\S]*$/g, '$1')
+    .replace(/^[ \t]{0,3}#{1,6}\s+/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim()
+
+  return cleaned === AAMP_RESULT_MARKER_TEXT ? '' : cleaned
+}
+
+function aggregateTextSteps(textSteps: PendingStreamStep[]): FeishuTaskStepInput[] {
+  const content = cleanTaskProcessText(textSteps.map((step) => step.content).join(''))
+  if (!content) return []
+  return [{
+    content: truncateTaskStepText(content, MAX_TASK_STEP_CONTENT_LENGTH),
+  }]
+}
+
+function aggregateStreamStepsForFlush(steps: PendingStreamStep[]): FeishuTaskStepInput[] {
+  const result: FeishuTaskStepInput[] = []
+  let textGroup: PendingStreamStep[] = []
+  let toolGroup: PendingStreamStep[] = []
+
+  const flushTextGroup = () => {
+    if (textGroup.length === 0) return
+    result.push(...aggregateTextSteps(textGroup))
+    textGroup = []
+  }
+
+  const flushToolGroup = () => {
+    if (toolGroup.length === 0) return
+    result.push(...aggregateToolSteps(toolGroup))
+    toolGroup = []
+  }
+
+  for (const step of steps) {
+    if (step.kind === 'text') {
+      flushToolGroup()
+      textGroup.push(step)
+      continue
+    }
+    if (step.kind === 'tool') {
+      flushTextGroup()
+      toolGroup.push(step)
+      continue
+    }
+    flushTextGroup()
+    flushToolGroup()
+    result.push(toFeishuTaskStepInput(step))
+  }
+  flushTextGroup()
+  flushToolGroup()
+
+  return result
 }
 
 interface AampClientLike {
@@ -1799,31 +2128,37 @@ export class FeishuTaskBridgeRuntime {
     }
     this.state.tasks[aampTaskId] = baseState
 
-    const stepContents = streamEventToTaskSteps(event)
-    if (stepContents.length === 0) {
+    const steps = streamEventToTaskSteps(event)
+    if (steps.length === 0) {
       await this.persistState()
       return
     }
 
-    if (isStreamExecutionSignal(stepContents)) {
+    if (isStreamExecutionSignal(steps)) {
       await this.markFeishuTasksInProgressOnce(aampTaskId, baseState)
     }
 
     const streamStepTexts = new Set(baseState.streamStepTexts ?? [])
     const buffer = this.getStreamStepBuffer(aampTaskId)
     let addedStep = false
-    for (const stepContent of stepContents) {
-      const normalized = normalizeStepText(stepContent)
-      const pendingStepCount = buffer.steps.length
+    for (const step of steps) {
+      const normalized = normalizeTaskStepForDedupe(step)
+      const contentNormalized = normalizeStepText(step.content)
+      const pendingStepCount = aggregateStreamStepsForFlush(buffer.steps).length
+      const shouldDedupeStep = step.kind !== 'text' && (step.kind !== 'tool' || WRITE_TOOL_STREAM_TASK_STEPS)
       if (
-        IGNORED_STREAM_STEP_TEXTS.has(normalized)
-        || streamStepTexts.has(normalized)
-        || buffer.steps.some((step) => step.normalized === normalized)
+        (!shouldDedupeStep ? false : (
+          IGNORED_STREAM_STEP_TEXTS.has(contentNormalized)
+          || IGNORED_STREAM_STEP_TEXTS.has(normalized)
+          || streamStepTexts.has(contentNormalized)
+          || streamStepTexts.has(normalized)
+          || buffer.steps.some((step) => step.normalized === normalized)
+        ))
         || (baseState.streamStepCount ?? 0) + pendingStepCount >= MAX_STREAM_STEPS_PER_TASK
       ) {
         continue
       }
-      buffer.steps.push({ content: stepContent, normalized })
+      buffer.steps.push({ ...step, normalized })
       addedStep = true
     }
 
@@ -1832,7 +2167,7 @@ export class FeishuTaskBridgeRuntime {
       return
     }
 
-    if (buffer.steps.length >= STREAM_STEP_FLUSH_BATCH_SIZE) {
+    if (aggregateStreamStepsForFlush(buffer.steps).length >= STREAM_STEP_FLUSH_BATCH_SIZE) {
       await this.enqueueStreamStepFlush(aampTaskId)
       return
     }
@@ -1914,7 +2249,10 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const stepsToFlush = buffer.steps.slice()
-    await this.feishu.appendTaskSteps(taskState.taskGuid, stepsToFlush.map((step) => step.content))
+    const displaySteps = aggregateStreamStepsForFlush(stepsToFlush)
+    if (displaySteps.length > 0) {
+      await this.feishu.appendTaskSteps(taskState.taskGuid, displaySteps)
+    }
 
     const latestBuffer = this.streamStepBuffers.get(aampTaskId)
     if (latestBuffer) {
@@ -1931,7 +2269,7 @@ export class FeishuTaskBridgeRuntime {
     for (const step of stepsToFlush) {
       latestStreamStepTexts.add(step.normalized)
     }
-    const nextStepCount = (latestTaskState.streamStepCount ?? 0) + stepsToFlush.length
+    const nextStepCount = (latestTaskState.streamStepCount ?? 0) + displaySteps.length
     this.state.tasks[aampTaskId] = {
       ...latestTaskState,
       streamStepCount: nextStepCount,

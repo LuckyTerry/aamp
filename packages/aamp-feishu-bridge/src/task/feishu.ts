@@ -17,6 +17,7 @@ import type {
   FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskStepInput,
   FeishuTaskOrigin,
   FeishuTaskOriginReferResource,
   FeishuTaskOriginSourceMessage,
@@ -118,6 +119,16 @@ function normalizeFeishuWriteText(value: string): string {
     .replace(/\\r\\n/g, '\n')
     .replace(/\\n/g, '\n')
     .replace(/\\r/g, '\n')
+}
+
+function normalizeTaskStepInput(step: string | FeishuTaskStepInput): FeishuTaskStepInput | undefined {
+  const content = normalizeFeishuWriteText(typeof step === 'string' ? step : step.content).trim()
+  if (!content) return undefined
+  const quote = typeof step === 'string' ? '' : normalizeFeishuWriteText(step.quote ?? '').trim()
+  return {
+    content,
+    ...(quote ? { quote } : {}),
+  }
 }
 
 function getStringArray(value: unknown): string[] | undefined {
@@ -623,17 +634,17 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     await this.commentV2Task(taskGuid, normalizedContent)
   }
 
-  async appendTaskStep(taskGuid: string, content: string): Promise<void> {
-    if (!content.trim()) return
+  async appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void> {
+    if (!normalizeTaskStepInput(step)) return
     this.logger.log(`[feishu task ${taskGuid}] append step via v2`)
-    await this.appendV2TaskSteps(taskGuid, [content])
+    await this.appendV2TaskSteps(taskGuid, [step])
   }
 
-  async appendTaskSteps(taskGuid: string, contents: string[]): Promise<void> {
-    const stepContents = contents.filter((content) => content.trim())
-    if (stepContents.length === 0) return
-    this.logger.log(`[feishu task ${taskGuid}] append ${stepContents.length} step(s) via v2`)
-    await this.appendV2TaskSteps(taskGuid, stepContents)
+  async appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void> {
+    const stepInputs = steps.map(normalizeTaskStepInput).filter((step): step is FeishuTaskStepInput => Boolean(step))
+    if (stepInputs.length === 0) return
+    this.logger.log(`[feishu task ${taskGuid}] append ${stepInputs.length} step(s) via v2`)
+    await this.appendV2TaskSteps(taskGuid, stepInputs)
   }
 
   async completeTask(taskGuid: string): Promise<void> {
@@ -730,13 +741,19 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     }), this.retry, this.logger, `comment.create task=${taskGuid}`)
   }
 
-  private async appendV2TaskSteps(taskGuid: string, contents: string[]): Promise<void> {
+  private async appendV2TaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void> {
     const timestamp = Math.floor(Date.now() / 1000)
+    const stepInputs = steps.map(normalizeTaskStepInput).filter((step): step is FeishuTaskStepInput => Boolean(step))
+    if (stepInputs.length === 0) return
     const payload: TaskStepPayload = {
       params: { user_id_type: this.config.userIdType },
       data: {
         task_guid: taskGuid,
-        task_steps: contents.map((content) => ({ quote: '', content, timestamp })),
+        task_steps: stepInputs.map((step) => ({
+          quote: step.quote ?? '',
+          content: step.content,
+          timestamp,
+        })),
       },
     }
 

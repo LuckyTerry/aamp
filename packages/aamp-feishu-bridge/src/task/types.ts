@@ -224,6 +224,11 @@ export interface FeishuTaskDispatch {
   promptRules?: string
 }
 
+export interface FeishuTaskStepInput {
+  content: string
+  quote?: string
+}
+
 export interface FeishuTaskClient {
   registerAgent(): Promise<void>
   subscribeTaskEvents(): Promise<void>
@@ -238,8 +243,8 @@ export interface FeishuTaskClient {
   getAppOwner(): Promise<FeishuAppOwner>
   downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment>
   commentTask(taskGuid: string, content: string): Promise<void>
-  appendTaskStep(taskGuid: string, content: string): Promise<void>
-  appendTaskSteps(taskGuid: string, contents: string[]): Promise<void>
+  appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void>
+  appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void>
   appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void>
   uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void>
   markTaskInProgress(taskGuid: string): Promise<void>
