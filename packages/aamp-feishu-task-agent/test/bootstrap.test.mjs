@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -28,16 +28,49 @@ test('bootstrap --help remains side-effect light and prints usage', () => {
 test('bootstrap terminal UX points users at local logs and success state', () => {
   const source = readFileSync(bootstrap, 'utf8')
 
-  assert.match(source, /Logs saved at:/)
+  assert.match(source, /print_local_log_hints/)
   assert.match(source, /运行日志目录/)
-  assert.match(source, /近期日志打包/)
-  assert.match(source, /collect --latest/)
+  assert.match(source, /运行日志打包/)
+  assert.match(source, /collect --run-dir/)
   assert.match(source, /特定任务日志打包/)
-  assert.match(source, /collect --task-guid xx-yy/)
+  assert.match(source, /collect --task-id xxx/)
+  assert.match(source, /collect --task-guid yyy/)
+  assert.doesNotMatch(source, /近期日志打包/)
   assert.match(source, /aamp-logs/)
   assert.match(source, /errors\.jsonl/)
   assert.match(source, /已接入飞书任务，可以开始对话 & 派发任务/)
+  assert.match(source, /运行失败，本地飞书任务连接没有启动成功/)
   assert.match(source, /AAMP_ONE_CLICK_VERBOSE/)
+})
+
+test('bootstrap failure UX prints friendly log hints', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('write_one_click_log()')
+  const end = source.indexOf('\nwrite_run_manifest()')
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-failure-'))
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+AAMP_RUN_LOG_DIR="$1/run"
+AAMP_LOGS_BIN="$1/bin/aamp-logs"
+ONE_CLICK_LOG="$1/one-click.log"
+ERRORS_LOG="$1/errors.jsonl"
+mkdir -p "$AAMP_RUN_LOG_DIR" "$(dirname "$AAMP_LOGS_BIN")"
+${helpers}
+agent_fail "测试失败"
+`, 'bash', home], { encoding: 'utf8' })
+
+  assert.equal(result.status, 1)
+  const stderr = result.stderr
+  assert.match(stderr, /运行失败，本地飞书任务连接没有启动成功/)
+  assert.match(stderr, /原因：测试失败/)
+  assert.match(stderr, /运行日志目录：/)
+  assert.match(stderr, /运行日志打包：.* collect --run-dir .*\/run/)
+  assert.match(stderr, /特定任务日志打包：.* collect --task-id xxx/)
+  assert.match(stderr, /特定任务日志打包：.* collect --task-guid yyy/)
 })
 
 test('bootstrap manifest includes full app and bridge identity', () => {

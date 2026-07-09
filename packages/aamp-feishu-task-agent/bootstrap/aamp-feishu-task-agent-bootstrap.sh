@@ -130,33 +130,47 @@ agent_detail() {
   fi
 }
 
+print_local_log_hints() {
+  local stream="${1:-stdout}"
+  [ -n "$AAMP_RUN_LOG_DIR" ] || return 0
+  if [ "$stream" = "stderr" ]; then
+    printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR" >&2
+    printf '   运行日志打包：%s collect --run-dir %s\n' "$AAMP_LOGS_BIN" "$AAMP_RUN_LOG_DIR" >&2
+    printf '   特定任务日志打包：%s collect --task-id xxx\n' "$AAMP_LOGS_BIN" >&2
+    printf '   特定任务日志打包：%s collect --task-guid yyy\n' "$AAMP_LOGS_BIN" >&2
+  else
+    printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR"
+    printf '   运行日志打包：%s collect --run-dir %s\n' "$AAMP_LOGS_BIN" "$AAMP_RUN_LOG_DIR"
+    printf '   特定任务日志打包：%s collect --task-id xxx\n' "$AAMP_LOGS_BIN"
+    printf '   特定任务日志打包：%s collect --task-guid yyy\n' "$AAMP_LOGS_BIN"
+  fi
+}
+
 agent_success() {
   printf '\n🟢 %s 已接入飞书任务，可以开始对话 & 派发任务。\n' "$AGENT"
   if [ -n "$BOT_NAME" ]; then
     printf '   飞书 Bot：%s\n' "$BOT_NAME"
   fi
   printf '   保持此终端打开；按 Ctrl+C 停止本地连接。\n'
-  printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR"
-  printf '   近期日志打包：%s collect --latest\n' "$AAMP_LOGS_BIN"
-  printf '   特定任务日志打包：%s collect --task-guid xx-yy\n\n' "$AAMP_LOGS_BIN"
+  print_local_log_hints stdout
+  printf '\n'
   write_one_click_log "[aamp-one-click] SUCCESS: $AGENT connected to Feishu tasks"
 }
 
 agent_fail() {
+  local reason="$*"
   local line
-  line="[aamp-one-click] ERROR: $*"
-  printf '%s\n' "$line" >&2
+  line="[aamp-one-click] ERROR: $reason"
   write_one_click_log "$line"
   if [ -n "$ERRORS_LOG" ]; then
     printf '{"timestamp":"%s","level":"error","component":"one-click","message":"%s"}\n' \
       "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
-      "$(json_escape "$*")" >>"$ERRORS_LOG" 2>/dev/null || true
+      "$(json_escape "$reason")" >>"$ERRORS_LOG" 2>/dev/null || true
   fi
-  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
-    printf '[aamp-one-click] Logs saved at: %s\n' "$AAMP_RUN_LOG_DIR" >&2
-    printf '[aamp-one-click] To package logs for troubleshooting:\n' >&2
-    printf '[aamp-one-click]   %s collect --latest\n' "$AAMP_LOGS_BIN" >&2
-  fi
+  printf '\n🔴 运行失败，本地飞书任务连接没有启动成功。\n' >&2
+  printf '   原因：%s\n' "$reason" >&2
+  print_local_log_hints stderr
+  printf '\n' >&2
   exit 1
 }
 
@@ -254,7 +268,7 @@ for (const line of content.split(/\r?\n/)) {
 }
 
 init_log_run() {
-  mkdir -p "$AAMP_LOG_DIR/runs" "$AAMP_LOG_DIR/archives" "$AAMP_BIN_DIR"
+  mkdir -p "$AAMP_LOG_DIR/runs" "$AAMP_BIN_DIR"
   AAMP_RUN_ID="$(date '+%Y%m%dT%H%M%S')-$$"
   AAMP_RUN_LOG_DIR="$AAMP_LOG_DIR/runs/$AAMP_RUN_ID"
   ONE_CLICK_LOG="$AAMP_RUN_LOG_DIR/one-click.log"

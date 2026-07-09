@@ -81,14 +81,19 @@ Useful commands:
 ```bash
 ~/.aamp/bin/aamp-logs collect --task-id <Task ID>
 ~/.aamp/bin/aamp-logs collect --task-guid <Feishu task guid>
+~/.aamp/bin/aamp-logs collect --run-dir <run log directory>
 ~/.aamp/bin/aamp-logs collect --latest
 ~/.aamp/bin/aamp-logs collect --since 2h
 ~/.aamp/bin/aamp-logs list-runs
 ~/.aamp/bin/aamp-logs tail --task-id <Task ID>
+~/.aamp/bin/aamp-logs tail --task-guid <Feishu task guid>
+~/.aamp/bin/aamp-logs tail -f --task-id <Task ID>
+~/.aamp/bin/aamp-logs tail -f --task-guid <Feishu task guid>
+~/.aamp/bin/aamp-logs tail -f
 ```
 
-`collect` creates a local `.tar.gz` bundle under `~/.aamp/logs/archives/`.
-It does not upload anything. Task-scoped collection includes matching log
+`collect` creates a local `.tar.gz` bundle on your Desktop. It does not upload
+anything. Task-scoped collection includes matching log
 fragments by default. Add `--include-content` only when the full matching run
 logs are needed. Sensitive fields such as secrets, tokens, passwords,
 authorization headers, cookies, credentials, `appSecret`, `smtpPassword`,

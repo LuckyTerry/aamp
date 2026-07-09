@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -65,9 +66,44 @@ function makeFixture() {
 }
 
 function runCli(args, logsRoot) {
+  const homeDir = path.dirname(logsRoot)
   return execFileSync(process.execPath, [bin, ...args], {
-    env: { ...process.env, AAMP_LOG_DIR: logsRoot },
+    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir },
     encoding: 'utf8',
+  })
+}
+
+function spawnCli(args, logsRoot) {
+  const homeDir = path.dirname(logsRoot)
+  return spawn(process.execPath, [bin, ...args], {
+    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+}
+
+function waitForOutput(child, pattern, timeoutMs = 2000) {
+  return new Promise((resolve, reject) => {
+    let stdout = ''
+    let stderr = ''
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for ${pattern}. stdout=${stdout} stderr=${stderr}`))
+    }, timeoutMs)
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+      if (pattern.test(stdout)) {
+        clearTimeout(timer)
+        resolve(stdout)
+      }
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      reject(new Error(`Process exited before matching ${pattern}. code=${code} stdout=${stdout} stderr=${stderr}`))
+    })
   })
 }
 
@@ -101,6 +137,7 @@ test('collect --task-id creates a redacted archive with matching log lines', () 
   const archivePath = output.trim().split('\n').at(-1)
 
   assert.ok(archivePath.endsWith('.tar.gz'), output)
+  assert.equal(path.dirname(archivePath), path.join(path.dirname(logsRoot), 'Desktop'))
   assert.ok(existsSync(archivePath), archivePath)
 
   const extracted = extractArchive(archivePath)
@@ -171,6 +208,22 @@ test('collect --task-id --include-content includes full matching runs', () => {
   assert.match(text, /"include_content": true/)
 })
 
+test('collect --run-dir packages the specified run directory', () => {
+  const { logsRoot } = makeFixture()
+  const runDir = path.join(logsRoot, 'runs', '20260708T153012-12345')
+
+  const output = runCli(['collect', '--run-dir', runDir], logsRoot)
+  const archivePath = output.trim().split('\n').at(-1)
+  const text = readAllFiles(extractArchive(archivePath))
+
+  assert.match(text, /20260708T153012-12345/)
+  assert.match(text, /feishu-task-guid1-evt1/)
+  assert.match(text, /other-task/)
+  assert.match(text, /"run_dir":/)
+  assert.doesNotMatch(text, /20260708T163012-67890/)
+  assert.doesNotMatch(text, /feishu-task-guid2-evt2/)
+})
+
 test('collect --latest packages the newest run when no Task ID exists yet', () => {
   const { logsRoot } = makeFixture()
 
@@ -210,4 +263,67 @@ test('tail --task-id prints matching lines without unrelated task lines', () => 
   assert.match(output, /feishu-task-guid1-evt1/)
   assert.match(output, /task\.dispatch received/)
   assert.doesNotMatch(output, /other-task/)
+})
+
+test('tail accepts positional task id shorthand', () => {
+  const { logsRoot } = makeFixture()
+
+  const output = runCli(['tail', 'feishu-task-guid1-evt1'], logsRoot)
+
+  assert.match(output, /feishu-task-guid1-evt1/)
+  assert.match(output, /task\.dispatch received/)
+  assert.doesNotMatch(output, /other-task/)
+})
+
+test('tail --task-guid prints related task lines', () => {
+  const { logsRoot } = makeFixture()
+
+  const output = runCli(['tail', '--task-guid', 'guid2'], logsRoot)
+
+  assert.match(output, /feishu-task-guid2-evt2/)
+  assert.match(output, /task\.dispatch received/)
+  assert.doesNotMatch(output, /feishu-task-guid1-evt1/)
+})
+
+test('tail -f --task-guid follows matching live lines', async () => {
+  const { logsRoot } = makeFixture()
+  const file = path.join(logsRoot, 'runs', '20260708T163012-67890', 'feishu-bridge.jsonl')
+  const child = spawnCli(['tail', '-f', '--task-guid', 'guid2'], logsRoot)
+
+  try {
+    setTimeout(() => {
+      appendFileSync(file, `${JSON.stringify({
+        level: 'info',
+        task_id: 'feishu-task-guid2-evt2',
+        task_guid: 'guid2',
+        msg: 'live task update',
+        access_token: 'live-token',
+      })}\n`)
+    }, 150)
+
+    const output = await waitForOutput(child, /live task update/)
+    assert.match(output, /20260708T163012-67890\/feishu-bridge\.jsonl/)
+    assert.doesNotMatch(output, /live-token/)
+    assert.match(output, /<redacted>/)
+  } finally {
+    child.kill('SIGTERM')
+  }
+})
+
+test('tail -f without selector follows latest run live lines', async () => {
+  const { logsRoot } = makeFixture()
+  const file = path.join(logsRoot, 'runs', '20260708T163012-67890', 'one-click.log')
+  const child = spawnCli(['tail', '-f'], logsRoot)
+
+  try {
+    setTimeout(() => {
+      appendFileSync(file, 'latest run live line\n')
+    }, 150)
+
+    const output = await waitForOutput(child, /latest run live line/)
+    assert.match(output, /20260708T163012-67890\/one-click\.log/)
+    assert.doesNotMatch(output, /20260708T153012-12345/)
+  } finally {
+    child.kill('SIGTERM')
+  }
 })

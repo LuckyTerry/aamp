@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -37,15 +37,21 @@ function usage(exitCode = 0) {
   stream.write(`Usage:
   aamp-logs collect --task-id <task-id>
   aamp-logs collect --task-guid <task-guid>
+  aamp-logs collect --run-dir <run-dir>
   aamp-logs collect --latest
   aamp-logs collect --since <duration>
   aamp-logs list-runs
   aamp-logs tail --task-id <task-id>
+  aamp-logs tail --task-guid <task-guid>
+  aamp-logs tail -f [--task-id <task-id>|--task-guid <task-guid>|<task-id>]
 
 Options:
   --log-dir <dir>          Override AAMP log root. Defaults to AAMP_LOG_DIR or ~/.aamp/logs.
   --include-content        Include full matching run logs instead of matching fragments only.
+  -f, --follow             Follow new log lines in real time. Without a selector, follows the latest run.
   -h, --help               Show this help.
+
+Collect creates the local .tar.gz bundle on your Desktop.
 `)
   process.exit(exitCode)
 }
@@ -55,10 +61,14 @@ function parseArgs(argv) {
   if (!command || command === '-h' || command === '--help') usage(0)
 
   const options = { command }
-  const booleanFlags = new Set(['--latest'])
+  const booleanFlags = new Set(['--latest', '--follow'])
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i]
     if (arg === '-h' || arg === '--help') usage(0)
+    if (arg === '-f') {
+      options.follow = true
+      continue
+    }
     if (arg === '--include-content' || booleanFlags.has(arg)) {
       options[arg.slice(2).replace(/-/g, '_')] = true
       continue
@@ -70,6 +80,10 @@ function parseArgs(argv) {
       }
       options[arg.slice(2).replace(/-/g, '_')] = value
       i += 1
+      continue
+    }
+    if (command === 'tail' && !options.task_id && !options.task_guid) {
+      options.task_id = arg
       continue
     }
     throw new Error(`Unknown argument: ${arg}`)
@@ -97,6 +111,16 @@ function listRunDirs(logRoot) {
 function latestRun(logRoot) {
   const runs = listRunDirs(logRoot)
   return runs.at(-1)
+}
+
+function resolveRunDir(logRoot, value) {
+  const runDir = path.isAbsolute(value)
+    ? path.resolve(value)
+    : path.join(logRoot, 'runs', value)
+  if (!existsSync(runDir) || !statSync(runDir).isDirectory()) {
+    throw new Error(`Run directory not found: ${value}`)
+  }
+  return runDir
 }
 
 function parseDurationMs(value) {
@@ -213,6 +237,9 @@ function runContainsAny(runDir, values) {
 
 function selectRuns(logRoot, options, matchValues) {
   const runs = listRunDirs(logRoot)
+  if (options.run_dir) {
+    return [resolveRunDir(logRoot, options.run_dir)]
+  }
   if (options.latest) {
     const run = latestRun(logRoot)
     return run ? [run] : []
@@ -227,8 +254,8 @@ function selectRuns(logRoot, options, matchValues) {
   return []
 }
 
-function ensureArchiveDir(logRoot) {
-  const archiveDir = path.join(logRoot, 'archives')
+function ensureArchiveDir() {
+  const archiveDir = path.join(os.homedir(), 'Desktop')
   mkdirSync(archiveDir, { recursive: true })
   return archiveDir
 }
@@ -249,6 +276,7 @@ function writeReadme(file, options, runDirs, taskIds) {
     options.task_guid ? `Task GUID: ${options.task_guid}` : undefined,
     options.latest ? 'Selection: latest run' : undefined,
     options.since ? `Selection: since ${options.since}` : undefined,
+    options.run_dir ? `Selection: run dir ${options.run_dir}` : undefined,
     `Runs: ${runDirs.map((runDir) => path.basename(runDir)).join(', ') || '(none)'}`,
     '',
     'Sensitive values are redacted before packaging. This bundle is local-only and was not uploaded by aamp-logs.',
@@ -269,6 +297,7 @@ function writeBundleManifest(file, options, runDirs, taskIds, matchValues) {
       } : {}),
       ...(options.latest ? { latest: true } : {}),
       ...(options.since ? { since: options.since } : {}),
+      ...(options.run_dir ? { run_dir: options.run_dir } : {}),
     },
     task_ids: taskIds,
     match_values: matchValues,
@@ -304,7 +333,7 @@ function copyFilteredRun(runDir, targetDir, matchValues, includeWholeRun) {
   }
 }
 
-function createArchive(logRoot, options, runDirs, taskIds, matchValues) {
+function createArchive(options, runDirs, taskIds, matchValues) {
   if (runDirs.length === 0) {
     throw new Error('No matching log runs found')
   }
@@ -321,7 +350,7 @@ function createArchive(logRoot, options, runDirs, taskIds, matchValues) {
   writeReadme(path.join(bundleDir, 'README.txt'), options, runDirs, taskIds)
   writeBundleManifest(path.join(bundleDir, 'manifest.json'), options, runDirs, taskIds, matchValues)
 
-  const archiveDir = ensureArchiveDir(logRoot)
+  const archiveDir = ensureArchiveDir()
   const archivePath = path.join(archiveDir, `${bundleName}.tar.gz`)
   execFileSync('tar', ['-czf', archivePath, '-C', stageRoot, bundleName])
   rmSync(stageRoot, { recursive: true, force: true })
@@ -342,12 +371,12 @@ function collect(options) {
     ]
   }
 
-  if (!options.task_id && !options.task_guid && !options.latest && !options.since) {
-    throw new Error('collect requires --task-id, --task-guid, --latest, or --since')
+  if (!options.task_id && !options.task_guid && !options.run_dir && !options.latest && !options.since) {
+    throw new Error('collect requires --task-id, --task-guid, --run-dir, --latest, or --since')
   }
 
   const runDirs = selectRuns(logRoot, options, matchValues)
-  const archivePath = createArchive(logRoot, options, runDirs, taskIds, matchValues)
+  const archivePath = createArchive(options, runDirs, taskIds, matchValues)
   process.stdout.write(`Created local logs bundle:\n${archivePath}\n`)
 }
 
@@ -357,20 +386,102 @@ function listRuns(options) {
   process.stdout.write(`${runs.map((runDir) => path.basename(runDir)).join('\n')}${runs.length ? '\n' : ''}`)
 }
 
-function tail(options) {
-  if (!options.task_id) throw new Error('tail requires --task-id <task-id>')
-  const logRoot = resolveLogRoot(options)
+function tailMatchValues(logRoot, options) {
+  if (options.task_id && options.task_guid) {
+    throw new Error('tail accepts only one of --task-id or --task-guid')
+  }
+  if (options.task_id) return [options.task_id]
+  if (options.task_guid) {
+    return [
+      taskIdPrefixForGuid(options.task_guid),
+      options.task_guid,
+      ...collectTaskIdsForGuid(listRunDirs(logRoot), options.task_guid),
+    ]
+  }
+  return []
+}
+
+function formatTailLine(runDir, file, line) {
+  return `${path.basename(runDir)}/${path.basename(file)}: ${redactText(line)}`
+}
+
+function writeMatchingTailLines(runDirs, matchValues) {
   const lines = []
-  for (const runDir of listRunDirs(logRoot)) {
+  for (const runDir of runDirs) {
     for (const file of textFiles(runDir)) {
       for (const line of readLines(file)) {
-        if (line.includes(options.task_id)) {
-          lines.push(`${path.basename(runDir)}/${path.basename(file)}: ${redactText(line)}`)
+        if (matchValues.length === 0 || lineHasAny(line, matchValues)) {
+          lines.push(formatTailLine(runDir, file, line))
         }
       }
     }
   }
   process.stdout.write(`${lines.join('\n')}${lines.length ? '\n' : ''}`)
+}
+
+function selectFollowRunDirs(logRoot, matchValues) {
+  if (matchValues.length > 0) {
+    const matching = selectRuns(logRoot, {}, matchValues)
+    if (matching.length > 0) return matching
+  }
+  const run = latestRun(logRoot)
+  return run ? [run] : []
+}
+
+function followTailFiles(runDirs, matchValues) {
+  const files = runDirs.flatMap((runDir) => textFiles(runDir).map((file) => ({ runDir, file })))
+  if (files.length === 0) throw new Error('No log files found to follow')
+
+  const children = []
+  let liveChildren = files.length
+  const stop = (code = 0) => {
+    for (const child of children) {
+      if (!child.killed) child.kill()
+    }
+    process.exit(code)
+  }
+  process.on('SIGINT', () => stop(0))
+  process.on('SIGTERM', () => stop(0))
+
+  for (const { runDir, file } of files) {
+    const child = spawn('tail', ['-n', '0', '-f', file], { stdio: ['ignore', 'pipe', 'pipe'] })
+    children.push(child)
+
+    let buffer = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk
+      const lines = buffer.split(/\r?\n/)
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line.length === 0) continue
+        if (matchValues.length > 0 && !lineHasAny(line, matchValues)) continue
+        process.stdout.write(`${formatTailLine(runDir, file, line)}\n`)
+      }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk) => {
+      process.stderr.write(chunk)
+    })
+    child.on('exit', () => {
+      liveChildren -= 1
+      if (liveChildren === 0) process.exit(0)
+    })
+  }
+}
+
+function tail(options) {
+  const logRoot = resolveLogRoot(options)
+  const matchValues = tailMatchValues(logRoot, options)
+  if (options.follow) {
+    const runDirs = selectFollowRunDirs(logRoot, matchValues)
+    if (runDirs.length === 0) throw new Error('No log runs found to follow')
+    if (matchValues.length > 0) writeMatchingTailLines(runDirs, matchValues)
+    followTailFiles(runDirs, matchValues)
+    return
+  }
+  if (matchValues.length === 0) throw new Error('tail requires --task-id, --task-guid, or -f')
+  writeMatchingTailLines(listRunDirs(logRoot), matchValues)
 }
 
 function main() {
