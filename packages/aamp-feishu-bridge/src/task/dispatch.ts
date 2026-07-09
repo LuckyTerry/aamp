@@ -2,6 +2,7 @@ import type { FeishuTaskDetails, FeishuTaskDispatch, FeishuTaskEvent, FeishuTask
 
 const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
 
@@ -429,12 +430,16 @@ export function buildFeishuTaskDispatch(
   options?: FeishuTaskDispatchOptions,
 ): FeishuTaskDispatch {
   const taskId = buildFeishuTaskId(event)
+  const sessionKey = `feishu-task:${task.guid}`
   return {
     taskId,
-    sessionKey: `feishu-task:${task.guid}`,
+    sessionKey,
     title: `Feishu Task: ${task.summary || task.guid}`,
     bodyText: buildFeishuTaskContext(event, task, eventKind, options),
-    dispatchContext: buildFeishuTaskDispatchContext(event, task, eventKind),
+    dispatchContext: {
+      ...buildFeishuTaskDispatchContext(event, task, eventKind),
+      [SESSION_KEY_DISPATCH_CONTEXT_KEY]: sessionKey,
+    },
     promptRules: buildFeishuTaskPromptRules(options),
   }
 }

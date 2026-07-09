@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
+  buildFeishuTaskDispatch,
   buildFeishuTaskDispatchContext,
   buildFeishuTaskContext,
   buildFeishuTaskPromptRules,
@@ -131,4 +132,12 @@ test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing sour
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create')
 
   assert.deepEqual(context, { source: 'feishu-task' })
+})
+
+test('buildFeishuTaskDispatch mirrors session key into dispatch context', () => {
+  const dispatch = buildFeishuTaskDispatch(event, task, 'task_create')
+
+  assert.equal(dispatch.sessionKey, 'feishu-task:task_guid_123')
+  assert.equal(dispatch.dispatchContext.source, 'feishu-task')
+  assert.equal(dispatch.dispatchContext.aamp_session_key, dispatch.sessionKey)
 })

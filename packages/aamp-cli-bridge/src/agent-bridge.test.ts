@@ -3,7 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { test } from 'node:test'
-import { formatDebugPromptLog, materializePromptIfNeeded } from './agent-bridge.js'
+import {
+  formatDebugPromptLog,
+  materializePromptIfNeeded,
+  resolveTaskSessionKey,
+  stripAampInternalDispatchContext,
+} from './agent-bridge.js'
 
 test('formatDebugPromptLog prints metadata and the full prompt body', () => {
   const prompt = [
@@ -24,6 +29,48 @@ test('formatDebugPromptLog prints metadata and the full prompt body', () => {
   assert.match(log, /--- BEGIN CLI PROMPT ---\n## AAMP Task/)
   assert.match(log, /Execution rules:\n- Use the requested runtime\./)
   assert.match(log, /\n--- END CLI PROMPT ---$/)
+})
+
+test('resolveTaskSessionKey falls back to dispatch context compatibility field', () => {
+  assert.equal(resolveTaskSessionKey({
+    taskId: 'task-123',
+    dispatchContext: {
+      source: 'feishu-task',
+      aamp_session_key: 'feishu-task:task-guid-123',
+    },
+  }, {
+    dispatchContext: {
+      source: 'feishu-task',
+    },
+  }), 'feishu-task:task-guid-123')
+  assert.equal(resolveTaskSessionKey({
+    taskId: 'task-123',
+    sessionKey: 'feishu-task:canonical-guid',
+    dispatchContext: {
+      aamp_session_key: 'feishu-task:shadow-guid',
+    },
+  }, {
+    dispatchContext: {
+      aamp_session_key: 'feishu-task:hydrated-shadow-guid',
+    },
+  }), 'feishu-task:canonical-guid')
+})
+
+test('stripAampInternalDispatchContext removes session compatibility field without mutating task', () => {
+  const task = {
+    dispatchContext: {
+      source: 'feishu-task',
+      aamp_session_key: 'feishu-task:task-guid-123',
+    },
+  }
+
+  const stripped = stripAampInternalDispatchContext(task)
+
+  assert.deepEqual(stripped.dispatchContext, { source: 'feishu-task' })
+  assert.deepEqual(task.dispatchContext, {
+    source: 'feishu-task',
+    aamp_session_key: 'feishu-task:task-guid-123',
+  })
 })
 
 test('materializePromptIfNeeded keeps short prompts inline', () => {

@@ -34,6 +34,7 @@ const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
 const PROMPT_MATERIALIZATION_THRESHOLD_CHARS = 8_000
 const STRUCTURED_RESULT_MARKER = 'AAMP_RESULT_JSON:'
 const DEFAULT_PROMPT_FILE_DIR = process.platform === 'win32' ? join(tmpdir(), 'aamp-p') : '/tmp/aamp-p'
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 
 function isEnvFlagEnabled(name: string): boolean {
   const value = process.env[name]?.trim().toLowerCase()
@@ -110,8 +111,34 @@ function matchesSenderPattern(senderEmail: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`, 'i').test(normalizedSender)
 }
 
-function resolveTaskSessionKey(task: TaskDispatch, hydratedTask: TaskDispatch): string | undefined {
-  return hydratedTask.sessionKey ?? task.sessionKey ?? task.taskId
+function normalizeSessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+export function resolveTaskSessionKey(
+  task: Pick<TaskDispatch, 'taskId' | 'sessionKey' | 'dispatchContext'>,
+  hydratedTask: Pick<TaskDispatch, 'sessionKey' | 'dispatchContext'>,
+): string | undefined {
+  return normalizeSessionKey(hydratedTask.sessionKey)
+    ?? normalizeSessionKey(task.sessionKey)
+    ?? normalizeSessionKey(hydratedTask.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+    ?? normalizeSessionKey(task.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+    ?? normalizeSessionKey(task.taskId)
+}
+
+export function stripAampInternalDispatchContext<T extends { dispatchContext?: Record<string, string> }>(
+  task: T,
+): T {
+  const context = task.dispatchContext
+  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
+  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  const stripped = { ...task }
+  if (Object.keys(publicContext).length > 0) {
+    stripped.dispatchContext = publicContext
+  } else {
+    delete stripped.dispatchContext
+  }
+  return stripped
 }
 
 function matchPairedSenderPolicy(
@@ -613,12 +640,14 @@ export class AgentBridge {
       }
       return
     }
+    const publicTask = stripAampInternalDispatchContext(task)
+    const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
 
     this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
       this.agentConfig.senderPoliciesFile,
       this.agentConfig.name,
     ))
-    const senderDecision = matchCombinedSenderPolicy(task, this.agentConfig.senderPolicies, this.senderPolicies)
+    const senderDecision = matchCombinedSenderPolicy(publicTask, this.agentConfig.senderPolicies, this.senderPolicies)
     if (!senderDecision.allowed) {
       if (options.historical) return
       console.warn(`[${this.name}] Rejecting task ${task.taskId}: ${senderDecision.reason ?? 'sender policy rejected the task'}`)
@@ -804,7 +833,7 @@ export class AgentBridge {
         }
       }
 
-      const builtPrompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
+      const builtPrompt = buildPrompt(publicHydratedTask, publicHydratedTask.threadContextText, this.name)
       const materializedPrompt = materializePromptIfNeeded({
         taskId: task.taskId,
         prompt: builtPrompt,

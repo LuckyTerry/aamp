@@ -138,6 +138,43 @@ describe('parseAampHeaders', () => {
       expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
       expect(result.promptRules).toEqual(promptRules)
     })
+
+    it('restores sessionKey from dispatchContext compatibility field', () => {
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-session-key-fallback>',
+        subject: '[AAMP Task] Feishu task',
+        headers: {
+          'X-AAMP-Intent': 'task.dispatch',
+          'X-AAMP-TaskId': 'task-session-fallback',
+          'X-AAMP-Dispatch-Context': 'source=feishu-task; aamp_session_key=feishu-task%3Aguid-1',
+        },
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.sessionKey).toBe('feishu-task:guid-1')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+    })
+
+    it('prefers the sessionKey header over the dispatchContext compatibility field', () => {
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-session-key-canonical>',
+        subject: '[AAMP Task] Feishu task',
+        headers: {
+          'X-AAMP-Intent': 'task.dispatch',
+          'X-AAMP-TaskId': 'task-session-canonical',
+          'X-AAMP-Session-Key': 'feishu-task:canonical-guid',
+          'X-AAMP-Dispatch-Context': 'source=feishu-task; aamp_session_key=feishu-task%3Ashadow-guid',
+        },
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.sessionKey).toBe('feishu-task:canonical-guid')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+    })
   })
 
   describe('task.result', () => {
@@ -315,6 +352,18 @@ describe('buildDispatchHeaders', () => {
     expect(headers['X-AAMP-Intent']).toBe('task.dispatch')
     expect(headers['X-AAMP-TaskId']).toBe('task-123')
     expect(headers['X-AAMP-Expires-At']).toBe('2026-04-07T12:00:00.000Z')
+  })
+
+  it('mirrors sessionKey into dispatchContext for transport compatibility', () => {
+    const headers = buildDispatchHeaders({
+      taskId: 'task-session-key',
+      sessionKey: 'feishu-task:guid-1',
+      dispatchContext: { source: 'feishu-task' },
+    })
+
+    expect(headers['X-AAMP-Session-Key']).toBe('feishu-task:guid-1')
+    expect(headers['X-AAMP-Dispatch-Context']).toContain('source=feishu-task')
+    expect(headers['X-AAMP-Dispatch-Context']).toContain('aamp_session_key=feishu-task%3Aguid-1')
   })
 })
 

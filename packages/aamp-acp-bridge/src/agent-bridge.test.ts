@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { formatDebugPromptLog, threadAlreadyTerminal } from './agent-bridge.js'
+import {
+  formatDebugPromptLog,
+  resolveTaskSessionKey,
+  stripAampInternalDispatchContext,
+  threadAlreadyTerminal,
+} from './agent-bridge.js'
 
 test('formatDebugPromptLog prints metadata and the full prompt body', () => {
   const prompt = [
@@ -32,4 +37,37 @@ test('threadAlreadyTerminal treats help-needed threads as closed for historical 
       createdAt: '2026-07-06T00:00:00.000Z',
     },
   ]), true)
+})
+
+test('resolveTaskSessionKey falls back to dispatch context compatibility field', () => {
+  assert.equal(resolveTaskSessionKey({
+    dispatchContext: {
+      source: 'feishu-task',
+      aamp_session_key: 'feishu-task:task-guid-123',
+    },
+  }), 'feishu-task:task-guid-123')
+  assert.equal(resolveTaskSessionKey({
+    sessionKey: 'feishu-task:canonical-guid',
+    dispatchContext: {
+      source: 'feishu-task',
+      aamp_session_key: 'feishu-task:shadow-guid',
+    },
+  }), 'feishu-task:canonical-guid')
+})
+
+test('stripAampInternalDispatchContext removes session compatibility field without mutating task', () => {
+  const task = {
+    dispatchContext: {
+      source: 'feishu-task',
+      aamp_session_key: 'feishu-task:task-guid-123',
+    },
+  }
+
+  const stripped = stripAampInternalDispatchContext(task)
+
+  assert.deepEqual(stripped.dispatchContext, { source: 'feishu-task' })
+  assert.deepEqual(task.dispatchContext, {
+    source: 'feishu-task',
+    aamp_session_key: 'feishu-task:task-guid-123',
+  })
 })

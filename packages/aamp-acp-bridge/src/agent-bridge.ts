@@ -37,6 +37,7 @@ const TEXT_DELTA_FLUSH_CHARS = 120
 const TEXT_DELTA_BOUNDARY_CHARS = 32
 const IDENTITY_AUTH_RETRY_COUNT = 5
 const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 
 export interface AgentIdentity {
   email: string
@@ -281,6 +282,32 @@ export function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): bo
   )
 }
 
+function normalizeSessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+export function resolveTaskSessionKey(
+  task: Pick<TaskDispatch, 'sessionKey' | 'dispatchContext'>,
+): string | undefined {
+  return normalizeSessionKey(task.sessionKey)
+    ?? normalizeSessionKey(task.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+}
+
+export function stripAampInternalDispatchContext<T extends { dispatchContext?: Record<string, string> }>(
+  task: T,
+): T {
+  const context = task.dispatchContext
+  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
+  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  const stripped = { ...task }
+  if (Object.keys(publicContext).length > 0) {
+    stripped.dispatchContext = publicContext
+  } else {
+    delete stripped.dispatchContext
+  }
+  return stripped
+}
+
 function threadAlreadyPairResponded(events: AampThreadEvent[] | undefined): boolean {
   return (events ?? []).some((event) => event.intent === 'pair.respond')
 }
@@ -473,7 +500,7 @@ export class AgentBridge {
   }
 
   private resolveTaskSessionName(task: TaskDispatch): string {
-    const stickyValue = task.sessionKey?.trim()
+    const stickyValue = resolveTaskSessionKey(task)
     if (!stickyValue) return this.sessionName
     const suffix = this.sanitizeSessionSuffix(stickyValue)
     return suffix ? `${this.sessionName}-${suffix}` : this.sessionName
@@ -799,13 +826,15 @@ export class AgentBridge {
       }
       return
     }
+    const publicTask = stripAampInternalDispatchContext(task)
+    const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
 
     this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
       this.agentConfig.senderPoliciesFile,
       this.agentConfig.name,
     ))
     const senderDecision = matchCombinedSenderPolicy(
-      task,
+      publicTask,
       this.agentConfig.senderPolicies,
       this.senderPolicies,
     )
@@ -1020,12 +1049,12 @@ export class AgentBridge {
         )
       }
 
-      const attachmentPromptLines = await this.materializeIncomingAttachments(hydratedTask)
+      const attachmentPromptLines = await this.materializeIncomingAttachments(publicHydratedTask)
       const promptTask = attachmentPromptLines.length > 0
         ? {
-            ...hydratedTask,
+            ...publicHydratedTask,
             bodyText: [
-              hydratedTask.bodyText,
+              publicHydratedTask.bodyText,
               '',
               'Downloaded attachments:',
               ...attachmentPromptLines,
@@ -1033,8 +1062,8 @@ export class AgentBridge {
               'Use these local file paths when the user asks about attached images or files.',
             ].filter((line) => line != null).join('\n'),
           }
-        : hydratedTask
-      const prompt = buildPrompt(promptTask, hydratedTask.threadContextText, this.name)
+        : publicHydratedTask
+      const prompt = buildPrompt(promptTask, publicHydratedTask.threadContextText, this.name)
       if (this.debugPrompt) {
         console.log(formatDebugPromptLog({
           agentName: this.name,
