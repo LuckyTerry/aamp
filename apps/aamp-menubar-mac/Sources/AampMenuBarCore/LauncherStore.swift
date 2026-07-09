@@ -149,6 +149,9 @@ public final class LauncherStore {
         guard !version.isEmpty else {
             return false
         }
+        guard version != "." && version != ".." else {
+            return false
+        }
         return version.unicodeScalars.allSatisfy { scalar in
             Self.cachedLauncherVersionCharacterSet.contains(scalar)
         }

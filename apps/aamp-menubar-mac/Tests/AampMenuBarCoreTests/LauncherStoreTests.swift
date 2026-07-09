@@ -77,7 +77,7 @@ final class LauncherStoreTests: XCTestCase {
         let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
         let data = Data("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'cached\\n'\n".utf8)
 
-        let invalidVersions = ["", "../evil", "nested/version", "evil\\version"]
+        let invalidVersions = ["", ".", "..", "../evil", "nested/version", "evil\\version"]
         for version in invalidVersions {
             XCTAssertThrowsError(try store.installCachedScript(version: version, data: data))
         }
@@ -104,7 +104,7 @@ final class LauncherStoreTests: XCTestCase {
         let fixture = try makeFixture()
         let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
 
-        let invalidVersions = ["", "../evil", "nested/version", "evil\\version"]
+        let invalidVersions = ["", ".", "..", "../evil", "nested/version", "evil\\version"]
         for version in invalidVersions {
             XCTAssertThrowsError(try store.activateCachedVersion(version))
         }
@@ -113,6 +113,7 @@ final class LauncherStoreTests: XCTestCase {
     func testActiveScriptFallsBackWhenCachedVersionMetadataIsUnsafe() throws {
         let fixture = try makeFixture()
         let store = LauncherStore(paths: fixture.paths, bundledScriptURL: fixture.bundledScript)
+        try FileManager.default.createDirectory(at: fixture.paths.launcherRoot, withIntermediateDirectories: true)
         try Data("{\"version\":\"../evil\"}".utf8).write(to: fixture.paths.activeLauncherMetadata)
 
         let active = try store.activeScript()
