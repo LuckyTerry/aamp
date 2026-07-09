@@ -15,3 +15,18 @@ public enum RuntimeState: Equatable {
         }
     }
 }
+
+public struct ReadinessDetector {
+    private let readinessMarkers = [
+        "已接入飞书任务，可以开始对话 & 派发任务",
+        "bridge.task_runtime.running",
+        "[feishu] listener started",
+        "[feishu ws] connected"
+    ]
+
+    public init() {}
+
+    public mutating func observe(line: String) -> Bool {
+        readinessMarkers.contains { line.contains($0) }
+    }
+}
