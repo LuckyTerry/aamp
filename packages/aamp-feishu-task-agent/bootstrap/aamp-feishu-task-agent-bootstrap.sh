@@ -1675,8 +1675,9 @@ function parseJsonOutput(value, label) {
 
 const status = parseJsonOutput(process.env.AUTH_STATUS_JSON, "auth status");
 const user = status?.identities?.user;
-if (!user?.available || user?.tokenStatus !== "valid") {
-  console.log("lark-cli user auth is not ready or token is not valid");
+const usableTokenStatuses = new Set(["valid", "needs_refresh"]);
+if (!user?.available || !usableTokenStatuses.has(user?.tokenStatus)) {
+  console.log("lark-cli user auth is not ready or token cannot be refreshed automatically");
   process.exit(1);
 }
 
