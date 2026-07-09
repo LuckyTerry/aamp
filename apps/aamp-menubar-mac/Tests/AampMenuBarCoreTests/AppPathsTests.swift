@@ -17,6 +17,7 @@ final class AppPathsTests: XCTestCase {
         XCTAssertEqual(paths.activeLauncherMetadata, paths.appRoot.appendingPathComponent("launcher/active.json"))
         XCTAssertEqual(paths.appRunRoot, paths.appRoot.appendingPathComponent("runs", isDirectory: true))
         XCTAssertEqual(paths.aampLogRoot, home.appendingPathComponent(".aamp/logs", isDirectory: true))
+        XCTAssertEqual(paths.aampFeishuBridgeRoot, home.appendingPathComponent(".aamp/feishu-bridge", isDirectory: true))
         XCTAssertEqual(paths.aampLogsBinary, home.appendingPathComponent(".aamp/bin/aamp-logs"))
     }
 }

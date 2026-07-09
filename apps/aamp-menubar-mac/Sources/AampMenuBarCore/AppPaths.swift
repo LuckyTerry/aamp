@@ -43,6 +43,10 @@ public struct AppPaths: Equatable {
         homeDirectory.appendingPathComponent(".aamp/logs", isDirectory: true)
     }
 
+    public var aampFeishuBridgeRoot: URL {
+        homeDirectory.appendingPathComponent(".aamp/feishu-bridge", isDirectory: true)
+    }
+
     public var aampLatestLogSymlink: URL {
         aampLogRoot.appendingPathComponent("latest", isDirectory: true)
     }
