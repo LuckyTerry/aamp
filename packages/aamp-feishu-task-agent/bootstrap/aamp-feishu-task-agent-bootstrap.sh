@@ -17,6 +17,7 @@ AAMP_LOG_DIR="${AAMP_LOG_DIR:-$HOME/.aamp/logs}"
 AAMP_BIN_DIR="${AAMP_BIN_DIR:-$HOME/.aamp/bin}"
 AAMP_TAIL_BRIDGE_LOGS="${AAMP_TAIL_BRIDGE_LOGS:-false}"
 AAMP_ONE_CLICK_VERBOSE="${AAMP_ONE_CLICK_VERBOSE:-false}"
+AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${AAMP_ONE_CLICK_MOCK_FAIL_STAGE:-}"
 BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/task-profiles-v2.json}"
 CURRENT_RUN_FILE="${CURRENT_RUN_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/current.json}"
 ACTIVE_RUNS_FILE="${ACTIVE_RUNS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/active.json}"
@@ -172,6 +173,28 @@ agent_fail() {
   print_local_log_hints stderr
   printf '\n' >&2
   exit 1
+}
+
+mock_fail_stage_known() {
+  case "$1" in
+    node-toolchain|agent-login|feishu-bot|agent-bridge|feishu-bridge)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_mock_fail_stage() {
+  [ -n "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" ] || return 0
+  mock_fail_stage_known "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" || agent_fail "unknown mock failure stage: $AAMP_ONE_CLICK_MOCK_FAIL_STAGE"
+}
+
+maybe_mock_fail() {
+  local stage="$1"
+  [ "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" = "$stage" ] || return 0
+  agent_fail "模拟启动失败：$stage"
 }
 
 json_escape() {
@@ -1000,6 +1023,10 @@ parse_args() {
       --debug)
         DEBUG_MODE="true"
         shift
+        ;;
+      --mock-fail-stage)
+        AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${2:-}"
+        shift 2
         ;;
       -h|--help)
         usage
@@ -2971,6 +2998,7 @@ start_feishu_task_bridge() {
 
   start_logged_bridge "$FEISHU_LOG" FEISHU_TAIL_PID write run_feishu_bridge "${command[@]}"
   FEISHU_PID="$STARTED_BRIDGE_PID"
+  maybe_mock_fail "feishu-bridge"
 
   for _ in $(seq 1 90); do
     if ! kill -0 "$FEISHU_PID" 2>/dev/null; then
@@ -3039,26 +3067,32 @@ main() {
 
   parse_args "$@"
   init_log_run
+  validate_mock_fail_stage
   # Do not clean globally by default: users may run one-click scripts in
   # multiple terminals. Cleanup on exit is limited to pids started by this run.
   cleanup_stale_one_click_processes
   ensure_node_toolchain
+  maybe_mock_fail "node-toolchain"
   install_aamp_logs_bin
   build_feishu_env_args
   source_lark_env
   ensure_agent_cli
   ensure_agent_login
+  maybe_mock_fail "agent-login"
   resolve_feishu_bot_credentials
+  maybe_mock_fail "feishu-bot"
   write_run_manifest
   if ! uses_cli_bridge; then
     ensure_acpx
   fi
   if uses_cli_bridge; then
     start_cli_bridge_and_capture_pairing_url
+    maybe_mock_fail "agent-bridge"
   else
     build_acp_agent_command
     validate_codex_acp_command
     start_acp_bridge_and_capture_pairing_url
+    maybe_mock_fail "agent-bridge"
   fi
   start_feishu_task_bridge
 

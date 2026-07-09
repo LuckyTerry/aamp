@@ -28,6 +28,8 @@ test('bootstrap --help remains side-effect light and prints usage', () => {
 test('bootstrap terminal UX points users at local logs and success state', () => {
   const source = readFileSync(bootstrap, 'utf8')
 
+  assert.match(source, /--mock-fail-stage/)
+  assert.match(source, /AAMP_ONE_CLICK_MOCK_FAIL_STAGE/)
   assert.match(source, /print_local_log_hints/)
   assert.match(source, /运行日志目录/)
   assert.match(source, /运行日志打包/)
@@ -71,6 +73,41 @@ agent_fail "测试失败"
   assert.match(stderr, /运行日志打包：.* collect --run-dir .*\/run/)
   assert.match(stderr, /特定任务日志打包：.* collect --task-id xxx/)
   assert.match(stderr, /特定任务日志打包：.* collect --task-guid yyy/)
+})
+
+test('bootstrap mock failure stages use friendly failure UX', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('write_one_click_log()')
+  const end = source.indexOf('\nwrite_run_manifest()')
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-mock-failure-'))
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+AAMP_RUN_LOG_DIR="$1/run"
+AAMP_LOGS_BIN="$1/bin/aamp-logs"
+AAMP_ONE_CLICK_MOCK_FAIL_STAGE="agent-login"
+ONE_CLICK_LOG="$1/one-click.log"
+ERRORS_LOG="$1/errors.jsonl"
+mkdir -p "$AAMP_RUN_LOG_DIR" "$(dirname "$AAMP_LOGS_BIN")"
+${helpers}
+validate_mock_fail_stage
+maybe_mock_fail "node-toolchain"
+maybe_mock_fail "agent-login"
+`, 'bash', home], { encoding: 'utf8' })
+
+  assert.equal(result.status, 1)
+  const stderr = result.stderr
+  assert.match(stderr, /运行失败，本地飞书任务连接没有启动成功/)
+  assert.match(stderr, /原因：模拟启动失败：agent-login/)
+  assert.match(stderr, /运行日志打包：.* collect --run-dir .*\/run/)
+  assert.match(stderr, /特定任务日志打包：.* collect --task-id xxx/)
+  assert.match(stderr, /特定任务日志打包：.* collect --task-guid yyy/)
+
+  const mockStageList = source.match(/node-toolchain\|agent-login\|feishu-bot\|agent-bridge\|feishu-bridge/)?.[0] ?? ''
+  assert.equal(mockStageList.split('|').length, 5)
 })
 
 test('bootstrap accepts lark-cli user auth token that needs refresh', () => {
