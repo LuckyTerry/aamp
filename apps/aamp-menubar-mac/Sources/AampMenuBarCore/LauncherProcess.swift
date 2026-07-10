@@ -39,7 +39,11 @@ public final class LauncherProcess: @unchecked Sendable {
     private enum Stream {
         case stdout
         case stderr
-        case bridgeLog
+    }
+
+    private struct BridgeLogReadState {
+        var offset: UInt64
+        var buffer = Data()
     }
 
     private let paths: AppPaths
@@ -58,13 +62,13 @@ public final class LauncherProcess: @unchecked Sendable {
     private var stderrPipe: Pipe?
     private var stdoutLogURL: URL?
     private var stderrLogURL: URL?
-    private var stdoutBuffer = ""
-    private var stderrBuffer = ""
+    private var stdoutBuffer = Data()
+    private var stderrBuffer = Data()
     private var bridgeLogTimer: DispatchSourceTimer?
-    private var bridgeLogURL: URL?
-    private var bridgeLogOffset: UInt64 = 0
-    private var bridgeLogBuffer = ""
-    private var bridgeLogInitialOffsets: [URL: UInt64] = [:]
+    private var bridgeLogStates: [URL: BridgeLogReadState] = [:]
+    private var bridgeLogCandidateCache: [URL] = []
+    private var bridgeLogPollTicks = 0
+    private let bridgeLogCandidateRefreshTickInterval = 8
 
     public init(paths: AppPaths, startupTimeout: TimeInterval = 180, fileManager: FileManager = .default) {
         self.paths = paths
@@ -124,12 +128,11 @@ public final class LauncherProcess: @unchecked Sendable {
             stderrPipe = stderr
             stdoutLogURL = stdoutLog
             stderrLogURL = stderrLog
-            stdoutBuffer = ""
-            stderrBuffer = ""
-            bridgeLogURL = nil
-            bridgeLogOffset = 0
-            bridgeLogBuffer = ""
-            bridgeLogInitialOffsets = [:]
+            stdoutBuffer = Data()
+            stderrBuffer = Data()
+            bridgeLogStates = [:]
+            bridgeLogCandidateCache = []
+            bridgeLogPollTicks = 0
             process = launchedProcess
 
             observe(pipe: stdout, stream: .stdout)
@@ -194,6 +197,10 @@ public final class LauncherProcess: @unchecked Sendable {
     }
 
     private func handleTermination(_ terminatedProcess: Process) {
+        guard process === terminatedProcess else {
+            return
+        }
+
         cancelStartupTimer()
         flushBuffer(for: .stdout)
         flushBuffer(for: .stderr)
@@ -256,16 +263,12 @@ public final class LauncherProcess: @unchecked Sendable {
             return
         }
 
-        guard let text = String(data: data, encoding: .utf8) else {
-            return
-        }
-
-        append(text, for: stream)
-        accumulate(text, for: stream)
+        append(data, for: stream)
+        accumulate(data, for: stream)
     }
 
-    private func append(_ text: String, for stream: Stream) {
-        guard let logURL = logURL(for: stream), let data = text.data(using: .utf8) else {
+    private func append(_ data: Data, for stream: Stream) {
+        guard let logURL = logURL(for: stream) else {
             return
         }
 
@@ -278,42 +281,56 @@ public final class LauncherProcess: @unchecked Sendable {
         try? handle.close()
     }
 
-    private func accumulate(_ text: String, for stream: Stream) {
+    private func accumulate(_ data: Data, for stream: Stream) {
         switch stream {
         case .stdout:
-            stdoutBuffer.append(text)
+            stdoutBuffer.append(data)
             consumeBuffer(for: .stdout)
         case .stderr:
-            stderrBuffer.append(text)
+            stderrBuffer.append(data)
             consumeBuffer(for: .stderr)
-        case .bridgeLog:
-            bridgeLogBuffer.append(text)
-            consumeBuffer(for: .bridgeLog)
         }
     }
 
     private func consumeBuffer(for stream: Stream) {
-        var buffer = self.buffer(for: stream)
-        let newlineScalars = CharacterSet.newlines
-
-        while let scalarIndex = buffer.unicodeScalars.firstIndex(where: { newlineScalars.contains($0) }) {
-            let stringIndex = String.Index(scalarIndex, within: buffer) ?? buffer.endIndex
-            let line = String(buffer[..<stringIndex])
-            buffer.removeSubrange(..<buffer.index(after: stringIndex))
-            observeLine(line)
+        switch stream {
+        case .stdout:
+            consumeLines(from: &stdoutBuffer)
+        case .stderr:
+            consumeLines(from: &stderrBuffer)
         }
-
-        setBuffer(buffer, for: stream)
     }
 
     private func flushBuffer(for stream: Stream) {
-        let buffer = self.buffer(for: stream)
+        switch stream {
+        case .stdout:
+            flushLineBuffer(&stdoutBuffer)
+        case .stderr:
+            flushLineBuffer(&stderrBuffer)
+        }
+    }
+
+    private func consumeLines(from buffer: inout Data) {
+        while let newlineIndex = buffer.firstIndex(where: { $0 == 0x0A || $0 == 0x0D }) {
+            let newlineByte = buffer[newlineIndex]
+            let lineData = Data(buffer[..<newlineIndex])
+            let removeEnd = buffer.index(after: newlineIndex)
+            buffer.removeSubrange(buffer.startIndex..<removeEnd)
+            if newlineByte == 0x0D, buffer.first == 0x0A {
+                buffer.removeFirst()
+            }
+            observeLine(String(decoding: lineData, as: UTF8.self))
+        }
+    }
+
+    private func flushLineBuffer(_ buffer: inout Data) {
         guard !buffer.isEmpty else {
             return
         }
 
-        setBuffer("", for: stream)
-        observeLine(buffer)
+        let lineData = buffer
+        buffer.removeAll(keepingCapacity: true)
+        observeLine(String(decoding: lineData, as: UTF8.self))
     }
 
     private func observeLine(_ line: String) {
@@ -363,20 +380,15 @@ public final class LauncherProcess: @unchecked Sendable {
         stderrPipe = nil
         stdoutLogURL = nil
         stderrLogURL = nil
-        stdoutBuffer = ""
-        stderrBuffer = ""
-        bridgeLogURL = nil
-        bridgeLogOffset = 0
-        bridgeLogBuffer = ""
-        bridgeLogInitialOffsets = [:]
+        stdoutBuffer = Data()
+        stderrBuffer = Data()
+        bridgeLogStates = [:]
+        bridgeLogCandidateCache = []
+        bridgeLogPollTicks = 0
     }
 
     private func startBridgeLogObservation() {
-        bridgeLogInitialOffsets = bridgeLogCandidates().reduce(into: [:]) { offsets, url in
-            if let size = sizeOfFile(at: url) {
-                offsets[url] = size
-            }
-        }
+        refreshBridgeLogCandidates(snapshotExistingContent: true)
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(250))
@@ -397,73 +409,77 @@ public final class LauncherProcess: @unchecked Sendable {
             return
         }
 
-        guard let latestLog = latestReadableBridgeLog() else {
+        bridgeLogPollTicks += 1
+        if bridgeLogPollTicks >= bridgeLogCandidateRefreshTickInterval {
+            bridgeLogPollTicks = 0
+            refreshBridgeLogCandidates(snapshotExistingContent: false)
+        }
+
+        for url in bridgeLogCandidateCache {
+            guard process != nil, !isStopping, !hasReportedRunning, !hasFailedStartup else {
+                return
+            }
+            pollBridgeLog(at: url)
+        }
+    }
+
+    private func pollBridgeLog(at url: URL) {
+        guard fileManager.isReadableFile(atPath: url.path),
+              let fileSize = sizeOfFile(at: url) else {
             return
         }
 
-        guard let fileSize = sizeOfFile(at: latestLog) else {
+        var state = bridgeLogStates[url] ?? BridgeLogReadState(offset: 0)
+
+        if state.offset > fileSize {
+            state = BridgeLogReadState(offset: 0)
+        }
+
+        let offset = state.offset
+        guard offset < fileSize else {
+            bridgeLogStates[url] = state
             return
         }
 
-        if bridgeLogURL != latestLog {
-            bridgeLogURL = latestLog
-            bridgeLogOffset = bridgeLogInitialOffsets[latestLog] ?? 0
-            bridgeLogBuffer = ""
-        }
-
-        if bridgeLogOffset > fileSize {
-            bridgeLogOffset = 0
-            bridgeLogBuffer = ""
-        }
-
-        guard let handle = try? FileHandle(forReadingFrom: latestLog) else {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            bridgeLogStates[url] = state
             return
         }
 
-        defer {
-            try? handle.close()
-        }
+        defer { try? handle.close() }
 
         do {
-            try handle.seek(toOffset: bridgeLogOffset)
+            try handle.seek(toOffset: offset)
             guard let data = try handle.readToEnd(), !data.isEmpty else {
                 return
             }
-            bridgeLogOffset += UInt64(data.count)
-            handleBridgeLogData(data)
+            state.offset = offset + UInt64(data.count)
+            bridgeLogStates[url] = state
+            handleBridgeLogData(data, from: url)
         } catch {
+            bridgeLogStates[url] = state
             return
         }
     }
 
-    private func handleBridgeLogData(_ data: Data) {
-        guard let text = String(data: data, encoding: .utf8) else {
-            return
+    private func handleBridgeLogData(_ data: Data, from url: URL) {
+        var state = bridgeLogStates[url] ?? BridgeLogReadState(offset: 0)
+        state.buffer.append(data)
+        consumeLines(from: &state.buffer)
+        if !state.buffer.isEmpty {
+            observeLine(String(decoding: state.buffer, as: UTF8.self))
         }
-
-        accumulate(text, for: .bridgeLog)
-        let buffer = self.buffer(for: .bridgeLog)
-        if !buffer.isEmpty {
-            observeLine(buffer)
-        }
+        bridgeLogStates[url] = state
     }
 
-    private func latestReadableBridgeLog() -> URL? {
-        bridgeLogCandidates()
-            .compactMap { url -> (url: URL, modificationDate: Date)? in
-                guard fileManager.isReadableFile(atPath: url.path) else {
-                    return nil
-                }
+    private func refreshBridgeLogCandidates(snapshotExistingContent: Bool) {
+        let candidates = bridgeLogCandidates()
+        bridgeLogCandidateCache = candidates
 
-                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-                guard values?.isRegularFile == true else {
-                    return nil
-                }
-
-                return (url, values?.contentModificationDate ?? .distantPast)
-            }
-            .max { $0.modificationDate < $1.modificationDate }?
-            .url
+        for url in candidates where bridgeLogStates[url] == nil {
+            let offset = snapshotExistingContent ? (sizeOfFile(at: url) ?? 0) : 0
+            bridgeLogStates[url] = BridgeLogReadState(offset: offset)
+        }
     }
 
     private func bridgeLogCandidates() -> [URL] {
@@ -532,30 +548,6 @@ public final class LauncherProcess: @unchecked Sendable {
             return stdoutLogURL
         case .stderr:
             return stderrLogURL
-        case .bridgeLog:
-            return nil
-        }
-    }
-
-    private func buffer(for stream: Stream) -> String {
-        switch stream {
-        case .stdout:
-            return stdoutBuffer
-        case .stderr:
-            return stderrBuffer
-        case .bridgeLog:
-            return bridgeLogBuffer
-        }
-    }
-
-    private func setBuffer(_ buffer: String, for stream: Stream) {
-        switch stream {
-        case .stdout:
-            stdoutBuffer = buffer
-        case .stderr:
-            stderrBuffer = buffer
-        case .bridgeLog:
-            bridgeLogBuffer = buffer
         }
     }
 

@@ -193,6 +193,99 @@ final class LauncherProcessTests: XCTestCase {
         process.stop()
     }
 
+    func testBridgeLogReadsAppendedContentFromAllCandidates() throws {
+        let fixture = try makeFixture(scriptBody: """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        sleep 30
+        """)
+        try FileManager.default.createDirectory(
+            at: fixture.paths.aampFeishuBridgeRoot,
+            withIntermediateDirectories: true
+        )
+        let activeLog = fixture.paths.aampFeishuBridgeRoot.appendingPathComponent("active.log")
+        let secondaryLog = fixture.paths.aampFeishuBridgeRoot.appendingPathComponent("secondary.log")
+        try Data("active boot\n".utf8).write(to: activeLog)
+        try Data("secondary boot\n".utf8).write(to: secondaryLog)
+
+        let process = LauncherProcess(paths: fixture.paths, startupTimeout: 5)
+        let running = expectation(description: "running from secondary bridge log")
+
+        try process.start(script: fixture.script, settings: .defaults) { state in
+            if state == .running {
+                running.fulfill()
+            }
+        }
+
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.4))
+        try FileHandle(forWritingTo: secondaryLog).closeAfterWriting("bridge.task_runtime.running\n")
+        try FileHandle(forWritingTo: activeLog).closeAfterWriting("still booting\n")
+
+        wait(for: [running], timeout: 3)
+        process.stop()
+    }
+
+    func testSplitUTF8ReadinessMarkerTransitionsToRunning() throws {
+        let fixture = try makeFixture(scriptBody: """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        printf '\\345\\267'
+        sleep 0.2
+        printf '\\262接入飞书任务，可以开始对话 & 派发任务\\n'
+        sleep 30
+        """)
+        let process = LauncherProcess(paths: fixture.paths, startupTimeout: 5)
+        let running = expectation(description: "running from split utf8 marker")
+
+        try process.start(script: fixture.script, settings: .defaults) { state in
+            if state == .running {
+                running.fulfill()
+            }
+        }
+
+        wait(for: [running], timeout: 3)
+        process.stop()
+    }
+
+    func testRapidRestartDoesNotLetOldTerminationClearNewProcess() throws {
+        let fixture = try makeFixture(scriptBody: """
+        #!/usr/bin/env bash
+        set -euo pipefail
+        sleep 0.1
+        exit 0
+        """)
+        let secondScript = fixture.script.deletingLastPathComponent().appendingPathComponent("second-bootstrap.sh")
+        try Data("""
+        #!/usr/bin/env bash
+        set -euo pipefail
+        sleep 0.2
+        printf 'bridge.task_runtime.running\\n'
+        sleep 30
+        """.utf8).write(to: secondScript)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: secondScript.path)
+
+        let process = LauncherProcess(paths: fixture.paths, startupTimeout: 5)
+        let secondRunning = expectation(description: "second run reaches running")
+        var sawSecondStart = false
+
+        try process.start(script: fixture.script, settings: .defaults) { _ in }
+
+        waitUntil("first process exits before restart", timeout: 2) {
+            process.isRunning == false
+        }
+
+        try process.start(script: secondScript, settings: .defaults) { state in
+            if state == .starting {
+                sawSecondStart = true
+            } else if state == .running && sawSecondStart {
+                secondRunning.fulfill()
+            }
+        }
+
+        wait(for: [secondRunning], timeout: 3)
+        process.stop()
+    }
+
     func testStdoutAndStderrAreWrittenToRunLogs() throws {
         let fixture = try makeFixture(scriptBody: """
         #!/usr/bin/env bash
