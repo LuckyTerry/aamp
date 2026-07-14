@@ -6,8 +6,8 @@
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.0-dev.156",
-  "description": "One-click launcher for AAMP ACP/CLI bridge and unified Feishu bridge.",
+  "version": "0.1.0-dev.163",
+  "description": "One-click manager for local Agent and Feishu Bot bindings.",
   "type": "module",
   "bin": {
     "aamp-feishu-task-agent": "bootstrap/aamp-feishu-task-agent-bootstrap.sh",

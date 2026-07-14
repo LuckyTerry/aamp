@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 AGENT=""
 APP_ID=""
 APP_SECRET=""
 BOT_NAME=""
 LARK_CLI_PROFILE=""
-ENV_NAME="online"
-BOE_ENV_NAME="boe_task_event"
 AAMP_HOST="https://meshmail.ai"
 DEBUG_MODE="false"
-AAMP_TASK_START_MODE="start"
-AAMP_TASK_ACTION="start"
+AAMP_TASK_START_MODE="install"
+AAMP_TASK_ACTION=""
+AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
+AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
+AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
+AAMP_TASK_INTERNAL_INPUT_FD="${AAMP_TASK_INTERNAL_INPUT_FD:-4}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
@@ -39,7 +42,6 @@ CODEX_UPDATE_LOCK_DIR="${CODEX_UPDATE_LOCK_DIR:-$HOME/.aamp/locks/codex-cli-upda
 AAMP_LARK_CLI_BIN="${AAMP_LARK_CLI_BIN:-}"
 LARK_CLI_CMD=""
 AAMP_LARK_CLI_CONFIG_DIR="${AAMP_LARK_CLI_CONFIG_DIR:-${LARKSUITE_CLI_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-v1}}"
-AAMP_LARK_CLI_BOE_CONFIG_DIR="${AAMP_LARK_CLI_BOE_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-boe-v1}"
 CODEM_SERVER_URL="${CODEM_SERVER_URL:-https://codem.feishu.cn}"
 CODEM_INSTALLER_URL="${CODEM_INSTALLER_URL:-https://sf-unpkg-src.bytedance.net/@byted-meego/codem-installer@latest/install.sh}"
 CODEM_INSTALLER_CONFIRM="${CODEM_INSTALLER_CONFIRM:-}"
@@ -62,7 +64,7 @@ ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.19}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.0-dev.156"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.163"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -83,7 +85,6 @@ CODEM_AUTO_UPDATE_DONE="false"
 CODEM_FORCE_LOGIN_DONE="false"
 CODEM_PROVIDER_RECOVERY_DONE="false"
 PAIRING_URL=""
-FEISHU_ENV_ARGS=()
 ACP_AGENT_COMMAND=""
 STARTED_BRIDGE_PID=""
 ONE_CLICK_RUN_ID="$(date +%s)-$$"
@@ -92,14 +93,14 @@ NPM_BIN=""
 NPX_BIN=""
 CURSOR_LOCAL_BIN="$HOME/.local/bin"
 CODEM_LOCAL_BIN="$HOME/.codem/bin"
-AAMP_RUN_LOG_DIR=""
-AAMP_RUN_ID=""
-ONE_CLICK_LOG=""
-ERRORS_LOG=""
+AAMP_RUN_LOG_DIR="${AAMP_RUN_LOG_DIR:-}"
+AAMP_RUN_ID="${AAMP_RUN_ID:-}"
+ONE_CLICK_LOG="${ONE_CLICK_LOG:-}"
+ERRORS_LOG="${ERRORS_LOG:-}"
 AAMP_LOGS_BIN="$AAMP_BIN_DIR/aamp-logs"
 AGENT_BRIDGE_EMAIL=""
 FEISHU_BRIDGE_EMAIL=""
-ORIGINAL_ARGS=()
+RESTART_ARGS=()
 
 sanitize_inherited_npm_exec_env() {
   local key lower
@@ -116,13 +117,20 @@ sanitize_inherited_npm_exec_env() {
 usage() {
   cat <<'USAGE'
 Usage:
-  feishu-task-agent [options]       # start Feishu task bridge
-  feishu-task-agent update          # update short command now
+  feishu-task-agent install         # bind multiple Agent-Bot pairs, then start them
+  feishu-task-agent start           # choose saved pairs to start
+  feishu-task-agent list            # list saved pairs
+  feishu-task-agent add             # bind and save more pairs without leaving bridges running
+  feishu-task-agent remove          # remove saved pairs without stopping running bridges
+  feishu-task-agent update          # update the short command now
+  feishu-task-agent help            # show this help
+
+Running the installed short command without a subcommand shows this help.
+Running the standalone one-click script without a subcommand is the same as
+"feishu-task-agent install".
 
 Options:
-  --agent codex|cursor|codem  Agent to launch. If omitted, choose interactively.
-  --env online|pre|boe       Runtime environment. Default: online
-  --boe-env-name NAME        BOE x-tt-env value. Default: boe_task_event
+  --agent codex|cursor        Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
   -h, --help                 Show this help
@@ -198,6 +206,10 @@ agent_fail() {
       "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
       "$(json_escape "$reason")" >>"$ERRORS_LOG" 2>/dev/null || true
   fi
+  if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
+    printf '\n🔴 当前配置处理失败：%s\n\n' "$reason" >&2
+    exit 1
+  fi
   printf '\n🔴 运行失败，本地飞书任务连接没有启动成功。\n' >&2
   printf '   原因：%s\n' "$reason" >&2
   print_local_log_hints stderr
@@ -249,7 +261,7 @@ write_run_manifest() {
   "run_id": "$(json_escape "$AAMP_RUN_ID")",
   "started_at": "$(date '+%Y-%m-%dT%H:%M:%S%z')",
   "agent": "$(json_escape "$AGENT")",
-  "env": "$(json_escape "$ENV_NAME")",
+  "env": "online",
   "aamp_host": "$(json_escape "$AAMP_HOST")",
   "app_id": "$(json_escape "$APP_ID")",
   "bot_name": "$(json_escape "$BOT_NAME")",
@@ -330,7 +342,7 @@ init_log_run() {
   : >"$ONE_CLICK_LOG"
   : >"$ERRORS_LOG"
   ln -sfn "$AAMP_RUN_LOG_DIR" "$AAMP_LOG_DIR/latest" 2>/dev/null || true
-  export AAMP_LOG_DIR
+  export AAMP_LOG_DIR AAMP_RUN_LOG_DIR AAMP_RUN_ID ONE_CLICK_LOG ERRORS_LOG AAMP_LOGS_BIN
   write_run_manifest
   agent_detail "logs directory: $AAMP_RUN_LOG_DIR"
 }
@@ -743,14 +755,20 @@ try {
 ' 2>>"$ONE_CLICK_LOG"
 }
 
-task_agent_global_install_is_current() {
-  local expected_version="$1"
-  local package_dir installed_version
+task_agent_global_install_is_complete() {
+  local package_dir
   package_dir="$(task_agent_global_package_dir)"
-  installed_version="$(task_agent_global_package_version || true)"
-  [ "$installed_version" = "$expected_version" ] || return 1
   [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ] || return 1
   [ -r "$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh" ] || return 1
+  [ -r "$package_dir/bin/feishu-task-agent-controller.mjs" ] || return 1
+}
+
+task_agent_global_install_is_current() {
+  local expected_version="$1"
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  [ "$installed_version" = "$expected_version" ] || return 1
+  task_agent_global_install_is_complete
 }
 
 ensure_task_agent_global_install_locked() {
@@ -761,7 +779,7 @@ ensure_task_agent_global_install_locked() {
 
   local installed_version
   installed_version="$(task_agent_global_package_version || true)"
-  if [ -n "$installed_version" ] && task_agent_version_is_newer "$expected_version" "$installed_version"; then
+  if [ -n "$installed_version" ] && task_agent_version_is_newer "$expected_version" "$installed_version" && task_agent_global_install_is_complete; then
     agent_detail "keeping newer task-agent npm package: installed=$installed_version requested=$expected_version"
     return 0
   fi
@@ -841,7 +859,7 @@ install_command_shim() {
   local tmp="${shim}.tmp.$$"
   cat >"$tmp" <<EOF
 #!/usr/bin/env bash
-exec "$target" "\$@"
+AAMP_TASK_ENTRY=short exec "$target" "\$@"
 EOF
   chmod +x "$tmp" 2>/dev/null || true
   if [ -f "$shim" ] && cmp -s "$tmp" "$shim"; then
@@ -955,11 +973,8 @@ auto_update_short_command_if_needed() {
     install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
     write_task_update_cache "$latest"
     agent_detail "task-agent auto-updated from $AAMP_TASK_AGENT_VERSION to $latest"
-    if [ "$AAMP_TASK_START_MODE" = "start" ] || [ "$AAMP_TASK_ACTION" = "update" ]; then
-      agent_detail "restarting with updated task-agent $latest"
-      AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${ORIGINAL_ARGS[@]}"
-    fi
-    return 0
+    agent_detail "restarting with updated task-agent $latest"
+    AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${RESTART_ARGS[@]}"
   fi
   agent_detail "task-agent auto-update to $latest failed; continuing current version"
 }
@@ -975,9 +990,7 @@ adopt_newer_global_task_agent_if_available() {
   install_short_command_from_version "$installed_version" "$AAMP_TASK_COMMAND_PATH" || return 1
   install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
   write_task_update_cache "$installed_version"
-  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
-    AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${ORIGINAL_ARGS[@]}"
-  fi
+  AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${RESTART_ARGS[@]}"
 }
 
 run_task_agent_update_command() {
@@ -1132,8 +1145,8 @@ npm_install_register_helper() {
 
 validate_agent_name() {
   case "$1" in
-    codex|cursor|codem) ;;
-    *) agent_fail "--agent must be codex, cursor, or codem" ;;
+    codex|cursor) ;;
+    *) agent_fail "--agent must be codex or cursor" ;;
   esac
 }
 
@@ -1373,28 +1386,49 @@ select_bot_menu() {
 }
 
 parse_args() {
+  local restart_source=()
+  local restart_arg
+  local restart_count=0
+  local restart_index=0
+  local restart_output_index=0
+
+  # Bash 3.2 with `set -u` treats an expanded empty array as unbound. Copy the
+  # original positional parameters one by one so the no-argument help path
+  # never expands an empty array.
+  for restart_arg in "$@"; do
+    restart_source[$restart_count]="$restart_arg"
+    restart_count=$((restart_count + 1))
+  done
+
   # dev.150 restarted an updated launcher with its internal mode argument.
   if [ "${1:-}" = "normal" ]; then
     shift
   fi
-  if [ "${1:-}" = "update" ]; then
-    AAMP_TASK_ACTION="update"
-    AAMP_TASK_START_MODE="install"
-    shift
+
+  case "${1:-}" in
+    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+      AAMP_TASK_ACTION="$1"
+      shift
+      ;;
+  esac
+
+  if [ -z "$AAMP_TASK_ACTION" ]; then
+    AAMP_TASK_ACTION="${AAMP_TASK_DEFAULT_ACTION:-install}"
   fi
+
+  case "$AAMP_TASK_ACTION" in
+    install|start|add)
+      AAMP_TASK_START_MODE="start"
+      ;;
+    *)
+      AAMP_TASK_START_MODE="install"
+      ;;
+  esac
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --agent)
         AGENT="${2:-}"
-        shift 2
-        ;;
-      --env)
-        ENV_NAME="${2:-}"
-        shift 2
-        ;;
-      --boe-env-name)
-        BOE_ENV_NAME="${2:-}"
         shift 2
         ;;
       --aamp-host)
@@ -1410,8 +1444,8 @@ parse_args() {
         shift 2
         ;;
       -h|--help)
-        usage
-        exit 0
+        AAMP_TASK_ACTION="help"
+        shift
         ;;
       *)
         agent_fail "unknown argument: $1"
@@ -1423,260 +1457,31 @@ parse_args() {
     validate_agent_name "$AGENT"
   fi
 
-  case "$ENV_NAME" in
-    online|pre|boe) ;;
-    *) agent_fail "--env must be online, pre, or boe" ;;
-  esac
-}
-
-install_embedded_lark_env() {
-  local target="$1"
-  cat >"$target" <<'LARK_ENV_TASK_SH'
-#!/usr/bin/env bash
-set -euo pipefail
-
-RULE_NAME="lark-cli-openapi-env-switch"
-RULE_GROUP="lark-cli"
-
-log() {
-  printf '[lark-env-task] %s\n' "$*" >&2
-}
-
-fail() {
-  printf '[lark-env-task] ERROR: %s\n' "$*" >&2
-  return 1
-}
-
-usage() {
-  cat >&2 <<'USAGE'
-Usage:
-  source ~/lark-env-task.sh online
-  source ~/lark-env-task.sh pre
-  source ~/lark-env-task.sh boe --boe-env-name boe_task_event
-  source ~/lark-env-task.sh off
-USAGE
-}
-
-pick_whistle_cmd() {
-  if command -v w2 >/dev/null 2>&1; then
-    printf '%s\n' "w2"
-    return 0
+  if [ "${restart_source[0]:-}" = "normal" ]; then
+    restart_index=1
   fi
-  if command -v whistle >/dev/null 2>&1; then
-    printf '%s\n' "whistle"
-    return 0
-  fi
-  return 1
-}
-
-ensure_whistle() {
-  local wcmd="$1"
-  local status
-  status="$("$wcmd" status 2>&1 || true)"
-  case "$status" in
-    *"No running Whistle instances"*)
-      log "Whistle is not running, starting it now..."
-      "$wcmd" start >/dev/null 2>&1 || fail "failed to start Whistle"
-      ;;
-  esac
-}
-
-write_rule_js() {
-  local target="$1"
-  cat >"$target" <<'JS'
-module.exports = function (callback) {
-  callback({
-    name: process.env.LARK_CLI_WHISTLE_RULE_NAME || 'lark-cli-openapi-env-switch',
-    groupName: process.env.LARK_CLI_WHISTLE_RULE_GROUP || 'lark-cli',
-    rules: process.env.LARK_CLI_WHISTLE_RULES || ''
-  });
-};
-JS
-}
-
-build_rules() {
-  local mode="$1"
-  local boe_env_name="$2"
-
-  case "$mode" in
-    pre)
-      cat <<'RULES'
-/^https:\/\/open\.feishu\.cn\/(.*)$/ https://open.feishu-pre.cn/$1
-https://open.feishu.cn/ reqHeaders://Env=Pre_release
-/^https:\/\/accounts\.feishu\.cn\/(.*)$/ https://accounts.feishu-pre.cn/$1
-RULES
-      ;;
-    boe)
-      cat <<'RULES'
-/^https:\/\/open\.feishu\.cn\/(.*)$/ https://open.feishu-boe.cn/$1
-/^https:\/\/accounts\.feishu\.cn\/(.*)$/ https://accounts.feishu-boe.cn/$1
-RULES
-      if [ -n "$boe_env_name" ]; then
-        printf '%s\n' "https://open.feishu.cn/ reqHeaders://x-tt-env=$boe_env_name"
-      fi
-      ;;
-    off|online)
-      cat <<'RULES'
-# lark-cli env switch disabled
-RULES
+  RESTART_ARGS=()
+  case "${restart_source[$restart_index]:-}" in
+    install|start|list|add|remove|update|help)
       ;;
     *)
-      fail "unsupported mode: $mode"
+      RESTART_ARGS[0]="$AAMP_TASK_ACTION"
+      restart_output_index=1
       ;;
   esac
-}
-
-apply_proxy_env() {
-  local mode="$1"
-
-  case "$mode" in
-    pre)
-      export HTTPS_PROXY="http://127.0.0.1:8899"
-      export https_proxy="$HTTPS_PROXY"
-      export HTTP_PROXY="$HTTPS_PROXY"
-      export http_proxy="$HTTPS_PROXY"
-      export ALL_PROXY="$HTTPS_PROXY"
-      export all_proxy="$HTTPS_PROXY"
-      mkdir -p "$AAMP_LARK_CLI_CONFIG_DIR"
-      export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
-      unset LARK_CLI_NO_PROXY
-      log "pre enabled, proxy=$HTTPS_PROXY, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
-      ;;
-    boe)
-      export HTTPS_PROXY="http://127.0.0.1:8899"
-      export https_proxy="$HTTPS_PROXY"
-      export HTTP_PROXY="$HTTPS_PROXY"
-      export http_proxy="$HTTPS_PROXY"
-      export ALL_PROXY="$HTTPS_PROXY"
-      export all_proxy="$HTTPS_PROXY"
-      unset LARK_CLI_NO_PROXY
-      mkdir -p "$AAMP_LARK_CLI_BOE_CONFIG_DIR"
-      export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_BOE_CONFIG_DIR"
-      log "boe enabled, proxy=$HTTPS_PROXY, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
-      ;;
-    online|off)
-      unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
-      mkdir -p "$AAMP_LARK_CLI_CONFIG_DIR"
-      export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
-      unset LARK_CLI_NO_PROXY
-      log "online enabled, proxy env cleared, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
-      ;;
-  esac
-}
-
-main() {
-  local mode="${1:-}"
-  local boe_env_name="boe_task_event"
-
-  if [ -z "$mode" ] || [ "$mode" = "-h" ] || [ "$mode" = "--help" ]; then
-    usage
-    return 0
-  fi
-  shift || true
-
-  while [ "$#" -gt 0 ]; do
-    case "$1" in
-      --boe-env-name)
-        boe_env_name="${2:-}"
-        shift 2
-        ;;
-      *)
-        fail "unknown argument: $1"
-        return 1
-        ;;
-    esac
+  while [ "$restart_index" -lt "$restart_count" ]; do
+    RESTART_ARGS[$restart_output_index]="${restart_source[$restart_index]}"
+    restart_index=$((restart_index + 1))
+    restart_output_index=$((restart_output_index + 1))
   done
-
-  case "$mode" in
-    online|off)
-      apply_proxy_env "online"
-      return 0
-      ;;
-    pre|boe)
-      ;;
-    *)
-      fail "mode must be online, pre, boe, or off"
-      return 1
-      ;;
-  esac
-
-  local wcmd
-  wcmd="$(pick_whistle_cmd)" || {
-    log "missing w2/whistle; install with: npm install -g whistle"
-    return 1
-  }
-  ensure_whistle "$wcmd" || return 1
-
-  local rules
-  rules="$(build_rules "$mode" "$boe_env_name")" || return 1
-
-  local tmp_js
-  tmp_js="$(mktemp "${TMPDIR:-/tmp}/lark-env-task-rule.XXXXXX")" || return 1
-  write_rule_js "$tmp_js"
-
-  LARK_CLI_WHISTLE_RULE_NAME="$RULE_NAME" \
-  LARK_CLI_WHISTLE_RULE_GROUP="$RULE_GROUP" \
-  LARK_CLI_WHISTLE_RULES="$rules" \
-  "$wcmd" add "$tmp_js" --force >/dev/null 2>&1 || {
-    rm -f "$tmp_js"
-    fail "failed to apply Whistle rules"
-    return 1
-  }
-  rm -f "$tmp_js"
-
-  apply_proxy_env "$mode"
-}
-
-main "$@"
-LARK_ENV_TASK_SH
-}
-
-ensure_lark_env_script() {
-  local target="$HOME/lark-env-task.sh"
-  agent_detail "writing embedded env script: $target"
-  install_embedded_lark_env "$target"
-  chmod +x "$target" 2>/dev/null || true
 }
 
 source_lark_env() {
-  ensure_lark_env_script
-
-  case "$ENV_NAME" in
-    online)
-      # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" online >>"$ONE_CLICK_LOG" 2>&1
-      ;;
-    pre)
-      # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1 || {
-        agent_log "Whistle is not ready; installing whistle and retrying pre env setup"
-        npm_install_global whistle
-        source "$HOME/lark-env-task.sh" pre >>"$ONE_CLICK_LOG" 2>&1
-      }
-      ;;
-    boe)
-      # shellcheck disable=SC1090
-      source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME" >>"$ONE_CLICK_LOG" 2>&1 || {
-        agent_log "Whistle is not ready; installing whistle and retrying boe env setup"
-        npm_install_global whistle
-        source "$HOME/lark-env-task.sh" boe --boe-env-name "$BOE_ENV_NAME" >>"$ONE_CLICK_LOG" 2>&1
-      }
-      ;;
-  esac
-}
-
-build_feishu_env_args() {
-  FEISHU_ENV_ARGS=()
-  case "$ENV_NAME" in
-    online)
-      ;;
-    pre)
-      FEISHU_ENV_ARGS=(--pre)
-      ;;
-    boe)
-      FEISHU_ENV_ARGS=(--boe --env "$BOE_ENV_NAME")
-      ;;
-  esac
+  unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
+  mkdir -p "$AAMP_LARK_CLI_CONFIG_DIR"
+  export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
+  unset LARK_CLI_NO_PROXY
+  agent_detail "online enabled, proxy env cleared, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
 }
 
 load_bot_configs() {
@@ -2533,23 +2338,30 @@ register_feishu_app() {
   local register_script
   local register_log
   local register_result_file
-  local result_json
+  local register_status
   local default_name
   local bot_name
 
   workdir="$(mktemp -d "${TMPDIR:-/tmp}/aamp-register-feishu-app.XXXXXX")"
   register_script="$workdir/register-app.mjs"
-  register_log="$workdir/register-app.log"
+  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
+    mkdir -p "$AAMP_RUN_LOG_DIR"
+    register_log="$(mktemp "$AAMP_RUN_LOG_DIR/feishu-register.XXXXXX")"
+  else
+    register_log="$workdir/register-app.log"
+  fi
+  chmod 600 "$register_log" 2>/dev/null || true
   register_result_file="$workdir/register-app-result.json"
   default_name="${AGENT} 飞书 CLI"
 
-  agent_log "preparing Feishu app registration helper"
+  agent_detail "preparing Feishu app registration helper"
   npm_install_register_helper "$workdir"
 
   cat >"$register_script" <<'NODE'
 import * as lark from '@larksuiteoapi/node-sdk';
 import { execFile } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { writeSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const sdkPackage = require('@larksuiteoapi/node-sdk/package.json');
@@ -2567,12 +2379,13 @@ const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
 const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
 const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
 
+function userLog(message) {
+  writeSync(5, `${message}\n`);
+}
+
 console.log(`[aamp-one-click] registerApp sdk=${sdkPackage.version}`);
 console.log(`[aamp-one-click] registerApp appPreset.name=${appName}`);
-console.log(`[aamp-one-click] registerApp addons.scopes.tenant=${tenantScopes.join(',') || '(none)'}`);
-console.log(`[aamp-one-click] registerApp addons.scopes.user=${userScopes.join(',') || '(none)'}`);
-console.log(`[aamp-one-click] registerApp addons.events.items.tenant=${tenantEvents.join(',') || '(none)'}`);
-console.log(`[aamp-one-click] registerApp addons.events.items.user=${userEvents.join(',') || '(none)'}`);
+console.log(`[aamp-one-click] registerApp addons.counts tenantScopes=${tenantScopes.length} userScopes=${userScopes.length} tenantEvents=${tenantEvents.length} userEvents=${userEvents.length}`);
 
 const addons = {
   scopes: {
@@ -2597,13 +2410,22 @@ const result = await lark.registerApp({
   addons,
   onQRCodeReady(info) {
     const url = new URL(info.url);
-    console.log('[aamp-one-click] 请在浏览器打开以下链接，创建飞书应用或选择已有应用：');
-    console.log(info.url);
     console.log(`[aamp-one-click] registerApp url.has_addons=${url.searchParams.has('addons') ? 'yes' : 'no'}`);
     console.log(`[aamp-one-click] registerApp url.has_name=${url.searchParams.has('name') ? 'yes' : 'no'}`);
-    console.log(`[aamp-one-click] 链接将在 ${info.expireIn} 秒后过期`);
     if (process.platform === 'darwin') {
-      execFile('open', [info.url], () => {});
+      execFile('open', [info.url], (error) => {
+        if (error) {
+          userLog('[aamp-one-click] 未能自动打开浏览器，请打开以下链接完成飞书 Bot 授权：');
+          userLog(info.url);
+          userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
+          return;
+        }
+        userLog(`[aamp-one-click] 已打开浏览器，请完成飞书 Bot 授权（链接 ${info.expireIn} 秒内有效）`);
+      });
+    } else {
+      userLog('[aamp-one-click] 请打开以下链接完成飞书 Bot 授权：');
+      userLog(info.url);
+      userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
     }
   },
   onStatusChange(info) {
@@ -2641,27 +2463,38 @@ console.log(`[aamp-one-click] Feishu app registration completed: ${result.client
 console.log(`[aamp-one-click] Feishu app name: ${resultPayload.app_name}`);
 NODE
 
-  agent_log "starting Feishu app registration"
+  agent_log "正在授权飞书 Bot..."
+  set +e
   AAMP_REGISTER_APP_RESULT_FILE="$register_result_file" \
     FEISHU_APP_SCOPES_TENANT="$FEISHU_APP_SCOPES_TENANT" \
     FEISHU_APP_SCOPES_USER="$FEISHU_APP_SCOPES_USER" \
     FEISHU_APP_EVENTS_TENANT="$FEISHU_APP_EVENTS_TENANT" \
     FEISHU_APP_EVENTS_USER="$FEISHU_APP_EVENTS_USER" \
     FEISHU_APP_PRESET_NAME="$default_name" \
-    node "$register_script" 2>&1 | tee "$register_log"
+    node "$register_script" 5>&1 >"$register_log" 2>&1
+  register_status=$?
+  set -e
+  if [ "$register_status" -ne 0 ]; then
+    agent_fail "飞书 Bot 授权失败，详细日志：$register_log"
+  fi
+  agent_detail "Feishu app registration log: $register_log"
 
-  result_json="$(cat "$register_result_file" 2>/dev/null || true)"
-  [ -n "$result_json" ] || agent_fail "failed to get app credentials from Feishu app registration"
+  [ -s "$register_result_file" ] || agent_fail "failed to get app credentials from Feishu app registration"
 
-  APP_ID="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_id || "")')"
-  APP_SECRET="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_secret || "")')"
-  bot_name="$(RESULT_JSON="$result_json" node -e 'const data = JSON.parse(process.env.RESULT_JSON); process.stdout.write(data.app_name || "")')"
+  APP_ID="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_id || "")' "$register_result_file")"
+  APP_SECRET="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_secret || "")' "$register_result_file")"
+  bot_name="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_name || "")' "$register_result_file")"
+  : >"$register_result_file"
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
 
   bot_name="${bot_name:-$default_name}"
   BOT_NAME="$bot_name"
   LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
   ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
+    agent_detail "Feishu Bot 已授权：$BOT_NAME ($APP_ID)"
+    return 0
+  fi
   acquire_bot_selection_lock
   save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$bot_name"
@@ -3075,7 +2908,6 @@ ensure_codex_cli_updated() {
   version_before="$(codex_cli_version_number "$codex_bin" || true)"
   latest_version="$(resolve_latest_codex_cli_version || true)"
   version_line="当前 Codex CLI 版本是：${version_before:-未知}，最新版本是：${latest_version:-获取失败}"
-  printf '%s\n' "$version_line"
   write_one_click_log "[aamp-one-click] $version_line"
   agent_detail "checking Codex CLI update: path=$codex_bin version=${version_before:-unknown}"
 
@@ -3093,6 +2925,7 @@ ensure_codex_cli_updated() {
     return 0
   fi
 
+  printf '%s\n' "$version_line"
   agent_log "正在更新 Codex CLI..."
   if run_codex_cli_update "$codex_bin"; then
     status=0
@@ -3650,9 +3483,6 @@ start_feishu_task_bridge() {
   if [ -n "$APP_SECRET" ]; then
     command+=(--app-secret "$APP_SECRET")
   fi
-  if [ "${#FEISHU_ENV_ARGS[@]}" -gt 0 ]; then
-    command+=("${FEISHU_ENV_ARGS[@]}")
-  fi
   if [ "$DEBUG_MODE" = "true" ]; then
     command+=(--debug)
   fi
@@ -3698,6 +3528,139 @@ start_feishu_task_bridge() {
   agent_fail "timed out waiting for Feishu bridge readiness"
 }
 
+emit_internal_result() {
+  local payload="$1"
+  printf '%s\n' "$payload" >&"$AAMP_TASK_INTERNAL_RESULT_FD"
+}
+
+binding_json_field() {
+  local path_value="$1"
+  printf '%s' "${AAMP_TASK_INTERNAL_BINDING_JSON:-}" | AAMP_BINDING_PATH="$path_value" node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+const data = JSON.parse(input || "{}");
+const value = String(process.env.AAMP_BINDING_PATH || "")
+  .split(".")
+  .filter(Boolean)
+  .reduce((current, key) => current == null ? undefined : current[key], data);
+if (value !== undefined && value !== null) process.stdout.write(String(value));
+});
+'
+}
+
+run_internal_discover_agents() {
+  local agents=()
+  if agent_cli_detected codex; then
+    agents+=("codex")
+  fi
+  if agent_cli_detected cursor; then
+    agents+=("cursor")
+  fi
+  local joined=""
+  if [ "${#agents[@]}" -gt 0 ]; then
+    joined="$(IFS=,; printf '%s' "${agents[*]}")"
+  fi
+  AAMP_DISCOVERED_AGENTS="$joined" node -e '
+const agents = String(process.env.AAMP_DISCOVERED_AGENTS || "").split(",").filter(Boolean);
+process.stdout.write(JSON.stringify({ agents }));
+' >&"$AAMP_TASK_INTERNAL_RESULT_FD"
+}
+
+prepare_internal_agent_environment() {
+  [ -n "$AGENT" ] || agent_fail "internal Agent preparation requires --agent"
+  validate_agent_name "$AGENT"
+  source_lark_env
+  ensure_agent_cli
+}
+
+run_internal_register_binding() {
+  [ -n "$AGENT" ] || agent_fail "internal Bot registration requires --agent"
+  validate_agent_name "$AGENT"
+  source_lark_env
+  register_feishu_app
+  emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\"}"
+}
+
+run_internal_prepare_agent() {
+  prepare_internal_agent_environment
+  ensure_codex_cli_updated
+  ensure_agent_login
+  maybe_mock_fail "agent-login"
+  ensure_acpx
+  build_acp_agent_command
+  emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+}
+
+run_internal_ensure_profile() {
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
+  [ -n "$AAMP_TASK_INTERNAL_BINDING_JSON" ] || agent_fail "missing internal binding payload"
+  APP_ID="$(binding_json_field bot.app_id)"
+  APP_SECRET="$(binding_json_field bot.app_secret)"
+  BOT_NAME="$(binding_json_field bot.display_name)"
+  LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
+  [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu credentials or profile"
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  source_lark_env
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  APP_SECRET=""
+  emit_internal_result "{\"lark_cli_bin\":\"$(json_escape "$LARK_CLI_CMD")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+}
+
+run_internal_action() {
+  AAMP_TASK_INTERNAL="true"
+  ensure_node_toolchain
+  case "$AAMP_TASK_ACTION" in
+    __discover-agents)
+      run_internal_discover_agents
+      ;;
+    __register-binding)
+      run_internal_register_binding
+      ;;
+    __prepare-agent)
+      run_internal_prepare_agent
+      ;;
+    __ensure-profile)
+      run_internal_ensure_profile
+      ;;
+    *)
+      agent_fail "unknown internal action: $AAMP_TASK_ACTION"
+      ;;
+  esac
+}
+
+task_agent_controller_path() {
+  printf '%s/bin/feishu-task-agent-controller.mjs\n' "$(task_agent_global_package_dir)"
+}
+
+run_task_agent_controller() {
+  local controller bootstrap_path install_command
+  controller="$(task_agent_controller_path)"
+  [ -r "$controller" ] || agent_fail "Task Agent controller is missing: $controller"
+  bootstrap_path="$AAMP_TASK_COMMAND_PATH"
+  [ -r "$bootstrap_path" ] || agent_fail "installed Task Agent command is missing: $bootstrap_path"
+  install_command="npx -y --package $AAMP_TASK_AGENT_NAME@$AAMP_TASK_AGENT_CHANNEL feishu-task-agent install"
+  export AAMP_TASK_BOOTSTRAP_PATH="$bootstrap_path"
+  export AAMP_TASK_NPM_BIN="$NPM_BIN"
+  export AAMP_TASK_NPX_BIN="$NPX_BIN"
+  export AAMP_TASK_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
+  export AAMP_TASK_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
+  export AAMP_TASK_CODEX_ACP_PKG="$CODEX_ACP_PKG"
+  export AAMP_TASK_AGENT_VERSION
+  export AAMP_TASK_DEFAULT_AGENT="$AGENT"
+  export AAMP_TASK_AAMP_HOST="$AAMP_HOST"
+  export AAMP_TASK_DEBUG_MODE="$DEBUG_MODE"
+  export AAMP_TASK_INSTALL_COMMAND="$install_command"
+  export AAMP_TASK_NPM_REGISTRY="$NPM_REGISTRY"
+  export AAMP_TASK_NPM_CACHE_DIR="$NPM_CACHE_DIR"
+  export AAMP_TASK_NPM_GLOBAL_PREFIX="$NPM_GLOBAL_PREFIX"
+  export AAMP_LARK_CLI_CONFIG_DIR
+  trap - EXIT INT TERM HUP
+  exec node "$controller" "$AAMP_TASK_ACTION"
+}
+
 cleanup() {
   local status=$?
   trap - EXIT INT TERM HUP
@@ -3725,16 +3688,30 @@ cleanup() {
 }
 
 main() {
-  trap cleanup EXIT INT TERM HUP
+  if [ "$#" -eq 0 ] && { \
+    [ "$AAMP_TASK_ENTRY" = "short" ] \
+      || [ "${0:-}" = "$AAMP_TASK_COMMAND_PATH" ] \
+      || [ "${0:-}" = "$NPM_GLOBAL_PREFIX/bin/$AAMP_TASK_COMMAND_NAME" ]; \
+  }; then
+    AAMP_TASK_DEFAULT_ACTION="help"
+  else
+    AAMP_TASK_DEFAULT_ACTION="install"
+  fi
+  parse_args "$@"
 
-  local invoked_name
-  ORIGINAL_ARGS=("$@")
-  invoked_name="$(basename "${0:-}")"
-  if [ "$invoked_name" = "$AAMP_TASK_COMMAND_NAME" ]; then
-    AAMP_TASK_START_MODE="start"
+  if [ "$AAMP_TASK_ACTION" = "help" ]; then
+    usage
+    return 0
   fi
 
-  parse_args "$@"
+  case "$AAMP_TASK_ACTION" in
+    __discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+      run_internal_action
+      return 0
+      ;;
+  esac
+
+  trap cleanup EXIT INT TERM HUP
   init_log_run
   validate_mock_fail_stage
   # Do not clean globally by default: users may run one-click scripts in
@@ -3749,41 +3726,12 @@ main() {
   fi
   auto_update_short_command_if_needed normal
   adopt_newer_global_task_agent_if_available
-  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
-    install_aamp_logs_bin "$AAMP_TASK_AGENT_VERSION" || agent_log "warning: aamp-logs command is unavailable for this run"
-    adopt_newer_global_task_agent_if_available
-  fi
+  install_aamp_logs_bin "$AAMP_TASK_AGENT_VERSION" || agent_log "warning: aamp-logs command is unavailable for this run"
+  adopt_newer_global_task_agent_if_available
+  ensure_task_agent_global_install "$AAMP_TASK_AGENT_VERSION" || agent_fail "failed to install the complete Task Agent package"
   record_version_line
-  if [ "$AAMP_TASK_START_MODE" != "start" ]; then
-    write_task_update_cache "$AAMP_TASK_AGENT_VERSION"
-    record_install_success
-    return 0
-  fi
-  ensure_selected_agent_for_start
-  build_feishu_env_args
-  source_lark_env
-  ensure_agent_cli
-  ensure_codex_cli_updated
-  ensure_agent_login
-  maybe_mock_fail "agent-login"
-  resolve_feishu_bot_credentials
-  maybe_mock_fail "feishu-bot"
-  write_run_manifest
-  if ! uses_cli_bridge; then
-    ensure_acpx
-  fi
-  if uses_cli_bridge; then
-    start_cli_bridge_and_capture_pairing_url
-    maybe_mock_fail "agent-bridge"
-  else
-    build_acp_agent_command
-    validate_codex_acp_command
-    start_acp_bridge_and_capture_pairing_url
-    maybe_mock_fail "agent-bridge"
-  fi
-  start_feishu_task_bridge
-
-  wait
+  write_task_update_cache "$AAMP_TASK_AGENT_VERSION"
+  run_task_agent_controller
 }
 
 main "$@"
