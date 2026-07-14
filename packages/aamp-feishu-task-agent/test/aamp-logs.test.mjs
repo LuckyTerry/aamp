@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const bin = path.resolve(__dirname, '../bin/aamp-logs.mjs')
+const packageVersion = JSON.parse(readFileSync(path.resolve(__dirname, '../package.json'), 'utf8')).version
 
 function writeJsonl(file, entries) {
   writeFileSync(file, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`)
@@ -72,6 +73,12 @@ function runCli(args, logsRoot) {
     encoding: 'utf8',
   })
 }
+
+test('prints the owning task-agent package version', () => {
+  const output = execFileSync(process.execPath, [bin, '--version'], { encoding: 'utf8' })
+
+  assert.equal(output, `${packageVersion}\n`)
+})
 
 function spawnCli(args, logsRoot) {
   const homeDir = path.dirname(logsRoot)

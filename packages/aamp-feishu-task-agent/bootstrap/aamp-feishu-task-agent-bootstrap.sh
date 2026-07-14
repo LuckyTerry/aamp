@@ -10,11 +10,20 @@ ENV_NAME="online"
 BOE_ENV_NAME="boe_task_event"
 AAMP_HOST="https://meshmail.ai"
 DEBUG_MODE="false"
+AAMP_TASK_START_MODE="start"
+AAMP_TASK_ACTION="start"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
 AAMP_LOG_DIR="${AAMP_LOG_DIR:-$HOME/.aamp/logs}"
 AAMP_BIN_DIR="${AAMP_BIN_DIR:-$HOME/.aamp/bin}"
+AAMP_TASK_COMMAND_NAME="${AAMP_TASK_COMMAND_NAME:-feishu-task-agent}"
+AAMP_TASK_COMMAND_PATH="${AAMP_TASK_COMMAND_PATH:-$AAMP_BIN_DIR/$AAMP_TASK_COMMAND_NAME}"
+AAMP_TASK_SHIM_DIR="${AAMP_TASK_SHIM_DIR:-$HOME/.local/bin}"
+AAMP_TASK_AUTO_UPDATE="${AAMP_TASK_AUTO_UPDATE:-true}"
+AAMP_TASK_AUTO_UPDATE_DONE="${AAMP_TASK_AUTO_UPDATE_DONE:-false}"
+AAMP_TASK_UPDATE_CACHE_FILE="${AAMP_TASK_UPDATE_CACHE_FILE:-$HOME/.aamp/feishu-task-agent/update-cache.json}"
+AAMP_TASK_UPDATE_CACHE_TTL_SECONDS="${AAMP_TASK_UPDATE_CACHE_TTL_SECONDS:-86400}"
 AAMP_TAIL_BRIDGE_LOGS="${AAMP_TAIL_BRIDGE_LOGS:-false}"
 AAMP_ONE_CLICK_VERBOSE="${AAMP_ONE_CLICK_VERBOSE:-false}"
 AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${AAMP_ONE_CLICK_MOCK_FAIL_STAGE:-}"
@@ -25,6 +34,8 @@ BOT_RESERVATIONS_FILE="${BOT_RESERVATIONS_FILE:-$HOME/.aamp/feishu-bridge/task-r
 BOT_SELECTION_LOCK_DIR="${BOT_SELECTION_LOCK_DIR:-$HOME/.aamp/feishu-bridge/task-runtime/runs/selection.lock}"
 LARK_CLI_INSTALL_LOCK_DIR="${LARK_CLI_INSTALL_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-install.lock}"
 LARK_CLI_CONFIG_LOCK_DIR="${LARK_CLI_CONFIG_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-config.lock}"
+TASK_AGENT_UPDATE_LOCK_DIR="${TASK_AGENT_UPDATE_LOCK_DIR:-$HOME/.aamp/locks/feishu-task-agent-update.lock}"
+CODEX_UPDATE_LOCK_DIR="${CODEX_UPDATE_LOCK_DIR:-$HOME/.aamp/locks/codex-cli-update.lock}"
 AAMP_LARK_CLI_BIN="${AAMP_LARK_CLI_BIN:-}"
 LARK_CLI_CMD=""
 AAMP_LARK_CLI_CONFIG_DIR="${AAMP_LARK_CLI_CONFIG_DIR:-${LARKSUITE_CLI_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-v1}}"
@@ -35,6 +46,8 @@ CODEM_INSTALLER_CONFIRM="${CODEM_INSTALLER_CONFIRM:-}"
 CODEM_PROVIDER_PREFLIGHT="${CODEM_PROVIDER_PREFLIGHT:-true}"
 CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS="${CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS:-60}"
 CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
+CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
+CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
 CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
@@ -48,7 +61,9 @@ FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message
 ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.19}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
-AAMP_TASK_AGENT_PKG="${AAMP_TASK_AGENT_PKG:-@zengxingyuan/aamp-feishu-task-agent@0.1.0-dev.142}"
+AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.156"
+AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
 
@@ -84,6 +99,7 @@ ERRORS_LOG=""
 AAMP_LOGS_BIN="$AAMP_BIN_DIR/aamp-logs"
 AGENT_BRIDGE_EMAIL=""
 FEISHU_BRIDGE_EMAIL=""
+ORIGINAL_ARGS=()
 
 sanitize_inherited_npm_exec_env() {
   local key lower
@@ -100,7 +116,8 @@ sanitize_inherited_npm_exec_env() {
 usage() {
   cat <<'USAGE'
 Usage:
-  aamp-feishu-task-agent [options]
+  feishu-task-agent [options]       # start Feishu task bridge
+  feishu-task-agent update          # update short command now
 
 Options:
   --agent codex|cursor|codem  Agent to launch. If omitted, choose interactively.
@@ -131,6 +148,15 @@ agent_detail() {
   line="[aamp-one-click] $*"
   write_one_click_log "$line"
   if [ "$AAMP_ONE_CLICK_VERBOSE" = "true" ]; then
+    printf '%s\n' "$line"
+  fi
+}
+
+record_version_line() {
+  local line
+  line="当前版本：$AAMP_TASK_AGENT_VERSION"
+  write_one_click_log "[aamp-one-click] $line"
+  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
     printf '%s\n' "$line"
   fi
 }
@@ -319,35 +345,28 @@ run_log_file() {
 }
 
 install_aamp_logs_bin() {
+  local expected_version="${1:-$AAMP_TASK_AGENT_VERSION}"
   [ -n "$NPM_BIN" ] || return 0
   mkdir -p "$AAMP_BIN_DIR"
 
-  local script_dir source_bin
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd -P || true)"
-  source_bin=""
-  if [ -n "$script_dir" ] && [ -x "$script_dir/../bin/aamp-logs.mjs" ]; then
-    source_bin="$script_dir/../bin/aamp-logs.mjs"
-  elif [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ]; then
-    source_bin="$NPM_GLOBAL_PREFIX/bin/aamp-logs"
-  else
-    agent_detail "installing aamp-logs command into one-click npm prefix"
-    npm_install_global "$AAMP_TASK_AGENT_PKG" >/dev/null 2>&1 || {
-      agent_log "warning: failed to install aamp-logs command; logs still saved at $AAMP_RUN_LOG_DIR"
-      return 0
-    }
-    if [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ]; then
-      source_bin="$NPM_GLOBAL_PREFIX/bin/aamp-logs"
-    fi
-  fi
+  ensure_task_agent_global_install "$expected_version" || {
+    agent_log "warning: failed to synchronize aamp-logs $expected_version; logs still saved at $AAMP_RUN_LOG_DIR"
+    return 1
+  }
 
-  if [ -n "$source_bin" ]; then
-    cp "$source_bin" "$AAMP_LOGS_BIN" 2>/dev/null || {
-      agent_log "warning: failed to copy aamp-logs command to $AAMP_LOGS_BIN"
-      return 0
-    }
-    chmod +x "$AAMP_LOGS_BIN" 2>/dev/null || true
-    agent_detail "logs command: $AAMP_LOGS_BIN"
-  fi
+  local tmp="${AAMP_LOGS_BIN}.tmp.$$"
+  rm -f "$tmp" 2>/dev/null || true
+  ln -s "$NPM_GLOBAL_PREFIX/bin/aamp-logs" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+  mv -f "$tmp" "$AAMP_LOGS_BIN" 2>>"$ONE_CLICK_LOG" || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  }
+  install_aamp_logs_shim
+  agent_detail "logs command: $AAMP_LOGS_BIN -> $NPM_GLOBAL_PREFIX/bin/aamp-logs"
+}
+
+install_aamp_logs_shim() {
+  install_command_shim "$AAMP_LOGS_BIN" "aamp-logs"
 }
 
 kill_process_tree() {
@@ -487,6 +506,16 @@ with_lark_cli_config_lock() {
   local status=$?
   set -e
   release_dir_lock "$LARK_CLI_CONFIG_LOCK_DIR"
+  return "$status"
+}
+
+with_task_agent_update_lock() {
+  acquire_dir_lock "$TASK_AGENT_UPDATE_LOCK_DIR" "Feishu task agent update"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$TASK_AGENT_UPDATE_LOCK_DIR"
   return "$status"
 }
 
@@ -688,6 +717,276 @@ configure_npm_registry() {
   agent_detail "using npm global prefix: $NPM_GLOBAL_PREFIX"
 }
 
+script_file_task_agent_version() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  sed -n 's/^AAMP_TASK_AGENT_VERSION="\([^"]*\)".*/\1/p' "$file" | head -n 1
+}
+
+task_agent_global_package_dir() {
+  printf '%s/lib/node_modules/%s' "$NPM_GLOBAL_PREFIX" "$AAMP_TASK_AGENT_NAME"
+}
+
+task_agent_global_package_version() {
+  local package_json
+  package_json="$(task_agent_global_package_dir)/package.json"
+  [ -r "$package_json" ] || return 1
+  PACKAGE_JSON="$package_json" node -e '
+const fs = require("fs");
+try {
+  const data = JSON.parse(fs.readFileSync(process.env.PACKAGE_JSON, "utf8"));
+  if (typeof data.version !== "string" || data.version.length === 0) process.exit(1);
+  process.stdout.write(data.version);
+} catch {
+  process.exit(1);
+}
+' 2>>"$ONE_CLICK_LOG"
+}
+
+task_agent_global_install_is_current() {
+  local expected_version="$1"
+  local package_dir installed_version
+  package_dir="$(task_agent_global_package_dir)"
+  installed_version="$(task_agent_global_package_version || true)"
+  [ "$installed_version" = "$expected_version" ] || return 1
+  [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ] || return 1
+  [ -r "$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh" ] || return 1
+}
+
+ensure_task_agent_global_install_locked() {
+  local expected_version="$1"
+  if task_agent_global_install_is_current "$expected_version"; then
+    return 0
+  fi
+
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  if [ -n "$installed_version" ] && task_agent_version_is_newer "$expected_version" "$installed_version"; then
+    agent_detail "keeping newer task-agent npm package: installed=$installed_version requested=$expected_version"
+    return 0
+  fi
+  agent_detail "synchronizing task-agent npm package: current=${installed_version:-missing} expected=$expected_version"
+  npm_install_global "$AAMP_TASK_AGENT_NAME@$expected_version" >>"$ONE_CLICK_LOG" 2>&1 || return 1
+  task_agent_global_install_is_current "$expected_version"
+}
+
+ensure_task_agent_global_install() {
+  local expected_version="$1"
+  if task_agent_global_install_is_current "$expected_version"; then
+    return 0
+  fi
+  with_task_agent_update_lock ensure_task_agent_global_install_locked "$expected_version"
+}
+
+short_command_is_current() {
+  local target="$1"
+  local installed_version
+  [ -x "$target" ] || return 1
+  installed_version="$(script_file_task_agent_version "$target" || true)"
+  [ "$installed_version" = "$AAMP_TASK_AGENT_VERSION" ]
+}
+
+write_task_update_cache() {
+  local latest="${1:-$AAMP_TASK_AGENT_VERSION}"
+  mkdir -p "$(dirname "$AAMP_TASK_UPDATE_CACHE_FILE")"
+  CACHE_FILE="$AAMP_TASK_UPDATE_CACHE_FILE" CURRENT_VERSION="$AAMP_TASK_AGENT_VERSION" LATEST_VERSION="$latest" node -e '
+const fs = require("fs");
+const file = process.env.CACHE_FILE;
+const payload = {
+  version: 1,
+  checked_at: Math.floor(Date.now() / 1000),
+  current_version: process.env.CURRENT_VERSION || "",
+  latest_version: process.env.LATEST_VERSION || process.env.CURRENT_VERSION || "",
+};
+fs.writeFileSync(file, JSON.stringify(payload, null, 2) + "\n");
+' 2>>"$ONE_CLICK_LOG" || true
+}
+
+task_update_cache_is_fresh() {
+  [ -f "$AAMP_TASK_UPDATE_CACHE_FILE" ] || return 1
+  CACHE_FILE="$AAMP_TASK_UPDATE_CACHE_FILE" TTL="$AAMP_TASK_UPDATE_CACHE_TTL_SECONDS" CURRENT_VERSION="$AAMP_TASK_AGENT_VERSION" node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(process.env.CACHE_FILE, "utf8")); } catch { process.exit(1); }
+const checkedAt = Number(data.checked_at || 0);
+const ttl = Number(process.env.TTL || 86400);
+if (!Number.isFinite(checkedAt) || checkedAt <= 0 || !Number.isFinite(ttl) || ttl <= 0) process.exit(1);
+if (String(data.current_version || "") !== String(process.env.CURRENT_VERSION || "")) process.exit(1);
+const age = Math.floor(Date.now() / 1000) - checkedAt;
+process.exit(age >= 0 && age < ttl ? 0 : 1);
+' 2>>"$ONE_CLICK_LOG"
+}
+
+install_short_command_from_version() {
+  local version="$1"
+  local target="$2"
+  local package_dir source_file tmp
+  tmp="${target}.tmp.$$"
+  mkdir -p "$(dirname "$target")"
+  ensure_task_agent_global_install "$version" || return 1
+  package_dir="$(task_agent_global_package_dir)"
+  source_file="$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh"
+  [ -r "$source_file" ] || return 1
+  agent_detail "installing short command from task-agent $version to $target"
+  cp "$source_file" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+  chmod +x "$tmp" 2>/dev/null || true
+  mv "$tmp" "$target"
+}
+
+install_command_shim() {
+  local target="$1"
+  local command_name="$2"
+  mkdir -p "$AAMP_TASK_SHIM_DIR" 2>/dev/null || return 0
+  local shim="$AAMP_TASK_SHIM_DIR/$command_name"
+  local tmp="${shim}.tmp.$$"
+  cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+exec "$target" "\$@"
+EOF
+  chmod +x "$tmp" 2>/dev/null || true
+  if [ -f "$shim" ] && cmp -s "$tmp" "$shim"; then
+    rm -f "$tmp" 2>/dev/null || true
+    chmod +x "$shim" 2>/dev/null || true
+    return 0
+  fi
+  mv "$tmp" "$shim" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
+install_short_command_shim() {
+  install_command_shim "$1" "$AAMP_TASK_COMMAND_NAME"
+}
+
+
+install_short_command_current() {
+  local target="$1"
+  local source_file="${BASH_SOURCE[0]:-}"
+  local tmp="${target}.tmp.$$"
+  if short_command_is_current "$target"; then
+    agent_detail "short command already current: $target"
+    return 0
+  fi
+  case "$source_file" in
+    ""|/dev/fd/*|/private/dev/fd/*|/proc/*) source_file="" ;;
+  esac
+  if [ -n "$source_file" ] && [ -f "$source_file" ] && [ -r "$source_file" ]; then
+    mkdir -p "$(dirname "$target")"
+    cp "$source_file" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+    chmod +x "$tmp" 2>/dev/null || true
+    mv "$tmp" "$target"
+    return 0
+  fi
+  install_short_command_from_version "$AAMP_TASK_AGENT_VERSION" "$target"
+}
+
+install_short_command() {
+  install_short_command_current "$AAMP_TASK_COMMAND_PATH" || {
+    agent_detail "failed to install short command at $AAMP_TASK_COMMAND_PATH; continuing current run"
+    return 1
+  }
+  install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+  agent_detail "short command installed: $AAMP_TASK_COMMAND_PATH"
+  agent_detail "short command shim: $AAMP_TASK_SHIM_DIR/$AAMP_TASK_COMMAND_NAME"
+}
+
+record_install_success() {
+  write_one_click_log "[aamp-one-click] installed: $AAMP_TASK_COMMAND_PATH"
+  write_one_click_log "[aamp-one-click] start with: $AAMP_TASK_COMMAND_NAME"
+}
+
+ensure_selected_agent_for_start() {
+  if [ -z "$AGENT" ]; then
+    select_agent_interactively
+  fi
+  validate_agent_name "$AGENT"
+}
+
+resolve_latest_task_agent_version() {
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" view "$AAMP_TASK_AGENT_NAME@$AAMP_TASK_AGENT_CHANNEL" version \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" 2>/dev/null | tail -n 1 | tr -d '[:space:]'
+}
+
+task_agent_version_is_newer() {
+  VERSION_CURRENT="$1" VERSION_LATEST="$2" node -e '
+function parse(value) {
+  const match = String(value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Number.MAX_SAFE_INTEGER : Number(match[4])];
+}
+const current = parse(process.env.VERSION_CURRENT);
+const latest = parse(process.env.VERSION_LATEST);
+if (!process.env.VERSION_LATEST || process.env.VERSION_LATEST === process.env.VERSION_CURRENT) process.exit(1);
+if (!current || !latest) process.exit(0);
+for (let index = 0; index < current.length; index += 1) {
+  if (latest[index] > current[index]) process.exit(0);
+  if (latest[index] < current[index]) process.exit(1);
+}
+process.exit(1);
+'
+}
+
+auto_update_short_command_if_needed() {
+  local mode="${1:-normal}"
+  [ "$AAMP_TASK_AUTO_UPDATE" = "true" ] || return 0
+  [ "$AAMP_TASK_AUTO_UPDATE_DONE" != "true" ] || return 0
+  [ -n "$NPM_BIN" ] || return 0
+  if [ "$mode" != "force" ] && task_update_cache_is_fresh; then
+    agent_detail "task-agent auto-update skipped: cache fresh"
+    return 0
+  fi
+
+  local latest
+  latest="$(resolve_latest_task_agent_version || true)"
+  if [ -z "$latest" ]; then
+    agent_detail "task-agent auto-update check skipped: cannot resolve latest version"
+    return 0
+  fi
+  agent_detail "task-agent auto-update check: current=$AAMP_TASK_AGENT_VERSION latest=$latest channel=$AAMP_TASK_AGENT_CHANNEL mode=$mode"
+  if ! task_agent_version_is_newer "$AAMP_TASK_AGENT_VERSION" "$latest"; then
+    write_task_update_cache "$latest"
+    return 0
+  fi
+
+  if ensure_task_agent_global_install "$latest" && \
+    install_aamp_logs_bin "$latest" && \
+    install_short_command_from_version "$latest" "$AAMP_TASK_COMMAND_PATH"; then
+    install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+    write_task_update_cache "$latest"
+    agent_detail "task-agent auto-updated from $AAMP_TASK_AGENT_VERSION to $latest"
+    if [ "$AAMP_TASK_START_MODE" = "start" ] || [ "$AAMP_TASK_ACTION" = "update" ]; then
+      agent_detail "restarting with updated task-agent $latest"
+      AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${ORIGINAL_ARGS[@]}"
+    fi
+    return 0
+  fi
+  agent_detail "task-agent auto-update to $latest failed; continuing current version"
+}
+
+adopt_newer_global_task_agent_if_available() {
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  [ -n "$installed_version" ] || return 0
+  task_agent_version_is_newer "$AAMP_TASK_AGENT_VERSION" "$installed_version" || return 0
+
+  agent_detail "adopting newer task-agent from npm prefix: current=$AAMP_TASK_AGENT_VERSION installed=$installed_version"
+  install_aamp_logs_bin "$installed_version" || return 1
+  install_short_command_from_version "$installed_version" "$AAMP_TASK_COMMAND_PATH" || return 1
+  install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+  write_task_update_cache "$installed_version"
+  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
+    AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${ORIGINAL_ARGS[@]}"
+  fi
+}
+
+run_task_agent_update_command() {
+  local installed_version
+  auto_update_short_command_if_needed force
+  installed_version="$(script_file_task_agent_version "$AAMP_TASK_COMMAND_PATH" 2>/dev/null || printf '%s' "$AAMP_TASK_AGENT_VERSION")"
+  install_aamp_logs_bin "$installed_version" || agent_fail "failed to synchronize aamp-logs $installed_version"
+  printf '当前版本：%s\n' "$installed_version"
+}
 npm_install_global() {
   local npm_log
   npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install.XXXXXX")"
@@ -1074,6 +1373,16 @@ select_bot_menu() {
 }
 
 parse_args() {
+  # dev.150 restarted an updated launcher with its internal mode argument.
+  if [ "${1:-}" = "normal" ]; then
+    shift
+  fi
+  if [ "${1:-}" = "update" ]; then
+    AAMP_TASK_ACTION="update"
+    AAMP_TASK_START_MODE="install"
+    shift
+  fi
+
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --agent)
@@ -1110,10 +1419,9 @@ parse_args() {
     esac
   done
 
-  if [ -z "$AGENT" ]; then
-    select_agent_interactively
+  if [ -n "$AGENT" ]; then
+    validate_agent_name "$AGENT"
   fi
-  validate_agent_name "$AGENT"
 
   case "$ENV_NAME" in
     online|pre|boe) ;;
@@ -1453,7 +1761,6 @@ for (const bot of bots) {
   const appSecret = String(bot?.app_secret || "").trim();
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
   if (!appSecret) {
-    continue;
     continue;
   }
   seen.add(appId);
@@ -2665,6 +2972,144 @@ print_codex_gatekeeper_help() {
   print_gatekeeper_help "codex" "$1" "$2"
 }
 
+codex_cli_version() {
+  local codex_bin="$1"
+  "$codex_bin" --version 2>>"$ONE_CLICK_LOG" | head -n 1 | tr -d '\r'
+}
+
+codex_cli_version_number() {
+  local codex_bin="$1"
+  codex_cli_version "$codex_bin" | sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*).*/\1/p' | head -n 1
+}
+
+resolve_latest_codex_cli_version() {
+  [ -n "$NPM_BIN" ] || return 1
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" view "$CODEX_NPM_PACKAGE@latest" version \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" 2>>"$ONE_CLICK_LOG" | tail -n 1 | tr -d '[:space:]'
+}
+
+codex_cli_update_available() {
+  CODEX_CURRENT_VERSION="$1" CODEX_LATEST_VERSION="$2" node -e '
+function parse(value) {
+  const match = String(value || "").match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+function compareIdentifiers(left, right) {
+  const leftNumeric = /^\d+$/.test(left);
+  const rightNumeric = /^\d+$/.test(right);
+  if (leftNumeric && rightNumeric) return Number(left) - Number(right);
+  if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+  return left.localeCompare(right);
+}
+function compare(left, right) {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] - right.core[index];
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    if (left.prerelease.length === right.prerelease.length) return 0;
+    return left.prerelease.length === 0 ? 1 : -1;
+  }
+  const count = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < count; index += 1) {
+    if (left.prerelease[index] === undefined) return -1;
+    if (right.prerelease[index] === undefined) return 1;
+    const result = compareIdentifiers(left.prerelease[index], right.prerelease[index]);
+    if (result !== 0) return result;
+  }
+  return 0;
+}
+const current = parse(process.env.CODEX_CURRENT_VERSION);
+const latest = parse(process.env.CODEX_LATEST_VERSION);
+if (!current || !latest) process.exit(2);
+process.exit(compare(latest, current) > 0 ? 0 : 1);
+'
+}
+
+acquire_codex_update_lock() {
+  local attempt owner owner_pid
+  mkdir -p "$(dirname "$CODEX_UPDATE_LOCK_DIR")"
+  for attempt in $(seq 1 50); do
+    if mkdir "$CODEX_UPDATE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$ONE_CLICK_RUN_ID" >"$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true
+      return 0
+    fi
+    owner="$(cat "$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true)"
+    owner_pid="${owner##*-}"
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true
+      rmdir "$CODEX_UPDATE_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+run_codex_cli_update() {
+  local codex_bin="$1"
+  local status
+  acquire_codex_update_lock || return 75
+  if "$codex_bin" update >>"$ONE_CLICK_LOG" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  release_dir_lock "$CODEX_UPDATE_LOCK_DIR"
+  return "$status"
+}
+
+ensure_codex_cli_updated() {
+  [ "$AGENT" = "codex" ] || return 0
+  [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
+
+  local codex_bin version_before latest_version version_line comparison_status refreshed_bin version_after status
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 0
+  version_before="$(codex_cli_version_number "$codex_bin" || true)"
+  latest_version="$(resolve_latest_codex_cli_version || true)"
+  version_line="当前 Codex CLI 版本是：${version_before:-未知}，最新版本是：${latest_version:-获取失败}"
+  printf '%s\n' "$version_line"
+  write_one_click_log "[aamp-one-click] $version_line"
+  agent_detail "checking Codex CLI update: path=$codex_bin version=${version_before:-unknown}"
+
+  if codex_cli_update_available "$version_before" "$latest_version"; then
+    comparison_status=0
+  else
+    comparison_status=$?
+  fi
+  if [ "$comparison_status" -eq 1 ]; then
+    agent_detail "Codex CLI is already current: current=${version_before:-unknown} latest=${latest_version:-unknown}"
+    return 0
+  fi
+  if [ "$comparison_status" -ne 0 ]; then
+    agent_detail "warning: unable to compare Codex CLI versions; skipping update"
+    return 0
+  fi
+
+  agent_log "正在更新 Codex CLI..."
+  if run_codex_cli_update "$codex_bin"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    agent_detail "warning: Codex CLI update failed with status $status; continuing with $codex_bin"
+    return 0
+  fi
+
+  refreshed_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$refreshed_bin" ] || refreshed_bin="$codex_bin"
+  version_after="$(codex_cli_version_number "$refreshed_bin" || true)"
+  agent_detail "Codex CLI update completed: path=$refreshed_bin version=${version_after:-unknown}"
+}
+
 run_codex_login_status() {
   local codex_bin
   codex_bin="$(resolve_codex_cli_for_acp || true)"
@@ -3282,6 +3727,13 @@ cleanup() {
 main() {
   trap cleanup EXIT INT TERM HUP
 
+  local invoked_name
+  ORIGINAL_ARGS=("$@")
+  invoked_name="$(basename "${0:-}")"
+  if [ "$invoked_name" = "$AAMP_TASK_COMMAND_NAME" ]; then
+    AAMP_TASK_START_MODE="start"
+  fi
+
   parse_args "$@"
   init_log_run
   validate_mock_fail_stage
@@ -3290,10 +3742,28 @@ main() {
   cleanup_stale_one_click_processes
   ensure_node_toolchain
   maybe_mock_fail "node-toolchain"
-  install_aamp_logs_bin
+  install_short_command || agent_fail "failed to install $AAMP_TASK_COMMAND_NAME"
+  if [ "$AAMP_TASK_ACTION" = "update" ]; then
+    run_task_agent_update_command
+    return 0
+  fi
+  auto_update_short_command_if_needed normal
+  adopt_newer_global_task_agent_if_available
+  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
+    install_aamp_logs_bin "$AAMP_TASK_AGENT_VERSION" || agent_log "warning: aamp-logs command is unavailable for this run"
+    adopt_newer_global_task_agent_if_available
+  fi
+  record_version_line
+  if [ "$AAMP_TASK_START_MODE" != "start" ]; then
+    write_task_update_cache "$AAMP_TASK_AGENT_VERSION"
+    record_install_success
+    return 0
+  fi
+  ensure_selected_agent_for_start
   build_feishu_env_args
   source_lark_env
   ensure_agent_cli
+  ensure_codex_cli_updated
   ensure_agent_login
   maybe_mock_fail "agent-login"
   resolve_feishu_bot_credentials

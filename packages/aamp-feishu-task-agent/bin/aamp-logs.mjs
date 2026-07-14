@@ -35,6 +35,7 @@ const FEISHU_TASK_ID_PREFIX = 'feishu-task-'
 function usage(exitCode = 0) {
   const stream = exitCode === 0 ? process.stdout : process.stderr
   stream.write(`Usage:
+  aamp-logs --version
   aamp-logs collect --task-id <task-id>
   aamp-logs collect --task-guid <task-guid>
   aamp-logs collect --run-dir <run-dir>
@@ -54,6 +55,14 @@ Options:
 Collect creates the local .tar.gz bundle on your Desktop.
 `)
   process.exit(exitCode)
+}
+
+function packageVersion() {
+  const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  if (typeof packageJson.version !== 'string' || packageJson.version.length === 0) {
+    throw new Error('Task-agent package version is unavailable')
+  }
+  return packageJson.version
 }
 
 function parseArgs(argv) {
@@ -485,7 +494,12 @@ function tail(options) {
 }
 
 function main() {
-  const options = parseArgs(process.argv.slice(2))
+  const args = process.argv.slice(2)
+  if (args.length === 1 && (args[0] === '--version' || args[0] === '-v')) {
+    process.stdout.write(`${packageVersion()}\n`)
+    return
+  }
+  const options = parseArgs(args)
   if (options.command === 'collect') {
     collect(options)
     return
