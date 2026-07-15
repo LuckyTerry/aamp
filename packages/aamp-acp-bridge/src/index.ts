@@ -6,6 +6,7 @@ import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
 import { AampAcpBridge } from './bridge.js'
 import { renderPairingCode, runInit } from './cli/init.js'
 import { discoverAcpBridgeAgents } from './discovery.js'
+import { describeBridgeError } from './errors.js'
 import { runJsonInit } from './json-init.js'
 import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
@@ -415,14 +416,15 @@ Examples:
 }
 
 main().catch((err) => {
+  const detail = describeBridgeError(err)
   if (jsonOutput) {
     console.error(JSON.stringify({
       type: 'error',
       bridge: 'acp-bridge',
-      message: (err as Error).message,
+      message: detail,
     }))
   } else {
-    console.error(`Error: ${(err as Error).message}`)
+    console.error(`Error: ${detail}`)
   }
   localBridgeLogger.flush()
   process.exit(1)

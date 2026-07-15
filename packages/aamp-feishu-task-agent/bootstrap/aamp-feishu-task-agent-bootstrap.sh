@@ -60,11 +60,11 @@ FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v
 FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
 FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
 FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
-ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.19}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
 FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
 AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.0-dev.163"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.170"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -134,6 +134,12 @@ Options:
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
   -h, --help                 Show this help
+
+日志命令:
+  aamp-logs list-runs
+  aamp-logs collect --run-dir <运行日志目录>
+  aamp-logs collect --task-id xxx
+  aamp-logs collect --task-guid yyy
 USAGE
 }
 
@@ -190,8 +196,7 @@ agent_success() {
   if [ -n "$BOT_NAME" ]; then
     printf '   飞书 Bot：%s\n' "$BOT_NAME"
   fi
-  printf '   保持此终端打开；按 Ctrl+C 停止本地连接。\n'
-  print_local_log_hints stdout
+  printf '🟢 保持终端打开，你可以给 agent 派发飞书任务\n'
   printf '\n'
   write_one_click_log "[aamp-one-click] SUCCESS: $AGENT connected to Feishu tasks"
 }
@@ -2615,22 +2620,31 @@ ensure_codem_local_bin_on_path() {
   path_prepend "$CODEM_LOCAL_BIN"
 }
 
+is_cursor_agent_cli() {
+  local candidate="$1"
+  "$candidate" login --help 2>&1 | grep -Fq 'Authenticate with Cursor'
+}
+
 find_cursor_agent_cli() {
-  if command -v agent >/dev/null 2>&1; then
-    command -v agent
-    return 0
-  fi
   if command -v cursor-agent >/dev/null 2>&1; then
     command -v cursor-agent
-    return 0
-  fi
-  if [ -x "$CURSOR_LOCAL_BIN/agent" ]; then
-    printf '%s\n' "$CURSOR_LOCAL_BIN/agent"
     return 0
   fi
   if [ -x "$CURSOR_LOCAL_BIN/cursor-agent" ]; then
     printf '%s\n' "$CURSOR_LOCAL_BIN/cursor-agent"
     return 0
+  fi
+  if [ -x "$CURSOR_LOCAL_BIN/agent" ] && is_cursor_agent_cli "$CURSOR_LOCAL_BIN/agent"; then
+    printf '%s\n' "$CURSOR_LOCAL_BIN/agent"
+    return 0
+  fi
+  if command -v agent >/dev/null 2>&1; then
+    local agent_bin
+    agent_bin="$(command -v agent)"
+    if is_cursor_agent_cli "$agent_bin"; then
+      printf '%s\n' "$agent_bin"
+      return 0
+    fi
   fi
   return 1
 }
@@ -2898,11 +2912,30 @@ run_codex_cli_update() {
   return "$status"
 }
 
+confirm_codex_cli_update() {
+  local answer tty_path
+  tty_path="${AAMP_CODEX_UPDATE_TTY:-/dev/tty}"
+  if ! exec 5<>"$tty_path"; then
+    return 2
+  fi
+  printf '是否现在升级？[y/n] ' >&5
+  if ! IFS= read -r answer <&5; then
+    exec 5>&-
+    return 2
+  fi
+  exec 5>&-
+  case "$answer" in
+    y|Y) return 0 ;;
+    n|N) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
 ensure_codex_cli_updated() {
   [ "$AGENT" = "codex" ] || return 0
   [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
 
-  local codex_bin version_before latest_version version_line comparison_status refreshed_bin version_after status
+  local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status
   codex_bin="$(resolve_codex_cli_for_acp || true)"
   [ -n "$codex_bin" ] || return 0
   version_before="$(codex_cli_version_number "$codex_bin" || true)"
@@ -2917,6 +2950,7 @@ ensure_codex_cli_updated() {
     comparison_status=$?
   fi
   if [ "$comparison_status" -eq 1 ]; then
+    printf '%s\n' "$version_line"
     agent_detail "Codex CLI is already current: current=${version_before:-unknown} latest=${latest_version:-unknown}"
     return 0
   fi
@@ -2926,6 +2960,19 @@ ensure_codex_cli_updated() {
   fi
 
   printf '%s\n' "$version_line"
+  printf '%s\n' '检测到 Codex CLI 有可用更新。不升级可能导致后续任务执行失败，本次启动前需升级 Codex CLI。'
+  if confirm_codex_cli_update; then
+    confirmation_status=0
+  else
+    confirmation_status=$?
+  fi
+  if [ "$confirmation_status" -eq 2 ]; then
+    agent_fail "Codex CLI 升级需要用户确认。请在交互终端中重新运行本次启动。"
+  fi
+  if [ "$confirmation_status" -ne 0 ]; then
+    agent_fail "已取消 Codex CLI 升级，本次启动已终止。"
+  fi
+
   agent_log "正在更新 Codex CLI..."
   if run_codex_cli_update "$codex_bin"; then
     status=0
@@ -2933,14 +2980,21 @@ ensure_codex_cli_updated() {
     status=$?
   fi
   if [ "$status" -ne 0 ]; then
-    agent_detail "warning: Codex CLI update failed with status $status; continuing with $codex_bin"
-    return 0
+    agent_fail "Codex CLI 升级失败（状态码：${status}），本次启动已终止。"
   fi
 
   refreshed_bin="$(resolve_codex_cli_for_acp || true)"
   [ -n "$refreshed_bin" ] || refreshed_bin="$codex_bin"
   version_after="$(codex_cli_version_number "$refreshed_bin" || true)"
   agent_detail "Codex CLI update completed: path=$refreshed_bin version=${version_after:-unknown}"
+  if codex_cli_update_available "$version_after" "$latest_version"; then
+    agent_fail "Codex CLI 升级未生效（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+  else
+    comparison_status=$?
+  fi
+  if [ "$comparison_status" -ne 1 ]; then
+    agent_fail "无法验证 Codex CLI 升级结果（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+  fi
 }
 
 run_codex_login_status() {

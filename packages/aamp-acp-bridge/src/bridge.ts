@@ -1,5 +1,6 @@
 import type { BridgeConfig } from './config.js'
 import { AgentBridge } from './agent-bridge.js'
+import { describeBridgeError } from './errors.js'
 
 export interface BridgeStartOptions {
   quiet?: boolean
@@ -80,13 +81,14 @@ export class AampAcpBridge {
           pollingFallback: bridge.isUsingPollingFallback,
         })
       } catch (err) {
+        const detail = describeBridgeError(err)
         this.emit({
           type: 'agent.failed',
           bridge: 'acp-bridge',
           agent: agentConfig.name,
-          message: (err as Error).message,
+          message: detail,
         })
-        console.error(`[${agentConfig.name}] Failed to start: ${(err as Error).message}`)
+        console.error(`[${agentConfig.name}] Failed to start: ${detail}`)
       }
     }
 

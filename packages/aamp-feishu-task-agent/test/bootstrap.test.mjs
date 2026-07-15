@@ -8,6 +8,15 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const bootstrap = path.resolve(__dirname, '../bootstrap/aamp-feishu-task-agent-bootstrap.sh')
+const packageJson = JSON.parse(readFileSync(path.resolve(__dirname, '../package.json'), 'utf8'))
+
+test('bootstrap embedded version matches the published package version', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const match = source.match(/^AAMP_TASK_AGENT_VERSION="([^"]+)"$/m)
+
+  assert.ok(match, 'bootstrap must declare AAMP_TASK_AGENT_VERSION')
+  assert.equal(match[1], packageJson.version)
+})
 
 test('bootstrap script has valid bash syntax', () => {
   execFileSync('bash', ['-n', bootstrap])
@@ -36,18 +45,92 @@ test('bootstrap accepts the legacy normal token passed by an older auto-updater'
   assert.match(result.stdout, /Usage:/)
 })
 
-test('bootstrap terminal UX points users at local logs and success state', () => {
+test('bootstrap does not detect Grok agent as Cursor', () => {
   const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('is_cursor_agent_cli()')
+  const end = source.indexOf('\nresolve_cursor_cli_for_acp()')
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-grok-agent-'))
+  const binDir = path.join(home, 'bin')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'agent'), `#!/usr/bin/env bash
+printf 'grok 0.2.101 (5bc4b5dfadcf) [stable]\\n'
+`)
+  chmodSync(path.join(binDir, 'agent'), 0o755)
+
+  const result = spawnSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:/usr/bin:/bin"
+CURSOR_LOCAL_BIN="$1/missing-cursor-bin"
+${helpers}
+find_cursor_agent_cli
+`, 'bash', home], { encoding: 'utf8' })
+
+  assert.notEqual(result.status, 0)
+  assert.equal(result.stdout, '')
+})
+
+test('bootstrap prefers cursor-agent over a generic agent command', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const start = source.indexOf('is_cursor_agent_cli()')
+  const end = source.indexOf('\nresolve_cursor_cli_for_acp()')
+  assert.notEqual(start, -1)
+  assert.notEqual(end, -1)
+
+  const helpers = source.slice(start, end)
+  const home = mkdtempSync(path.join(tmpdir(), 'aamp-bootstrap-cursor-agent-'))
+  const binDir = path.join(home, 'bin')
+  mkdirSync(binDir)
+  writeFileSync(path.join(binDir, 'agent'), `#!/usr/bin/env bash
+printf 'grok 0.2.101 (5bc4b5dfadcf) [stable]\\n'
+`)
+  writeFileSync(path.join(binDir, 'cursor-agent'), `#!/usr/bin/env bash
+printf '2026.07.01-41b2de7\\n'
+`)
+  chmodSync(path.join(binDir, 'agent'), 0o755)
+  chmodSync(path.join(binDir, 'cursor-agent'), 0o755)
+
+  const output = execFileSync('bash', ['-c', `
+set -euo pipefail
+PATH="$1/bin:/usr/bin:/bin"
+CURSOR_LOCAL_BIN="$1/missing-cursor-bin"
+${helpers}
+find_cursor_agent_cli
+`, 'bash', home], { encoding: 'utf8' })
+
+  assert.equal(output.trim(), path.join(binDir, 'cursor-agent'))
+})
+
+test('bootstrap help owns log commands and success output stays concise', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
+  const usageStart = source.indexOf('usage()')
+  const usageEnd = source.indexOf('\nwrite_one_click_log()', usageStart)
+  const usage = source.slice(usageStart, usageEnd)
+  const successStart = source.indexOf('agent_success()')
+  const successEnd = source.indexOf('\nagent_fail()', successStart)
+  const success = source.slice(successStart, successEnd)
 
   assert.match(source, /--mock-fail-stage/)
   assert.match(source, /AAMP_ONE_CLICK_MOCK_FAIL_STAGE/)
   assert.match(source, /print_local_log_hints/)
-  assert.match(source, /运行日志目录/)
-  assert.match(source, /运行日志打包/)
-  assert.match(source, /collect --run-dir/)
-  assert.match(source, /特定任务日志打包/)
-  assert.match(source, /collect --task-id xxx/)
-  assert.match(source, /collect --task-guid yyy/)
+  assert.match(usage, /日志命令/)
+  assert.match(usage, /aamp-logs list-runs/)
+  assert.match(usage, /aamp-logs collect --run-dir/)
+  assert.match(usage, /aamp-logs collect --task-id xxx/)
+  assert.match(usage, /aamp-logs collect --task-guid yyy/)
+  assert.match(success, /🟢 保持终端打开，你可以给 agent 派发飞书任务/)
+  assert.doesNotMatch(success, /print_local_log_hints/)
+  assert.match(controller, /🟢 保持终端打开，你可以给 agent 派发飞书任务/)
+  assert.match(controller, /\[aamp-one-click\] 启动成功：\$\{bindingLabel\(binding\)\}/)
+  assert.equal(controller.match(/printBindingStarted\(/g)?.length, 3)
+  assert.doesNotMatch(controller, /已接入飞书任务，可以开始对话 & 派发任务/)
+  assert.doesNotMatch(controller, /飞书 Bot：/)
+  assert.doesNotMatch(controller, /保持此终端打开；按 Ctrl\+C 停止本次启动的本地连接。/)
+  assert.equal(controller.match(/printLogHints\(true\)/g)?.length, 1)
   assert.doesNotMatch(source, /近期日志打包/)
   assert.match(source, /aamp-logs/)
   assert.match(source, /errors\.jsonl/)
@@ -390,13 +473,14 @@ test('bootstrap pins lark-cli to one absolute binary and serializes writes', () 
   assert.match(source, /\| \"\$LARK_CLI_CMD\" profile add/)
 })
 
-test('bootstrap reports Codex versions, updates only when newer, and tolerates update failure', () => {
+test('bootstrap asks before a newer Codex update and stops when update fails', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const helperStart = source.indexOf('ensure_codex_cli_updated()')
   const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
   const helper = source.slice(helperStart, helperEnd)
-  const mainStart = source.indexOf('main()')
-  const main = source.slice(mainStart)
+  const prepareStart = source.indexOf('run_internal_prepare_agent()')
+  const prepareEnd = source.indexOf('\nrun_internal_ensure_profile()', prepareStart)
+  const prepare = source.slice(prepareStart, prepareEnd)
 
   assert.notEqual(helperStart, -1)
   assert.notEqual(helperEnd, -1)
@@ -406,18 +490,19 @@ test('bootstrap reports Codex versions, updates only when newer, and tolerates u
   assert.ok(helper.includes('codex_cli_update_available'))
   assert.ok(helper.includes('当前 Codex CLI 版本是：'))
   assert.ok(helper.includes('最新版本是：'))
-  assert.ok(!helper.includes('confirm_codex_cli_update'))
-  assert.ok(!helper.includes('是否执行更新'))
+  assert.ok(helper.includes('confirm_codex_cli_update'))
+  assert.ok(helper.includes('不升级可能导致后续任务执行失败，本次启动前需升级 Codex CLI。'))
+  assert.ok(source.includes('是否现在升级？[y/n]'))
   assert.ok(helper.includes('agent_log "正在更新 Codex CLI..."'))
   assert.ok(source.includes('"$codex_bin" update >>"$ONE_CLICK_LOG" 2>&1'))
   assert.ok(helper.includes('run_codex_cli_update "$codex_bin"'))
-  assert.ok(helper.includes('warning: Codex CLI update failed'))
-  assert.ok(!helper.includes('agent_fail'))
-  assert.ok(main.indexOf('ensure_agent_cli') < main.indexOf('ensure_codex_cli_updated'))
-  assert.ok(main.indexOf('ensure_codex_cli_updated') < main.indexOf('ensure_agent_login'))
+  assert.ok(helper.includes('Codex CLI 升级失败'))
+  assert.ok(helper.includes('agent_fail'))
+  assert.ok(prepare.indexOf('prepare_internal_agent_environment') < prepare.indexOf('ensure_codex_cli_updated'))
+  assert.ok(prepare.indexOf('ensure_codex_cli_updated') < prepare.indexOf('ensure_agent_login'))
 })
 
-test('Codex update failure returns control to the startup flow', () => {
+test('Codex update failure terminates the startup flow after user confirms', () => {
   const source = readFileSync(bootstrap, 'utf8')
   const helperStart = source.indexOf('codex_cli_version()')
   const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
@@ -449,24 +534,182 @@ test('Codex update failure returns control to the startup flow', () => {
     'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
     'agent_detail() { printf "%s\\n" "$*" >>"$DETAIL_FILE"; }',
     'agent_log() { printf "[aamp-one-click] %s\\n" "$*"; }',
+    'agent_fail() { printf "[aamp-one-click] ERROR: %s\\n" "$*" >&2; exit 1; }',
     'write_one_click_log() { printf "%s\\n" "$*" >>"$DETAIL_FILE"; }',
     'release_dir_lock() { command rm -f "$1/owner"; command rmdir "$1"; }',
     helpers,
     'resolve_latest_codex_cli_version() { printf "9.9.9\\n"; }',
+    'confirm_codex_cli_update() { return 0; }',
     'ensure_codex_cli_updated',
     'printf "startup-continued"',
   ].join('\n')
-  const output = execFileSync(
-    'bash',
-    ['-c', shell, 'bash', root, logFile, detailFile, fakeCodex],
-    { encoding: 'utf8' },
-  )
+  const result = spawnSync('bash', ['-c', shell, 'bash', root, logFile, detailFile, fakeCodex], { encoding: 'utf8' })
 
-  assert.match(output, /当前 Codex CLI 版本是：1\.2\.3，最新版本是：9\.9\.9/)
-  assert.match(output, /\[aamp-one-click\] 正在更新 Codex CLI\.\.\./)
-  assert.match(output, /startup-continued$/)
+  assert.equal(result.status, 1)
+  assert.match(result.stdout, /当前 Codex CLI 版本是：1\.2\.3，最新版本是：9\.9\.9/)
+  assert.match(result.stdout, /\[aamp-one-click\] 正在更新 Codex CLI\.\.\./)
+  assert.doesNotMatch(result.stdout, /startup-continued/)
+  assert.match(result.stderr, /Codex CLI 升级失败/)
   assert.match(readFileSync(logFile, 'utf8'), /update attempted/)
-  assert.match(readFileSync(detailFile, 'utf8'), /warning: Codex CLI update failed with status 42/)
+})
+
+test('declining a newer Codex update terminates without updating', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('codex_cli_version()')
+  const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-decline-'))
+  const fakeCodex = path.join(root, 'codex')
+  const updateMarker = path.join(root, 'update-attempted')
+  writeFileSync(fakeCodex, `#!/usr/bin/env bash
+case "$1" in
+  --version) printf 'codex-cli 1.2.3\\n' ;;
+  update) touch ${JSON.stringify(updateMarker)} ;;
+esac
+`)
+  chmodSync(fakeCodex, 0o755)
+
+  const shell = [
+    'set -euo pipefail',
+    'AGENT="codex"',
+    'CODEX_AUTO_UPDATE="true"',
+    'CODEX_UPDATE_LOCK_DIR="$1/update.lock"',
+    'ONE_CLICK_RUN_ID="test-$$"',
+    'ONE_CLICK_LOG="$1/one-click.log"',
+    'FAKE_CODEX="$2"',
+    'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
+    'agent_detail() { :; }',
+    'agent_log() { printf "%s\\n" "$*"; }',
+    'write_one_click_log() { :; }',
+    'agent_fail() { printf "%s\\n" "$*" >&2; exit 1; }',
+    'release_dir_lock() { command rm -f "$1/owner"; command rmdir "$1"; }',
+    helpers,
+    'resolve_latest_codex_cli_version() { printf "9.9.9\\n"; }',
+    'confirm_codex_cli_update() { return 1; }',
+    'ensure_codex_cli_updated',
+    'printf "startup-continued"',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell, 'bash', root, fakeCodex], { encoding: 'utf8' })
+
+  assert.equal(result.status, 1)
+  assert.match(result.stderr, /已取消 Codex CLI 升级，本次启动已终止/)
+  assert.doesNotMatch(result.stdout, /startup-continued/)
+  assert.equal(existsSync(updateMarker), false)
+})
+
+test('Codex update confirmation fails when no interactive terminal is available', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('confirm_codex_cli_update()')
+  const helperEnd = source.indexOf('\nensure_codex_cli_updated()', helperStart)
+  const helper = source.slice(helperStart, helperEnd)
+  assert.match(helper, /AAMP_CODEX_UPDATE_TTY/)
+
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-no-tty-'))
+  const output = execFileSync('bash', ['-c', `
+set -euo pipefail
+AAMP_CODEX_UPDATE_TTY="$1/missing-tty"
+${helper}
+set +e
+confirm_codex_cli_update 2>/dev/null
+status=$?
+set -e
+printf '%s' "$status"
+`, 'bash', root], { encoding: 'utf8' })
+
+  assert.equal(output, '2')
+})
+
+test('Codex update exit zero without an actual version change terminates startup', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('codex_cli_version()')
+  const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-confirm-'))
+  const fakeCodex = path.join(root, 'codex')
+  const updateMarker = path.join(root, 'update-attempted')
+  writeFileSync(fakeCodex, `#!/usr/bin/env bash
+case "$1" in
+  --version) printf 'codex-cli 1.2.3\\n' ;;
+  update) touch ${JSON.stringify(updateMarker)} ;;
+esac
+`)
+  chmodSync(fakeCodex, 0o755)
+
+  const shell = [
+    'set -euo pipefail',
+    'AGENT="codex"',
+    'CODEX_AUTO_UPDATE="true"',
+    'CODEX_UPDATE_LOCK_DIR="$1/update.lock"',
+    'ONE_CLICK_RUN_ID="test-$$"',
+    'ONE_CLICK_LOG="$1/one-click.log"',
+    'FAKE_CODEX="$2"',
+    'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
+    'agent_detail() { :; }',
+    'agent_log() { printf "%s\\n" "$*"; }',
+    'write_one_click_log() { :; }',
+    'agent_fail() { printf "%s\\n" "$*" >&2; exit 1; }',
+    'release_dir_lock() { command rm -f "$1/owner"; command rmdir "$1"; }',
+    helpers,
+    'resolve_latest_codex_cli_version() { printf "9.9.9\\n"; }',
+    'confirm_codex_cli_update() { return 0; }',
+    'ensure_codex_cli_updated',
+    'printf "startup-continued"',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell, 'bash', root, fakeCodex], { encoding: 'utf8' })
+
+  assert.equal(result.status, 1)
+  assert.doesNotMatch(result.stdout, /startup-continued/)
+  assert.match(result.stderr, /Codex CLI 升级未生效/)
+  assert.equal(existsSync(updateMarker), true)
+})
+
+test('confirming a newer Codex update continues after the installed version changes', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('codex_cli_version()')
+  const helperEnd = source.indexOf('\nrun_codex_login_status()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-codex-confirm-updated-'))
+  const fakeCodex = path.join(root, 'codex')
+  const updateMarker = path.join(root, 'update-attempted')
+  writeFileSync(fakeCodex, `#!/usr/bin/env bash
+case "$1" in
+  --version)
+    if [ -f ${JSON.stringify(updateMarker)} ]; then
+      printf 'codex-cli 9.9.9\\n'
+    else
+      printf 'codex-cli 1.2.3\\n'
+    fi
+    ;;
+  update) touch ${JSON.stringify(updateMarker)} ;;
+esac
+`)
+  chmodSync(fakeCodex, 0o755)
+
+  const shell = [
+    'set -euo pipefail',
+    'AGENT="codex"',
+    'CODEX_AUTO_UPDATE="true"',
+    'CODEX_UPDATE_LOCK_DIR="$1/update.lock"',
+    'ONE_CLICK_RUN_ID="test-$$"',
+    'ONE_CLICK_LOG="$1/one-click.log"',
+    'FAKE_CODEX="$2"',
+    'resolve_codex_cli_for_acp() { printf "%s\\n" "$FAKE_CODEX"; }',
+    'agent_detail() { :; }',
+    'agent_log() { printf "%s\\n" "$*"; }',
+    'write_one_click_log() { :; }',
+    'agent_fail() { printf "%s\\n" "$*" >&2; exit 1; }',
+    'release_dir_lock() { command rm -f "$1/owner"; command rmdir "$1"; }',
+    helpers,
+    'resolve_latest_codex_cli_version() { printf "9.9.9\\n"; }',
+    'confirm_codex_cli_update() { return 0; }',
+    'ensure_codex_cli_updated',
+    'printf "startup-continued"',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell, 'bash', root, fakeCodex], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /startup-continued$/)
+  assert.equal(existsSync(updateMarker), true)
 })
 
 test('Codex update is skipped when the selected CLI is already latest', () => {

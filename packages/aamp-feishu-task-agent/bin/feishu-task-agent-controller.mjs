@@ -8,6 +8,18 @@ import { ReadStream, WriteStream } from 'node:tty';
 import { emitKeypressEvents } from 'node:readline';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import {
+  agentStartRetryError,
+  classifyNetworkError,
+  createSerializedLineWriter,
+  describeNetworkError,
+  isRetryableNetworkError,
+  launchDetachedDiagnostic,
+  networkEnvironmentSummary,
+  probeEndpoint,
+  safeDiagnosticUrl,
+  withNetworkRetry,
+} from './runtime-network.mjs';
 
 process.umask(0o077);
 
@@ -28,8 +40,9 @@ const ERRORS_LOG = process.env.ERRORS_LOG || path.join(RUN_LOG_DIR, 'errors.json
 const BOOTSTRAP = process.env.AAMP_TASK_BOOTSTRAP_PATH || '';
 const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
+const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.19';
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20';
 const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@zengxingyuan/aamp-feishu-bridge@0.1.51';
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
   || 'npx -y --package @zengxingyuan/aamp-feishu-task-agent@dev feishu-task-agent install';
@@ -37,6 +50,9 @@ const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
 const READY_TIMEOUT_MS = Number(process.env.AAMP_TASK_READY_TIMEOUT_MS || 90_000);
+const NETWORK_MAX_ATTEMPTS = Math.max(1, Number(process.env.AAMP_TASK_NETWORK_MAX_ATTEMPTS || 3));
+const NETWORK_RETRY_BASE_DELAY_MS = Math.max(0, Number(process.env.AAMP_TASK_NETWORK_RETRY_BASE_DELAY_MS || 500));
+const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NETWORK_PROBE_TIMEOUT_MS || 10_000));
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
 const AGENT_TYPES = ['codex', 'cursor'];
@@ -115,6 +131,115 @@ async function appendPrivate(file, content) {
   await ensurePrivateDir(path.dirname(file));
   await fsp.appendFile(file, redact(content), { encoding: 'utf8', mode: 0o600 });
   await fsp.chmod(file, 0o600).catch(() => {});
+}
+
+async function appendDiagnostic(file, event) {
+  await appendPrivate(file, `${JSON.stringify({ timestamp: nowIso(), ...event })}\n`).catch(() => {});
+}
+
+function aampDiscoveryUrl(host) {
+  return safeDiagnosticUrl(new URL('/.well-known/aamp', host).toString());
+}
+
+function diagnosticEndpoints(host) {
+  return [
+    { target: 'aamp', url: aampDiscoveryUrl(host) },
+    { target: 'feishu-open-api', url: FEISHU_API_PROBE_URL },
+    { target: 'npm-registry', url: new URL('/', NPM_REGISTRY).toString() },
+  ];
+}
+
+async function probeFailureEndpoints(host, logFile, environment, stage) {
+  await Promise.allSettled(diagnosticEndpoints(host).map(async ({ target, url }) => {
+    try {
+      await probeEndpoint(url, {
+        maxAttempts: 1,
+        timeoutMs: NETWORK_PROBE_TIMEOUT_MS,
+        environment,
+        onAttempt: (event) => appendDiagnostic(logFile, { ...event, stage, target }),
+      });
+    } catch (error) {
+      await appendDiagnostic(logFile, {
+        type: 'network.probe.failed',
+        stage,
+        target,
+        url: safeDiagnosticUrl(url),
+        category: classifyNetworkError(error),
+        error: describeNetworkError(error),
+      });
+    }
+  }));
+}
+
+async function runNetworkStage(operation, {
+  stage,
+  label,
+  host,
+  logFile,
+  environment,
+  shouldRetry = isRetryableNetworkError,
+}) {
+  const inherited = networkEnvironmentSummary(process.env);
+  const effective = networkEnvironmentSummary(environment);
+  await appendDiagnostic(logFile, {
+    type: 'network.context',
+    stage,
+    endpoints: diagnosticEndpoints(host).map(({ target, url }) => ({ target, url: safeDiagnosticUrl(url) })),
+    node: effective.node,
+    platform: effective.platform,
+    arch: effective.arch,
+    osRelease: effective.osRelease,
+    inheritedProxyEnvPresent: inherited.proxyEnvPresent,
+    effectiveProxyEnvPresent: effective.proxyEnvPresent,
+    proxyValuesLogged: false,
+  });
+  return withNetworkRetry(async ({ attempt, maxAttempts }) => {
+    const startedAt = Date.now();
+    await appendDiagnostic(logFile, {
+      type: 'bridge.stage',
+      stage,
+      status: 'starting',
+      attempt,
+      maxAttempts,
+      host: safeDiagnosticUrl(host),
+    });
+    try {
+      const result = await operation({ attempt, maxAttempts });
+      await appendDiagnostic(logFile, {
+        type: 'bridge.stage',
+        stage,
+        status: 'succeeded',
+        attempt,
+        maxAttempts,
+        durationMs: Date.now() - startedAt,
+        host: safeDiagnosticUrl(host),
+      });
+      return result;
+    } catch (error) {
+      await appendDiagnostic(logFile, {
+        type: 'bridge.stage',
+        stage,
+        status: 'failed',
+        attempt,
+        maxAttempts,
+        durationMs: Date.now() - startedAt,
+        host: safeDiagnosticUrl(host),
+        category: classifyNetworkError(error),
+        retryable: shouldRetry(error),
+        error: describeNetworkError(error),
+      });
+      throw error;
+    }
+  }, {
+    maxAttempts: NETWORK_MAX_ATTEMPTS,
+    baseDelayMs: NETWORK_RETRY_BASE_DELAY_MS,
+    shouldRetry,
+    onRetry: async (event) => {
+      await appendDiagnostic(logFile, { type: 'network.retry', stage, label, host: safeDiagnosticUrl(host), ...event });
+      console.log(`[aamp-one-click] ${label}遇到网络波动，正在重试（${event.attempt + 1}/${event.maxAttempts}）...`);
+      launchDetachedDiagnostic(() => probeFailureEndpoints(host, logFile, environment, `${stage}-retry-probe`));
+    },
+  });
 }
 
 async function writeJsonAtomic(file, value) {
@@ -393,6 +518,10 @@ async function updateBinding(binding) {
 function bindingLabel(binding) {
   const botName = binding.bot?.display_name || binding.bot?.app_id || 'unknown Bot';
   return `${binding.agent_type} ↔ ${botName} (${binding.bot?.app_id || 'unknown'})`;
+}
+
+function printBindingStarted(binding) {
+  console.log(`[aamp-one-click] 启动成功：${bindingLabel(binding)}`);
 }
 
 async function recordError(component, message, binding) {
@@ -705,6 +834,8 @@ async function startManagedProcess({ label, packageSpec, executable, args, env, 
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
   });
+  const processStartedAt = Date.now();
+  const logWriter = createSerializedLineWriter((content) => appendPrivate(logFile, content));
   const record = {
     label,
     child,
@@ -716,8 +847,22 @@ async function startManagedProcess({ label, packageSpec, executable, args, env, 
     expectedStop: false,
     processGroup: process.platform !== 'win32',
     outputTail: [],
+    logWriter,
+    logWriteError: undefined,
   };
   managedProcesses.add(record);
+  void logWriter.write(`${JSON.stringify({
+    timestamp: nowIso(),
+    type: 'bridge.process',
+    status: 'started',
+    label,
+    executable,
+    package: packageSpec,
+    pid: child.pid || null,
+    node: process.version,
+  })}\n`).catch((error) => {
+    record.logWriteError ??= error;
+  });
   const handleLine = (streamName, line) => {
     const safeLine = redact(line);
     record.outputTail.push(`[${streamName}] ${safeLine}`);
@@ -733,23 +878,46 @@ async function startManagedProcess({ label, packageSpec, executable, args, env, 
         // Feishu task mode can mix human-readable lines with JSON events.
       }
     }
-    void appendPrivate(logFile, `${line}\n`).catch(() => {});
+    void logWriter.write(`${line}\n`).catch((error) => {
+      record.logWriteError ??= error;
+    });
   };
   createLineReader(child.stdout, (line) => { handleLine('stdout', line); });
   createLineReader(child.stderr, (line) => { handleLine('stderr', line); });
   record.exitPromise = new Promise((resolve) => {
-    child.once('error', (error) => {
+    let settled = false;
+    const finish = async (exit) => {
+      if (settled) return;
+      settled = true;
+      await logWriter.write(`${JSON.stringify({
+        timestamp: nowIso(),
+        type: 'bridge.process',
+        status: 'exited',
+        label,
+        executable,
+        package: packageSpec,
+        pid: child.pid || null,
+        durationMs: Date.now() - processStartedAt,
+        code: exit.code,
+        signal: exit.signal || null,
+        expectedStop: record.expectedStop,
+        ...(exit.error ? { error: describeNetworkError(exit.error) } : {}),
+      })}\n`).catch((error) => {
+        record.logWriteError ??= error;
+      });
+      await logWriter.flush().catch((error) => {
+        record.logWriteError ??= error;
+      });
       record.exited = true;
-      record.exit = { code: 1, error };
+      record.exit = {
+        ...exit,
+        ...(record.logWriteError ? { logError: record.logWriteError } : {}),
+      };
       record.emitter.emit('exit', record.exit);
       resolve(record.exit);
-    });
-    child.once('exit', (code, signal) => {
-      record.exited = true;
-      record.exit = { code: code ?? 1, signal };
-      record.emitter.emit('exit', record.exit);
-      resolve(record.exit);
-    });
+    };
+    child.once('error', (error) => { void finish({ code: 1, error }); });
+    child.once('close', (code, signal) => { void finish({ code: code ?? 1, signal }); });
   });
   if (stopRequested) {
     await stopManagedProcess(record);
@@ -931,26 +1099,60 @@ async function setupAgentGroups(bindings) {
     if (!agents.length) continue;
     try {
       throwIfStopping();
-      const initResult = await runCapture(
-        ACP_PACKAGE,
-        'aamp-acp-bridge',
-        ['init', '--json', '--config', group.configFile, '--input', '-'],
-        { input: JSON.stringify({ aampHost: host, agents }), env: bridgeEnv, logFile },
-      );
+      const initResult = await runNetworkStage(async () => {
+        return runCapture(
+          ACP_PACKAGE,
+          'aamp-acp-bridge',
+          ['init', '--json', '--config', group.configFile, '--input', '-'],
+          { input: JSON.stringify({ aampHost: host, agents }), env: bridgeEnv, logFile },
+        );
+      }, {
+        stage: 'acp-init',
+        label: 'Agent Bridge 初始化',
+        host,
+        logFile,
+        environment: bridgeEnv,
+      });
       throwIfStopping();
       const initialized = parseJsonDocument(initResult.stdout, 'ACP init');
       for (const agent of initialized.agents || []) group.identities.set(agent.name, agent.email);
       console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${agents.map((agent) => agent.name).join(', ')})...`);
-      group.process = await startManagedProcess({
-        label: `ACP Bridge ${host}`,
-        packageSpec: ACP_PACKAGE,
-        executable: 'aamp-acp-bridge',
-        args: ['start', '--config', group.configFile, '--json', ...(DEBUG_MODE ? ['--debug'] : [])],
-        env: bridgeEnv,
+      const started = await runNetworkStage(async ({ attempt, maxAttempts }) => {
+        const process = await startManagedProcess({
+          label: `ACP Bridge ${host}`,
+          packageSpec: ACP_PACKAGE,
+          executable: 'aamp-acp-bridge',
+          args: ['start', '--config', group.configFile, '--json', ...(DEBUG_MODE ? ['--debug'] : [])],
+          env: bridgeEnv,
+          logFile,
+        });
+        group.process = process;
+        try {
+          const running = await waitForEvent(process, (event) => event.type === 'bridge.running');
+          const retryError = agentStartRetryError(
+            process.events,
+            agents.map((agent) => agent.name),
+            attempt,
+            maxAttempts,
+          );
+          if (retryError) throw retryError;
+          return { process, running };
+        } catch (error) {
+          await stopManagedProcess(process);
+          managedProcesses.delete(process);
+          if (group.process === process) group.process = undefined;
+          throw error;
+        }
+      }, {
+        stage: 'acp-start',
+        label: 'Agent Bridge 启动',
+        host,
         logFile,
+        environment: bridgeEnv,
       });
+      group.process = started.process;
       throwIfStopping();
-      const running = await waitForEvent(group.process, (event) => event.type === 'bridge.running');
+      const running = started.running;
       throwIfStopping();
       for (const agent of running.agents || []) group.availableAgents.add(agent.name);
       for (const agent of agents) {
@@ -1053,7 +1255,7 @@ async function prepareFeishuProcess(binding, phase) {
   };
 }
 
-async function startPreparedFeishuProcess(prepared, target) {
+async function startPreparedFeishuProcess(prepared, target, environment = onlineEnvironment(prepared.binding)) {
   throwIfStopping();
   const { binding, phase, larkCliBin, logFile } = prepared;
   const phaseMessage = phase === 'install'
@@ -1067,7 +1269,7 @@ async function startPreparedFeishuProcess(prepared, target) {
     packageSpec: FEISHU_PACKAGE,
     executable: 'aamp-feishu-bridge',
     args: feishuArgs(binding, larkCliBin, target),
-    env: onlineEnvironment(binding),
+    env: environment,
     logFile,
   });
 }
@@ -1076,6 +1278,47 @@ async function startFeishuProcess(binding, phase, target) {
   const prepared = await prepareFeishuProcess(binding, phase);
   throwIfStopping();
   return startPreparedFeishuProcess(prepared, target);
+}
+
+async function startPreparedFeishuUntilReady(prepared, target, { stage, pairingFile } = {}) {
+  const { binding, logFile } = prepared;
+  const environment = onlineEnvironment(binding);
+  return runNetworkStage(async () => {
+    const processRecord = await startPreparedFeishuProcess(prepared, target, environment);
+    try {
+      throwIfStopping();
+      if (pairingFile) await waitForInitialBinding(processRecord, pairingFile);
+      else await waitForEvent(processRecord, (event) => event.type === 'bridge.task_runtime.running');
+      throwIfStopping();
+      return processRecord;
+    } catch (error) {
+      await stopManagedProcess(processRecord);
+      managedProcesses.delete(processRecord);
+      const consumed = pairingFile
+        && isRetryableNetworkError(error)
+        && await pairingConsumed(pairingFile);
+      await appendDiagnostic(logFile, {
+        type: 'bridge.readiness.failed',
+        stage,
+        pairingConsumed: Boolean(consumed),
+        category: classifyNetworkError(error),
+        error: describeNetworkError(error),
+      });
+      if (consumed) {
+        const pairingError = new Error('Feishu Bridge 启动失败且本次配对码已被消费，请重新执行绑定');
+        pairingError.retryable = false;
+        throw pairingError;
+      }
+      throw error;
+    }
+  }, {
+    stage,
+    label: 'Feishu Bridge 启动',
+    host: binding.aamp_host,
+    logFile,
+    environment,
+    shouldRetry: (error) => error?.retryable !== false && isRetryableNetworkError(error),
+  });
 }
 
 async function pairingConsumed(pairingFile) {
@@ -1177,9 +1420,11 @@ async function bindOneDraft(draft, groups, mode) {
   let feishu;
   let keepRunning = false;
   try {
-    feishu = await startPreparedFeishuProcess(preparedFeishu, { pairingUrl: pairing.connectUrl });
-    throwIfStopping();
-    await waitForInitialBinding(feishu, pairing.pairingFile);
+    feishu = await startPreparedFeishuUntilReady(
+      preparedFeishu,
+      { pairingUrl: pairing.connectUrl },
+      { stage: mode === 'install' ? 'feishu-install-bind' : 'feishu-add-bind', pairingFile: pairing.pairingFile },
+    );
     throwIfStopping();
     binding.runtime = await readInitialRuntimeMetadata(binding, feishu, email);
     throwIfStopping();
@@ -1202,20 +1447,17 @@ async function startOneBinding(binding, groups) {
   if (email !== binding.agent_target_email) throw new Error('当前 Agent mailbox 与绑定记录不一致，请重新绑定');
   await validateSavedRuntime(binding);
   throwIfStopping();
-  const feishu = await startFeishuProcess(binding, 'start', { agentTargetEmail: binding.agent_target_email });
-  try {
-    throwIfStopping();
-    await waitForEvent(feishu, (event) => event.type === 'bridge.task_runtime.running');
-    throwIfStopping();
-    await setBindingStatus(binding, 'start', 'running');
-    throwIfStopping();
-    console.log(`\n🟢 ${binding.agent_type} 已接入飞书任务，可以开始对话 & 派发任务。`);
-    console.log(`   飞书 Bot：${binding.bot.display_name || binding.bot.app_id}`);
-    return feishu;
-  } catch (error) {
-    await stopManagedProcess(feishu);
-    throw error;
-  }
+  const preparedFeishu = await prepareFeishuProcess(binding, 'start');
+  const feishu = await startPreparedFeishuUntilReady(
+    preparedFeishu,
+    { agentTargetEmail: binding.agent_target_email },
+    { stage: 'feishu-start' },
+  );
+  throwIfStopping();
+  await setBindingStatus(binding, 'start', 'running');
+  throwIfStopping();
+  printBindingStarted(binding);
+  return feishu;
 }
 
 async function startSelectedBindings(bindings, existingGroups) {
@@ -1254,8 +1496,7 @@ async function startSelectedBindings(bindings, existingGroups) {
         activeBinding = paired.binding;
         group = paired.group;
         processRecord = paired.process;
-        console.log(`\n🟢 ${activeBinding.agent_type} 已接入飞书任务，可以开始对话 & 派发任务。`);
-        console.log(`   飞书 Bot：${activeBinding.bot.display_name || activeBinding.bot.app_id}`);
+        printBindingStarted(activeBinding);
       } else {
         processRecord = await startOneBinding(binding, groups);
       }
@@ -1279,8 +1520,7 @@ async function startSelectedBindings(bindings, existingGroups) {
     throw new Error('全部配置启动失败');
   }
   console.log(`\n已成功启动 ${running.length}/${bindings.length} 个配置。`);
-  console.log('保持此终端打开；按 Ctrl+C 停止本次启动的本地连接。');
-  printLogHints(true);
+  console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
   if (failed.length) console.log(`另有 ${failed.length} 个配置启动失败，详情见上方信息和本地日志。`);
   await supervise(running, groups);
 }
@@ -1513,7 +1753,6 @@ async function runBindingSession(mode) {
       if (mode === 'install') {
         running.push({ binding: paired.binding, process: paired.process, group: paired.group });
       }
-      console.log(`🟢 已完成绑定并启动：${bindingLabel(paired.binding)}`);
     } catch (error) {
       if (stopRequested) throw error;
       const reason = redact(error.message || error);
@@ -1547,10 +1786,8 @@ async function runInstall() {
     }
     return bound;
   });
-  console.log(`已写入 ${result.succeeded.length} 个绑定配置：${CONFIG_FILE}`);
   console.log(`\n已成功建立绑定并启动 ${result.running.length}/${result.selectedCount} 个配置。`);
-  console.log('保持此终端打开；按 Ctrl+C 停止本次启动的本地连接。');
-  printLogHints(true);
+  console.log('🟢 保持终端打开，你可以给 agent 派发飞书任务');
   const failureCount = result.failed.length + result.selectionFailures.length + result.runtimeFailures.length;
   if (failureCount) console.log(`另有 ${failureCount} 次选择或绑定失败，详情见上方信息和本地日志。`);
   await supervise(result.running, result.groups);
