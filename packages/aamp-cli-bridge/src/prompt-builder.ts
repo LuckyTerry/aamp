@@ -14,17 +14,6 @@ type StructuredPayload = {
   attachments?: ResultAttachmentRef[]
 }
 
-function isConversationalTask(task: TaskDispatch): boolean {
-  const source = task.dispatchContext?.source?.trim().toLowerCase()
-  return source === 'feishu' || source === 'wechat' || source === 'ios'
-}
-
-function displayAgentName(task: TaskDispatch, agentName?: string): string {
-  const trimmed = agentName?.trim()
-  if (trimmed) return trimmed
-  return task.to.split('@')[0] || 'the connected agent'
-}
-
 function isCliTranscriptHeader(line: string): boolean {
   return /^\[(acpx|client|tool|done|error|warning)\](?:\s|$)/i.test(line)
 }
@@ -170,10 +159,9 @@ function parseStructuredPayload(value: unknown): StructuredPayload | null {
     ? normalizeStructuredResult(value)
     : normalizeStructuredResult(record?.structuredResult ?? record?.structured_result)
   const attachments = normalizeAttachments(record?.attachments ?? record?.attachment)
-
-  if (!structuredResult?.length && !attachments?.length) return null
-
   const output = asString(record?.output)
+
+  if (!output && !structuredResult?.length && !attachments?.length) return null
 
   return {
     ...(output ? { output } : {}),
@@ -348,6 +336,63 @@ function extractResultPayload(text: string): {
   return { output: text.trim() }
 }
 
+function hasPromptRules(task: TaskDispatch): boolean {
+  return Boolean(task.promptRules?.trim())
+}
+
+function isConversationalTask(task: TaskDispatch): boolean {
+  if (hasPromptRules(task)) return false
+  const source = task.dispatchContext?.source?.trim().toLowerCase()
+  return source === 'feishu' || source === 'wechat' || source === 'ios'
+}
+
+function displayAgentName(task: TaskDispatch, agentName?: string): string {
+  const trimmed = agentName?.trim()
+  if (trimmed) return trimmed
+  return task.to.split('@')[0] || 'the connected agent'
+}
+
+function renderTaskPromptRules(promptRules: string | undefined): string[] {
+  const override = promptRules?.trim()
+  if (override) return [override]
+
+  return [
+    `Execution rules:`,
+    `- Treat the Description section and any prior thread context below as the only task context you were given.`,
+    `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct the task from local files, account state, or remote services.`,
+    `- Do not search outside the current working directory unless the task explicitly asks you to inspect a specific external path.`,
+    `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to figure out what the task probably meant.`,
+    `- For simple chat messages that are fully present in the prompt, answer them directly without workspace exploration.`,
+    ``,
+    `Please complete this task and output your result directly.`,
+    `Keep your final reply limited to the final user-facing result.`,
+    `Do not include planning notes, thought process, tool logs, or intermediate progress updates in the final reply.`,
+    `If you cannot complete the task and need more information, start your response with "HELP:" followed by your question.`,
+    ``,
+    buildStructuredResultInstructions(),
+    ``,
+    `If you create any files as part of this task, list each file path at the end of your response in this exact format:`,
+    `FILE:/absolute/path/to/file`,
+  ]
+}
+
+function renderLarkCliProfileRules(task: TaskDispatch): string[] {
+  const profile = asString(task.dispatchContext?.feishu_lark_cli_profile)
+  if (!profile) return []
+
+  return [
+    `Feishu lark-cli profile rules:`,
+    `- This task came through a Feishu bot bound to lark-cli profile \`${profile}\`.`,
+    `- Before using Feishu/Lark capabilities, inspect the current granted user scopes for this profile, for example with \`lark-cli --profile ${profile} auth status --format json\`, and treat those granted scopes as the hard capability boundary.`,
+    `- Whenever you run lark-cli for this task, you MUST pass \`--profile ${profile}\` in that command.`,
+    `- Do not use the active/default lark-cli profile for this task.`,
+    `- Do not run \`lark-cli auth login\`, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.`,
+    `- Complete the task using only the currently granted scopes and available context. If a preferred API is unavailable, try another already-authorized source or produce the best result possible within the granted scopes.`,
+    `- If the task truly cannot be completed within the currently granted scopes, use the task protocol's help/failure path and ask only for missing business input or data location; do not include authorization commands or scope requests.`,
+    ``,
+  ]
+}
+
 export function buildPrompt(task: TaskDispatch, threadContextText?: string, agentName?: string): string {
   const agentDisplayName = displayAgentName(task, agentName)
   const dispatchContextLines = task.dispatchContext && Object.keys(task.dispatchContext).length > 0
@@ -378,6 +423,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
         `Execution rules:`,
+        ...renderLarkCliProfileRules(task),
         `- Treat the latest user message and prior thread context as the only conversation context.`,
         `- Only start your response with "HELP:" when you are truly blocked and need specific missing information.`,
         `- Keep your final reply limited to the final user-facing message.`,
@@ -404,16 +450,8 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
-        `Execution rules:`,
-        `- Treat the Description section and prior thread context as the only task context.`,
-        `- If you need more information, start your response with "HELP:" followed by your question.`,
-        `- Keep your final reply limited to the final user-facing result.`,
-        `- Do not include tool logs or intermediate progress updates in the final reply.`,
-        ``,
-        buildStructuredResultInstructions(),
-        ``,
-        `If you create files, list each file path at the end in this exact format:`,
-        `FILE:/absolute/path/to/file`,
+        ...renderLarkCliProfileRules(task),
+        ...renderTaskPromptRules(task.promptRules),
       ]
 
   return parts.filter(Boolean).join('\n')

@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 export interface AcpEvent {
@@ -287,13 +289,35 @@ export class AcpxClient {
   }
 
   private acpxEnv(): NodeJS.ProcessEnv {
-    return {
-      ...process.env,
-      PATH: [
-        join(this.cwd, 'node_modules', '.bin'),
-        process.env.PATH ?? '',
-      ].filter(Boolean).join(delimiter),
+    const env = { ...process.env }
+    const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/'
+    const cache = env.npm_config_cache || env.NPM_CONFIG_CACHE || `${tmpdir()}/aamp-acpx-npm-cache`
+
+    for (const key of Object.keys(env)) {
+      const lower = key.toLowerCase()
+      if (
+        lower.startsWith('npm_config_')
+        || lower.startsWith('npm_package_')
+        || lower.startsWith('npm_lifecycle_')
+        || lower === 'npm_command'
+        || lower === 'npm_execpath'
+        || lower === 'npm_node_execpath'
+        || lower === 'init_cwd'
+      ) {
+        delete env[key]
+      }
     }
+
+    mkdirSync(cache, { recursive: true })
+    env.PATH = [
+      join(this.cwd, 'node_modules', '.bin'),
+      process.env.PATH ?? '',
+    ].filter(Boolean).join(delimiter)
+    env.npm_config_registry = registry
+    env.NPM_CONFIG_REGISTRY = registry
+    env.npm_config_cache = cache
+    env.NPM_CONFIG_CACHE = cache
+    return env
   }
 
   private spawnAcpx(args: string[]): ChildProcessWithoutNullStreams {

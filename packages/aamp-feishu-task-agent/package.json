@@ -1,0 +1,20 @@
+{
+  "name": "@zengxingyuan/aamp-feishu-task-agent",
+  "files": [
+    "bootstrap/aamp-feishu-task-agent-bootstrap.sh",
+    "bin",
+    "README.md"
+  ],
+  "license": "MIT",
+  "version": "0.1.0-dev.170",
+  "description": "One-click manager for local Agent and Feishu Bot bindings.",
+  "type": "module",
+  "bin": {
+    "aamp-feishu-task-agent": "bootstrap/aamp-feishu-task-agent-bootstrap.sh",
+    "feishu-task-agent": "bootstrap/aamp-feishu-task-agent-bootstrap.sh",
+    "aamp-logs": "bin/aamp-logs.mjs"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\""
+  }
+}

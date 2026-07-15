@@ -10,9 +10,19 @@ import {
   loadBridgeState,
   removeBridgeConfigEntry,
 } from './config.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { FeishuBridgeRuntime } from './runtime.js'
+import { runTaskEnabledBridge } from './task-runtime.js'
 
 type CommandName = 'init' | 'start' | 'run' | 'status' | 'remove' | 'unbind' | 'help' | 'unknown'
+const rawArgv = process.argv.slice(2)
+const rawOutputIndex = rawArgv.indexOf('--output')
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'feishu-bridge',
+  mirrorToConsole: rawArgv.includes('--json')
+    || rawArgv.includes('--output=json')
+    || (rawOutputIndex >= 0 && rawArgv[rawOutputIndex + 1] === 'json'),
+})
 
 interface ParsedArgs {
   command: CommandName
@@ -64,10 +74,12 @@ function jsonOutput(args: ParsedArgs): boolean {
 }
 
 function writeJsonEvent(event: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({
+  const payload = {
     timestamp: new Date().toISOString(),
     ...event,
-  })}\n`)
+  }
+  if (localBridgeLogger.enabled) localBridgeLogger.event(payload)
+  process.stdout.write(`${JSON.stringify(payload)}\n`)
 }
 
 function bridgeConfigSummary(config: Awaited<ReturnType<typeof initializeBridgeConfig>>) {
@@ -98,6 +110,7 @@ function printUsage(): void {
 Usage:
   aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
   aamp-feishu-bridge start [--config-dir DIR] [--json]
+  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
   aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
@@ -222,6 +235,28 @@ async function runRemove(args: ParsedArgs): Promise<void> {
 
 async function runBridge(args: ParsedArgs): Promise<void> {
   const configDir = firstArg(args, 'config-dir')
+  if (args.booleans.has('enable-task')) {
+    await runTaskEnabledBridge({
+      configDir,
+      aampHost: firstArg(args, 'aamp-host'),
+      agent: firstArg(args, 'agent'),
+      targetAgentEmail: firstArg(args, 'target-agent'),
+      pairingUrl: firstArg(args, 'pairing-url'),
+      appId: firstArg(args, 'app-id'),
+      appSecret: firstArg(args, 'app-secret'),
+      botName: firstArg(args, 'bot-name'),
+      useFeishuCli: args.booleans.has('use-feishu-cli') || args.booleans.has('feishu-cli'),
+      feishuCliProfile: firstArg(args, 'feishu-cli-profile'),
+      feishuCliBin: firstArg(args, 'feishu-cli-bin'),
+      domain: firstArg(args, 'domain'),
+      boe: args.booleans.has('boe'),
+      pre: args.booleans.has('pre'),
+      env: firstArg(args, 'env'),
+      debug: args.booleans.has('debug'),
+      json: jsonOutput(args),
+    })
+    return
+  }
   const entries = await loadBridgeConfigEntries(configDir)
   if (entries.length === 0) {
     throw new Error(`No bridge config found in ${getBridgeHomeDir(configDir)}. Run "aamp-feishu-bridge init" first.`)
@@ -301,6 +336,7 @@ async function runBridge(args: ParsedArgs): Promise<void> {
     if (jsonOutput(args)) {
       writeJsonEvent({ type: 'bridge.stopped', bridge: 'feishu-bridge' })
     }
+    localBridgeLogger.flush()
     process.exit(0)
   }
 
@@ -339,5 +375,6 @@ async function main(): Promise<void> {
 
 main().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : inspect(error))
+  localBridgeLogger.flush()
   process.exitCode = 1
 })

@@ -53,8 +53,8 @@ export function normalizeCliStreamEvent(event: CliStreamEvent): ParsedCliStreamU
     ?? (['delta', 'text.delta'].includes(type) ? firstString(payloadRecord, ['text', 'content', 'message', 'output']) : undefined)
     ?? (type === 'text' ? firstString(payloadRecord, ['text', 'content', 'message', 'output']) : undefined)
 
-  const finalText = ['result', 'final', 'output', 'message'].includes(type)
-    ? firstString(payloadRecord, ['output', 'text', 'content', 'message'])
+  const finalText = ['result', 'final', 'output', 'message', 'done'].includes(type)
+    ? firstString(payloadRecord, ['output', 'text', 'content', 'message', 'final_text', 'finalText'])
     : undefined
 
   return {

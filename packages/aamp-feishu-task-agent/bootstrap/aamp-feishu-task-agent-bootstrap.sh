@@ -1,0 +1,3791 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+AGENT=""
+APP_ID=""
+APP_SECRET=""
+BOT_NAME=""
+LARK_CLI_PROFILE=""
+AAMP_HOST="https://meshmail.ai"
+DEBUG_MODE="false"
+AAMP_TASK_START_MODE="install"
+AAMP_TASK_ACTION=""
+AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
+AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
+AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
+AAMP_TASK_INTERNAL_INPUT_FD="${AAMP_TASK_INTERNAL_INPUT_FD:-4}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
+NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
+NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
+AAMP_LOG_DIR="${AAMP_LOG_DIR:-$HOME/.aamp/logs}"
+AAMP_BIN_DIR="${AAMP_BIN_DIR:-$HOME/.aamp/bin}"
+AAMP_TASK_COMMAND_NAME="${AAMP_TASK_COMMAND_NAME:-feishu-task-agent}"
+AAMP_TASK_COMMAND_PATH="${AAMP_TASK_COMMAND_PATH:-$AAMP_BIN_DIR/$AAMP_TASK_COMMAND_NAME}"
+AAMP_TASK_SHIM_DIR="${AAMP_TASK_SHIM_DIR:-$HOME/.local/bin}"
+AAMP_TASK_AUTO_UPDATE="${AAMP_TASK_AUTO_UPDATE:-true}"
+AAMP_TASK_AUTO_UPDATE_DONE="${AAMP_TASK_AUTO_UPDATE_DONE:-false}"
+AAMP_TASK_UPDATE_CACHE_FILE="${AAMP_TASK_UPDATE_CACHE_FILE:-$HOME/.aamp/feishu-task-agent/update-cache.json}"
+AAMP_TASK_UPDATE_CACHE_TTL_SECONDS="${AAMP_TASK_UPDATE_CACHE_TTL_SECONDS:-86400}"
+AAMP_TAIL_BRIDGE_LOGS="${AAMP_TAIL_BRIDGE_LOGS:-false}"
+AAMP_ONE_CLICK_VERBOSE="${AAMP_ONE_CLICK_VERBOSE:-false}"
+AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${AAMP_ONE_CLICK_MOCK_FAIL_STAGE:-}"
+BOT_CONFIG_FILE="${BOT_CONFIG_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/task-profiles-v2.json}"
+CURRENT_RUN_FILE="${CURRENT_RUN_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/current.json}"
+ACTIVE_RUNS_FILE="${ACTIVE_RUNS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/active.json}"
+BOT_RESERVATIONS_FILE="${BOT_RESERVATIONS_FILE:-$HOME/.aamp/feishu-bridge/task-runtime/runs/reservations.json}"
+BOT_SELECTION_LOCK_DIR="${BOT_SELECTION_LOCK_DIR:-$HOME/.aamp/feishu-bridge/task-runtime/runs/selection.lock}"
+LARK_CLI_INSTALL_LOCK_DIR="${LARK_CLI_INSTALL_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-install.lock}"
+LARK_CLI_CONFIG_LOCK_DIR="${LARK_CLI_CONFIG_LOCK_DIR:-$HOME/.aamp/locks/lark-cli-config.lock}"
+TASK_AGENT_UPDATE_LOCK_DIR="${TASK_AGENT_UPDATE_LOCK_DIR:-$HOME/.aamp/locks/feishu-task-agent-update.lock}"
+CODEX_UPDATE_LOCK_DIR="${CODEX_UPDATE_LOCK_DIR:-$HOME/.aamp/locks/codex-cli-update.lock}"
+AAMP_LARK_CLI_BIN="${AAMP_LARK_CLI_BIN:-}"
+LARK_CLI_CMD=""
+AAMP_LARK_CLI_CONFIG_DIR="${AAMP_LARK_CLI_CONFIG_DIR:-${LARKSUITE_CLI_CONFIG_DIR:-$HOME/.lark-cli-aamp-one-click-v1}}"
+CODEM_SERVER_URL="${CODEM_SERVER_URL:-https://codem.feishu.cn}"
+CODEM_INSTALLER_URL="${CODEM_INSTALLER_URL:-https://sf-unpkg-src.bytedance.net/@byted-meego/codem-installer@latest/install.sh}"
+CODEM_INSTALLER_CONFIRM="${CODEM_INSTALLER_CONFIRM:-}"
+CODEM_PROVIDER_PREFLIGHT="${CODEM_PROVIDER_PREFLIGHT:-true}"
+CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS="${CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS:-60}"
+CODEX_APP_CLI="/Applications/Codex.app/Contents/Resources/codex"
+CODEX_AUTO_UPDATE="${CODEX_AUTO_UPDATE:-true}"
+CODEX_NPM_PACKAGE="${CODEX_NPM_PACKAGE:-@openai/codex}"
+CODEX_ACP_PKG="${CODEX_ACP_PKG:-@agentclientprotocol/codex-acp@1.0.2}"
+LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
+LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
+FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat:moderation:write_only,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes:readonly,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
+FEISHU_APP_SCOPES_USER="${FEISHU_APP_SCOPES_USER:-im:message,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,search:message,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,contact:user:search,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat.nickname:read,im:chat.nickname:write,im:chat.user_setting:read,im:chat.user_setting:write,im:chat:read,im:chat:update,im:chat:create_by_user,im:chat:moderation:write_only,im:feed.flag:read,im:feed.flag:write,im:feed.shortcut:read,im:feed.shortcut:write,im:feed_group_v1:read,im:feed_group_v1:write,im:message.group_msg:get_as_user,im:message.p2p_msg:get_as_user,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:event,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.artifacts:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes.search:read,minutes:minutes.upload:write,minutes:minutes:readonly,minutes:minutes:update,profile:user_profile:read,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:meeting.search:read,vc:note:read,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
+FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
+FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
+FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
+FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
+FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
+ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@zengxingyuan/aamp-acp-bridge@0.1.28-dev.20}"
+CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@zengxingyuan/aamp-feishu-bridge@0.1.51}"
+AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.170"
+AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
+AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
+AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
+
+ACP_PID=""
+CLI_PID=""
+FEISHU_PID=""
+ACP_TAIL_PID=""
+CLI_TAIL_PID=""
+FEISHU_TAIL_PID=""
+DETECTED_AGENTS=()
+ACP_LOG=""
+CLI_LOG=""
+FEISHU_LOG=""
+CODEM_LOGIN_LOG=""
+CODEM_SERVICE_START_OUTPUT=""
+CODEM_AUTO_UPDATE_DONE="false"
+CODEM_FORCE_LOGIN_DONE="false"
+CODEM_PROVIDER_RECOVERY_DONE="false"
+PAIRING_URL=""
+ACP_AGENT_COMMAND=""
+STARTED_BRIDGE_PID=""
+ONE_CLICK_RUN_ID="$(date +%s)-$$"
+BOT_RESERVED="false"
+NPM_BIN=""
+NPX_BIN=""
+CURSOR_LOCAL_BIN="$HOME/.local/bin"
+CODEM_LOCAL_BIN="$HOME/.codem/bin"
+AAMP_RUN_LOG_DIR="${AAMP_RUN_LOG_DIR:-}"
+AAMP_RUN_ID="${AAMP_RUN_ID:-}"
+ONE_CLICK_LOG="${ONE_CLICK_LOG:-}"
+ERRORS_LOG="${ERRORS_LOG:-}"
+AAMP_LOGS_BIN="$AAMP_BIN_DIR/aamp-logs"
+AGENT_BRIDGE_EMAIL=""
+FEISHU_BRIDGE_EMAIL=""
+RESTART_ARGS=()
+
+sanitize_inherited_npm_exec_env() {
+  local key lower
+  while IFS='=' read -r key _; do
+    lower="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+      npm_config_*|npm_package_*|npm_lifecycle_*|npm_command|npm_execpath|npm_node_execpath|init_cwd)
+        unset "$key"
+        ;;
+    esac
+  done < <(env)
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  feishu-task-agent install         # bind multiple Agent-Bot pairs, then start them
+  feishu-task-agent start           # choose saved pairs to start
+  feishu-task-agent list            # list saved pairs
+  feishu-task-agent add             # bind and save more pairs without leaving bridges running
+  feishu-task-agent remove          # remove saved pairs without stopping running bridges
+  feishu-task-agent update          # update the short command now
+  feishu-task-agent help            # show this help
+
+Running the installed short command without a subcommand shows this help.
+Running the standalone one-click script without a subcommand is the same as
+"feishu-task-agent install".
+
+Options:
+  --agent codex|cursor        Use this Agent for every new binding in the command.
+  --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
+  --debug                    Enable debug mode for bridge processes
+  -h, --help                 Show this help
+
+日志命令:
+  aamp-logs list-runs
+  aamp-logs collect --run-dir <运行日志目录>
+  aamp-logs collect --task-id xxx
+  aamp-logs collect --task-guid yyy
+USAGE
+}
+
+write_one_click_log() {
+  local line="$1"
+  if [ -n "$ONE_CLICK_LOG" ]; then
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$line" >>"$ONE_CLICK_LOG" 2>/dev/null || true
+  fi
+}
+
+agent_log() {
+  local line
+  line="[aamp-one-click] $*"
+  printf '%s\n' "$line"
+  write_one_click_log "$line"
+}
+
+agent_detail() {
+  local line
+  line="[aamp-one-click] $*"
+  write_one_click_log "$line"
+  if [ "$AAMP_ONE_CLICK_VERBOSE" = "true" ]; then
+    printf '%s\n' "$line"
+  fi
+}
+
+record_version_line() {
+  local line
+  line="当前版本：$AAMP_TASK_AGENT_VERSION"
+  write_one_click_log "[aamp-one-click] $line"
+  if [ "$AAMP_TASK_START_MODE" = "start" ]; then
+    printf '%s\n' "$line"
+  fi
+}
+
+print_local_log_hints() {
+  local stream="${1:-stdout}"
+  [ -n "$AAMP_RUN_LOG_DIR" ] || return 0
+  if [ "$stream" = "stderr" ]; then
+    printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR" >&2
+    printf '   运行日志打包：%s collect --run-dir %s\n' "$AAMP_LOGS_BIN" "$AAMP_RUN_LOG_DIR" >&2
+    printf '   特定任务日志打包：%s collect --task-id xxx\n' "$AAMP_LOGS_BIN" >&2
+    printf '   特定任务日志打包：%s collect --task-guid yyy\n' "$AAMP_LOGS_BIN" >&2
+  else
+    printf '   运行日志目录：%s\n' "$AAMP_RUN_LOG_DIR"
+    printf '   运行日志打包：%s collect --run-dir %s\n' "$AAMP_LOGS_BIN" "$AAMP_RUN_LOG_DIR"
+    printf '   特定任务日志打包：%s collect --task-id xxx\n' "$AAMP_LOGS_BIN"
+    printf '   特定任务日志打包：%s collect --task-guid yyy\n' "$AAMP_LOGS_BIN"
+  fi
+}
+
+agent_success() {
+  printf '\n🟢 %s 已接入飞书任务，可以开始对话 & 派发任务。\n' "$AGENT"
+  if [ -n "$BOT_NAME" ]; then
+    printf '   飞书 Bot：%s\n' "$BOT_NAME"
+  fi
+  printf '🟢 保持终端打开，你可以给 agent 派发飞书任务\n'
+  printf '\n'
+  write_one_click_log "[aamp-one-click] SUCCESS: $AGENT connected to Feishu tasks"
+}
+
+agent_fail() {
+  local reason="$*"
+  local line
+  line="[aamp-one-click] ERROR: $reason"
+  write_one_click_log "$line"
+  if [ -n "$ERRORS_LOG" ]; then
+    printf '{"timestamp":"%s","level":"error","component":"one-click","message":"%s"}\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" \
+      "$(json_escape "$reason")" >>"$ERRORS_LOG" 2>/dev/null || true
+  fi
+  if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
+    printf '\n🔴 当前配置处理失败：%s\n\n' "$reason" >&2
+    exit 1
+  fi
+  printf '\n🔴 运行失败，本地飞书任务连接没有启动成功。\n' >&2
+  printf '   原因：%s\n' "$reason" >&2
+  print_local_log_hints stderr
+  printf '\n' >&2
+  exit 1
+}
+
+mock_fail_stage_known() {
+  case "$1" in
+    node-toolchain|agent-login|feishu-bot|agent-bridge|feishu-bridge)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_mock_fail_stage() {
+  [ -n "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" ] || return 0
+  mock_fail_stage_known "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" || agent_fail "unknown mock failure stage: $AAMP_ONE_CLICK_MOCK_FAIL_STAGE"
+}
+
+maybe_mock_fail() {
+  local stage="$1"
+  [ "$AAMP_ONE_CLICK_MOCK_FAIL_STAGE" = "$stage" ] || return 0
+  agent_fail "模拟启动失败：$stage"
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  printf '%s' "$value"
+}
+
+write_run_manifest() {
+  [ -n "$AAMP_RUN_LOG_DIR" ] || return 0
+  local agent_bridge_type="acp"
+  local agent_bridge_name="aamp-acp-bridge"
+  if uses_cli_bridge; then
+    agent_bridge_type="cli"
+    agent_bridge_name="aamp-cli-bridge"
+  fi
+  cat >"$AAMP_RUN_LOG_DIR/manifest.json" <<EOF
+{
+  "schema": "aamp.local_logs.run.v1",
+  "run_id": "$(json_escape "$AAMP_RUN_ID")",
+  "started_at": "$(date '+%Y-%m-%dT%H:%M:%S%z')",
+  "agent": "$(json_escape "$AGENT")",
+  "env": "online",
+  "aamp_host": "$(json_escape "$AAMP_HOST")",
+  "app_id": "$(json_escape "$APP_ID")",
+  "bot_name": "$(json_escape "$BOT_NAME")",
+  "feishu_bridge_name": "aamp-feishu-bridge",
+  "feishu_bridge_email": "$(json_escape "$FEISHU_BRIDGE_EMAIL")",
+  "agent_bridge_type": "$(json_escape "$agent_bridge_type")",
+  "agent_bridge_name": "$(json_escape "$agent_bridge_name")",
+  "agent_bridge_email": "$(json_escape "$AGENT_BRIDGE_EMAIL")",
+  "log_dir": "$(json_escape "$AAMP_RUN_LOG_DIR")",
+  "errors_log": "$(json_escape "$ERRORS_LOG")"
+}
+EOF
+}
+
+extract_email_from_pairing_url() {
+  local pairing_url="$1"
+  PAIRING_URL_VALUE="$pairing_url" node -e '
+try {
+  const parsed = new URL(String(process.env.PAIRING_URL_VALUE || ""));
+  process.stdout.write(parsed.searchParams.get("mailbox") || "");
+} catch {
+  process.stdout.write("");
+}
+'
+}
+
+extract_agent_email_from_acp_init_output() {
+  node -e '
+let input = "";
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const start = input.indexOf("{");
+  const end = input.lastIndexOf("}");
+  if (start < 0 || end < start) return;
+  try {
+    const data = JSON.parse(input.slice(start, end + 1));
+    process.stdout.write(data.agents?.[0]?.email || data.agents?.[0]?.pairing?.mailbox || "");
+  } catch {}
+});
+'
+}
+
+extract_feishu_email_from_log() {
+  local log_file="$1"
+  [ -f "$log_file" ] || return 0
+  LOG_FILE="$log_file" node -e '
+const fs = require("node:fs");
+const file = process.env.LOG_FILE;
+let content = "";
+try {
+  content = fs.readFileSync(file, "utf8");
+} catch {
+  process.exit(0);
+}
+for (const line of content.split(/\r?\n/)) {
+  if (!line.trim()) continue;
+  let message = line;
+  try {
+    const record = JSON.parse(line);
+    message = String(record.message ?? record.msg ?? line);
+  } catch {}
+  const match = /\bmailbox=([^\s,]+)/.exec(message);
+  if (match?.[1]) {
+    process.stdout.write(match[1]);
+    break;
+  }
+}
+'
+}
+
+init_log_run() {
+  mkdir -p "$AAMP_LOG_DIR/runs" "$AAMP_BIN_DIR"
+  AAMP_RUN_ID="$(date '+%Y%m%dT%H%M%S')-$$"
+  AAMP_RUN_LOG_DIR="$AAMP_LOG_DIR/runs/$AAMP_RUN_ID"
+  ONE_CLICK_LOG="$AAMP_RUN_LOG_DIR/one-click.log"
+  ERRORS_LOG="$AAMP_RUN_LOG_DIR/errors.jsonl"
+  mkdir -p "$AAMP_RUN_LOG_DIR"
+  : >"$ONE_CLICK_LOG"
+  : >"$ERRORS_LOG"
+  ln -sfn "$AAMP_RUN_LOG_DIR" "$AAMP_LOG_DIR/latest" 2>/dev/null || true
+  export AAMP_LOG_DIR AAMP_RUN_LOG_DIR AAMP_RUN_ID ONE_CLICK_LOG ERRORS_LOG AAMP_LOGS_BIN
+  write_run_manifest
+  agent_detail "logs directory: $AAMP_RUN_LOG_DIR"
+}
+
+run_log_file() {
+  local filename="$1"
+  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
+    printf '%s\n' "$AAMP_RUN_LOG_DIR/$filename"
+  else
+    mktemp "${TMPDIR:-/tmp}/${filename}.XXXXXX"
+  fi
+}
+
+install_aamp_logs_bin() {
+  local expected_version="${1:-$AAMP_TASK_AGENT_VERSION}"
+  [ -n "$NPM_BIN" ] || return 0
+  mkdir -p "$AAMP_BIN_DIR"
+
+  ensure_task_agent_global_install "$expected_version" || {
+    agent_log "warning: failed to synchronize aamp-logs $expected_version; logs still saved at $AAMP_RUN_LOG_DIR"
+    return 1
+  }
+
+  local tmp="${AAMP_LOGS_BIN}.tmp.$$"
+  rm -f "$tmp" 2>/dev/null || true
+  ln -s "$NPM_GLOBAL_PREFIX/bin/aamp-logs" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+  mv -f "$tmp" "$AAMP_LOGS_BIN" 2>>"$ONE_CLICK_LOG" || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  }
+  install_aamp_logs_shim
+  agent_detail "logs command: $AAMP_LOGS_BIN -> $NPM_GLOBAL_PREFIX/bin/aamp-logs"
+}
+
+install_aamp_logs_shim() {
+  install_command_shim "$AAMP_LOGS_BIN" "aamp-logs"
+}
+
+kill_process_tree() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  local children child
+  children="$(pgrep -P "$pid" 2>/dev/null || true)"
+  for child in $children; do
+    kill_process_tree "$child"
+  done
+
+  kill "$pid" 2>/dev/null || true
+}
+
+force_kill_process_tree() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+
+  kill_process_tree "$pid"
+  sleep 0.5
+  if kill -0 "$pid" 2>/dev/null; then
+    local children child
+    children="$(pgrep -P "$pid" 2>/dev/null || true)"
+    for child in $children; do
+      force_kill_process_tree "$child"
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+}
+
+start_logged_bridge() {
+  local log_file="$1"
+  local tail_var="$2"
+  local mode="$3"
+  shift 3
+
+  local log_level="info"
+  if [ "$DEBUG_MODE" = "true" ]; then
+    log_level="debug"
+  fi
+
+  if [ "$mode" = "append" ]; then
+    AAMP_LOG_FILE="$log_file" AAMP_LOG_LEVEL="$log_level" "$@" >>"$log_file" 2>&1 &
+  else
+    AAMP_LOG_FILE="$log_file" AAMP_LOG_LEVEL="$log_level" "$@" >"$log_file" 2>&1 &
+  fi
+  STARTED_BRIDGE_PID=$!
+
+  if [ "$AAMP_TAIL_BRIDGE_LOGS" = "true" ]; then
+    if [ "$mode" = "append" ]; then
+      tail -n 0 -f "$log_file" &
+    else
+      tail -n +1 -f "$log_file" &
+    fi
+    printf -v "$tail_var" '%s' "$!"
+  else
+    printf -v "$tail_var" ''
+  fi
+}
+
+acquire_bot_selection_lock() {
+  local attempt owner owner_pid
+  mkdir -p "$(dirname "$BOT_SELECTION_LOCK_DIR")"
+  for attempt in $(seq 1 300); do
+    if mkdir "$BOT_SELECTION_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$ONE_CLICK_RUN_ID" >"$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true
+      return 0
+    fi
+    owner="$(cat "$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true)"
+    owner_pid="${owner##*-}"
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true
+      rmdir "$BOT_SELECTION_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.2
+  done
+  agent_fail "timed out waiting for Feishu bot selection lock"
+}
+
+release_bot_selection_lock() {
+  local owner
+  owner="$(cat "$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true)"
+  [ "$owner" = "$ONE_CLICK_RUN_ID" ] || return 0
+  rm -f "$BOT_SELECTION_LOCK_DIR/owner" 2>/dev/null || true
+  rmdir "$BOT_SELECTION_LOCK_DIR" 2>/dev/null || true
+}
+
+acquire_dir_lock() {
+  local lock_dir="$1"
+  local label="$2"
+  local attempt owner owner_pid
+  mkdir -p "$(dirname "$lock_dir")"
+  for attempt in $(seq 1 600); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$ONE_CLICK_RUN_ID" >"$lock_dir/owner" 2>/dev/null || true
+      return 0
+    fi
+    owner="$(cat "$lock_dir/owner" 2>/dev/null || true)"
+    owner_pid="${owner##*-}"
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$lock_dir/owner" 2>/dev/null || true
+      rmdir "$lock_dir" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.2
+  done
+  agent_fail "timed out waiting for $label lock"
+}
+
+release_dir_lock() {
+  local lock_dir="$1"
+  local owner
+  owner="$(cat "$lock_dir/owner" 2>/dev/null || true)"
+  [ "$owner" = "$ONE_CLICK_RUN_ID" ] || return 0
+  rm -f "$lock_dir/owner" 2>/dev/null || true
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+with_lark_cli_install_lock() {
+  acquire_dir_lock "$LARK_CLI_INSTALL_LOCK_DIR" "lark-cli install"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$LARK_CLI_INSTALL_LOCK_DIR"
+  return "$status"
+}
+
+with_lark_cli_config_lock() {
+  acquire_dir_lock "$LARK_CLI_CONFIG_LOCK_DIR" "lark-cli config"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$LARK_CLI_CONFIG_LOCK_DIR"
+  return "$status"
+}
+
+with_task_agent_update_lock() {
+  acquire_dir_lock "$TASK_AGENT_UPDATE_LOCK_DIR" "Feishu task agent update"
+  set +e
+  "$@"
+  local status=$?
+  set -e
+  release_dir_lock "$TASK_AGENT_UPDATE_LOCK_DIR"
+  return "$status"
+}
+
+cleanup_stale_one_click_processes() {
+  [ "$AAMP_STALE_PROCESS_CLEANUP" = "true" ] || return 0
+  command -v ps >/dev/null 2>&1 || return 0
+
+  local pass stale line pid command
+  for pass in 1 2; do
+    stale=()
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      stale+=("$line")
+    done < <(
+      ps -axo pid=,ppid=,etime=,command= 2>/dev/null | awk -v min_age="$AAMP_STALE_PROCESS_SECONDS" -v self="$$" '
+        function etime_seconds(value, days, parts, count, time_parts) {
+          days = 0
+          if (index(value, "-") > 0) {
+            count = split(value, parts, "-")
+            days = parts[1] + 0
+            value = parts[count]
+          }
+          count = split(value, time_parts, ":")
+          if (count == 3) return days * 86400 + time_parts[1] * 3600 + time_parts[2] * 60 + time_parts[3]
+          if (count == 2) return days * 86400 + time_parts[1] * 60 + time_parts[2]
+          return days * 86400 + value
+        }
+        {
+          pid = $1
+          ppid = $2
+          etime = $3
+          $1 = ""; $2 = ""; $3 = ""
+          sub(/^[[:space:]]+/, "")
+          command = $0
+
+          if (pid == self) next
+          if (ppid != 1) next
+
+          age = etime_seconds(etime)
+          if (age < min_age) next
+
+          if (command ~ /aamp-one-click-npm-cache/ && command ~ /(aamp-acp-bridge|aamp-feishu-bridge|aamp-feishu-task-bridge|aamp-cli-bridge|codex-acp|acpx)/) {
+            print pid "\t" command
+            next
+          }
+
+          if (command ~ /node_modules\/\.bin\/(aamp-acp-bridge|aamp-feishu-bridge|aamp-feishu-task-bridge|aamp-cli-bridge|codex-acp)/) {
+            print pid "\t" command
+            next
+          }
+
+          if (command ~ /acpx.*__queue-owner/) {
+            print pid "\t" command
+            next
+          }
+        }
+      '
+    )
+
+    [ "${#stale[@]}" -gt 0 ] || return 0
+
+    agent_log "cleaning stale one-click orphan process(es) older than ${AAMP_STALE_PROCESS_SECONDS}s"
+    for line in "${stale[@]}"; do
+      pid="${line%%$'\t'*}"
+      command="${line#*$'\t'}"
+      agent_log "stopping stale process pid=$pid command=$command"
+      kill "$pid" 2>/dev/null || true
+    done
+
+    [ "$pass" -eq 1 ] && sleep 1
+  done
+}
+
+os_name() {
+  uname -s 2>/dev/null || printf 'unknown'
+}
+
+is_macos() {
+  [ "$(os_name)" = "Darwin" ]
+}
+
+path_prepend() {
+  local path_entry="$1"
+  [ -n "$path_entry" ] || return 0
+  case ":$PATH:" in
+    *":$path_entry:"*) ;;
+    *) export PATH="$path_entry:$PATH" ;;
+  esac
+}
+
+run_brew() {
+  # Feed one "yes" for Homebrew prompts such as dependency installation confirmation.
+  printf 'y\n' | HOMEBREW_NO_ENV_HINTS=1 brew "$@"
+}
+
+refresh_node_toolchain_bins() {
+  NPM_BIN="$(command -v npm || true)"
+  NPX_BIN="$(command -v npx || true)"
+}
+
+print_node_toolchain_help() {
+  cat >&2 <<'HELP'
+
+Automatic Node.js/npm installation did not complete.
+Install it manually with one of these commands, then reopen the terminal or fix PATH:
+  Homebrew: brew install node
+  Volta:    volta install node npm
+  fnm:      fnm install --lts
+  nvm:      nvm install --lts
+
+HELP
+}
+
+try_install_node_toolchain() {
+  local node_path
+  node_path="$(command -v node || true)"
+
+  if command -v volta >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.volta/"* ]]; }; then
+    agent_log "installing Node.js/npm with Volta"
+    volta install node npm
+    return $?
+  fi
+
+  if command -v fnm >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.fnm/"* ]]; }; then
+    agent_log "installing Node.js/npm with fnm"
+    fnm install --lts
+    eval "$(fnm env --shell bash)"
+    return 0
+  fi
+
+  local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$nvm_dir/nvm.sh" ] && { [ -z "$node_path" ] || [[ "$node_path" == *"/.nvm/"* ]]; }; then
+    agent_log "installing Node.js/npm with nvm"
+    # shellcheck disable=SC1090
+    source "$nvm_dir/nvm.sh"
+    nvm install --lts
+    nvm use --lts
+    return 0
+  fi
+
+  if command -v brew >/dev/null 2>&1; then
+    local formula="node"
+    if brew list --versions node@22 >/dev/null 2>&1; then
+      formula="node@22"
+    elif brew list --versions node >/dev/null 2>&1; then
+      formula="node"
+    fi
+
+    if brew list --versions "$formula" >/dev/null 2>&1; then
+      agent_log "reinstalling $formula with Homebrew to restore npm/npx"
+      run_brew reinstall "$formula"
+    else
+      agent_log "installing Node.js/npm with Homebrew"
+      run_brew install "$formula"
+    fi
+    return $?
+  fi
+
+  agent_log "no supported Node.js installer found; tried Volta, fnm, nvm, and Homebrew"
+  return 1
+}
+
+ensure_node_toolchain() {
+  refresh_node_toolchain_bins
+  if [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ]; then
+    configure_npm_registry
+    return 0
+  fi
+
+  agent_log "npm/npx not found; installing Node.js/npm automatically"
+  if ! try_install_node_toolchain; then
+    print_node_toolchain_help
+    agent_fail "failed to install Node.js/npm automatically"
+  fi
+
+  hash -r 2>/dev/null || true
+  refresh_node_toolchain_bins
+  [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ] || {
+    print_node_toolchain_help
+    agent_fail "npm/npx is still unavailable after installation"
+  }
+  configure_npm_registry
+}
+
+configure_npm_registry() {
+  sanitize_inherited_npm_exec_env
+  mkdir -p "$NPM_CACHE_DIR"
+  mkdir -p "$NPM_GLOBAL_PREFIX/bin"
+  path_prepend "$NPM_GLOBAL_PREFIX/bin"
+  export npm_config_cache="$NPM_CACHE_DIR"
+  export NPM_CONFIG_CACHE="$NPM_CACHE_DIR"
+  export npm_config_registry="$NPM_REGISTRY"
+  export NPM_CONFIG_REGISTRY="$NPM_REGISTRY"
+  export npm_config_prefix="$NPM_GLOBAL_PREFIX"
+  export NPM_CONFIG_PREFIX="$NPM_GLOBAL_PREFIX"
+  "$NPM_BIN" config set registry "$NPM_REGISTRY" >/dev/null 2>&1 || true
+  agent_detail "using npm registry: $NPM_REGISTRY"
+  agent_detail "using npm cache: $NPM_CACHE_DIR"
+  agent_detail "using npm global prefix: $NPM_GLOBAL_PREFIX"
+}
+
+script_file_task_agent_version() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  sed -n 's/^AAMP_TASK_AGENT_VERSION="\([^"]*\)".*/\1/p' "$file" | head -n 1
+}
+
+task_agent_global_package_dir() {
+  printf '%s/lib/node_modules/%s' "$NPM_GLOBAL_PREFIX" "$AAMP_TASK_AGENT_NAME"
+}
+
+task_agent_global_package_version() {
+  local package_json
+  package_json="$(task_agent_global_package_dir)/package.json"
+  [ -r "$package_json" ] || return 1
+  PACKAGE_JSON="$package_json" node -e '
+const fs = require("fs");
+try {
+  const data = JSON.parse(fs.readFileSync(process.env.PACKAGE_JSON, "utf8"));
+  if (typeof data.version !== "string" || data.version.length === 0) process.exit(1);
+  process.stdout.write(data.version);
+} catch {
+  process.exit(1);
+}
+' 2>>"$ONE_CLICK_LOG"
+}
+
+task_agent_global_install_is_complete() {
+  local package_dir
+  package_dir="$(task_agent_global_package_dir)"
+  [ -x "$NPM_GLOBAL_PREFIX/bin/aamp-logs" ] || return 1
+  [ -r "$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh" ] || return 1
+  [ -r "$package_dir/bin/feishu-task-agent-controller.mjs" ] || return 1
+}
+
+task_agent_global_install_is_current() {
+  local expected_version="$1"
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  [ "$installed_version" = "$expected_version" ] || return 1
+  task_agent_global_install_is_complete
+}
+
+ensure_task_agent_global_install_locked() {
+  local expected_version="$1"
+  if task_agent_global_install_is_current "$expected_version"; then
+    return 0
+  fi
+
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  if [ -n "$installed_version" ] && task_agent_version_is_newer "$expected_version" "$installed_version" && task_agent_global_install_is_complete; then
+    agent_detail "keeping newer task-agent npm package: installed=$installed_version requested=$expected_version"
+    return 0
+  fi
+  agent_detail "synchronizing task-agent npm package: current=${installed_version:-missing} expected=$expected_version"
+  npm_install_global "$AAMP_TASK_AGENT_NAME@$expected_version" >>"$ONE_CLICK_LOG" 2>&1 || return 1
+  task_agent_global_install_is_current "$expected_version"
+}
+
+ensure_task_agent_global_install() {
+  local expected_version="$1"
+  if task_agent_global_install_is_current "$expected_version"; then
+    return 0
+  fi
+  with_task_agent_update_lock ensure_task_agent_global_install_locked "$expected_version"
+}
+
+short_command_is_current() {
+  local target="$1"
+  local installed_version
+  [ -x "$target" ] || return 1
+  installed_version="$(script_file_task_agent_version "$target" || true)"
+  [ "$installed_version" = "$AAMP_TASK_AGENT_VERSION" ]
+}
+
+write_task_update_cache() {
+  local latest="${1:-$AAMP_TASK_AGENT_VERSION}"
+  mkdir -p "$(dirname "$AAMP_TASK_UPDATE_CACHE_FILE")"
+  CACHE_FILE="$AAMP_TASK_UPDATE_CACHE_FILE" CURRENT_VERSION="$AAMP_TASK_AGENT_VERSION" LATEST_VERSION="$latest" node -e '
+const fs = require("fs");
+const file = process.env.CACHE_FILE;
+const payload = {
+  version: 1,
+  checked_at: Math.floor(Date.now() / 1000),
+  current_version: process.env.CURRENT_VERSION || "",
+  latest_version: process.env.LATEST_VERSION || process.env.CURRENT_VERSION || "",
+};
+fs.writeFileSync(file, JSON.stringify(payload, null, 2) + "\n");
+' 2>>"$ONE_CLICK_LOG" || true
+}
+
+task_update_cache_is_fresh() {
+  [ -f "$AAMP_TASK_UPDATE_CACHE_FILE" ] || return 1
+  CACHE_FILE="$AAMP_TASK_UPDATE_CACHE_FILE" TTL="$AAMP_TASK_UPDATE_CACHE_TTL_SECONDS" CURRENT_VERSION="$AAMP_TASK_AGENT_VERSION" node -e '
+const fs = require("fs");
+let data;
+try { data = JSON.parse(fs.readFileSync(process.env.CACHE_FILE, "utf8")); } catch { process.exit(1); }
+const checkedAt = Number(data.checked_at || 0);
+const ttl = Number(process.env.TTL || 86400);
+if (!Number.isFinite(checkedAt) || checkedAt <= 0 || !Number.isFinite(ttl) || ttl <= 0) process.exit(1);
+if (String(data.current_version || "") !== String(process.env.CURRENT_VERSION || "")) process.exit(1);
+const age = Math.floor(Date.now() / 1000) - checkedAt;
+process.exit(age >= 0 && age < ttl ? 0 : 1);
+' 2>>"$ONE_CLICK_LOG"
+}
+
+install_short_command_from_version() {
+  local version="$1"
+  local target="$2"
+  local package_dir source_file tmp
+  tmp="${target}.tmp.$$"
+  mkdir -p "$(dirname "$target")"
+  ensure_task_agent_global_install "$version" || return 1
+  package_dir="$(task_agent_global_package_dir)"
+  source_file="$package_dir/bootstrap/aamp-feishu-task-agent-bootstrap.sh"
+  [ -r "$source_file" ] || return 1
+  agent_detail "installing short command from task-agent $version to $target"
+  cp "$source_file" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+  chmod +x "$tmp" 2>/dev/null || true
+  mv "$tmp" "$target"
+}
+
+install_command_shim() {
+  local target="$1"
+  local command_name="$2"
+  mkdir -p "$AAMP_TASK_SHIM_DIR" 2>/dev/null || return 0
+  local shim="$AAMP_TASK_SHIM_DIR/$command_name"
+  local tmp="${shim}.tmp.$$"
+  cat >"$tmp" <<EOF
+#!/usr/bin/env bash
+AAMP_TASK_ENTRY=short exec "$target" "\$@"
+EOF
+  chmod +x "$tmp" 2>/dev/null || true
+  if [ -f "$shim" ] && cmp -s "$tmp" "$shim"; then
+    rm -f "$tmp" 2>/dev/null || true
+    chmod +x "$shim" 2>/dev/null || true
+    return 0
+  fi
+  mv "$tmp" "$shim" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
+install_short_command_shim() {
+  install_command_shim "$1" "$AAMP_TASK_COMMAND_NAME"
+}
+
+
+install_short_command_current() {
+  local target="$1"
+  local source_file="${BASH_SOURCE[0]:-}"
+  local tmp="${target}.tmp.$$"
+  if short_command_is_current "$target"; then
+    agent_detail "short command already current: $target"
+    return 0
+  fi
+  case "$source_file" in
+    ""|/dev/fd/*|/private/dev/fd/*|/proc/*) source_file="" ;;
+  esac
+  if [ -n "$source_file" ] && [ -f "$source_file" ] && [ -r "$source_file" ]; then
+    mkdir -p "$(dirname "$target")"
+    cp "$source_file" "$tmp" 2>>"$ONE_CLICK_LOG" || return 1
+    chmod +x "$tmp" 2>/dev/null || true
+    mv "$tmp" "$target"
+    return 0
+  fi
+  install_short_command_from_version "$AAMP_TASK_AGENT_VERSION" "$target"
+}
+
+install_short_command() {
+  install_short_command_current "$AAMP_TASK_COMMAND_PATH" || {
+    agent_detail "failed to install short command at $AAMP_TASK_COMMAND_PATH; continuing current run"
+    return 1
+  }
+  install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+  agent_detail "short command installed: $AAMP_TASK_COMMAND_PATH"
+  agent_detail "short command shim: $AAMP_TASK_SHIM_DIR/$AAMP_TASK_COMMAND_NAME"
+}
+
+record_install_success() {
+  write_one_click_log "[aamp-one-click] installed: $AAMP_TASK_COMMAND_PATH"
+  write_one_click_log "[aamp-one-click] start with: $AAMP_TASK_COMMAND_NAME"
+}
+
+ensure_selected_agent_for_start() {
+  if [ -z "$AGENT" ]; then
+    select_agent_interactively
+  fi
+  validate_agent_name "$AGENT"
+}
+
+resolve_latest_task_agent_version() {
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" view "$AAMP_TASK_AGENT_NAME@$AAMP_TASK_AGENT_CHANNEL" version \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" 2>/dev/null | tail -n 1 | tr -d '[:space:]'
+}
+
+task_agent_version_is_newer() {
+  VERSION_CURRENT="$1" VERSION_LATEST="$2" node -e '
+function parse(value) {
+  const match = String(value || "").match(/^(\d+)\.(\d+)\.(\d+)(?:-dev\.(\d+))?$/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3]), match[4] === undefined ? Number.MAX_SAFE_INTEGER : Number(match[4])];
+}
+const current = parse(process.env.VERSION_CURRENT);
+const latest = parse(process.env.VERSION_LATEST);
+if (!process.env.VERSION_LATEST || process.env.VERSION_LATEST === process.env.VERSION_CURRENT) process.exit(1);
+if (!current || !latest) process.exit(0);
+for (let index = 0; index < current.length; index += 1) {
+  if (latest[index] > current[index]) process.exit(0);
+  if (latest[index] < current[index]) process.exit(1);
+}
+process.exit(1);
+'
+}
+
+auto_update_short_command_if_needed() {
+  local mode="${1:-normal}"
+  [ "$AAMP_TASK_AUTO_UPDATE" = "true" ] || return 0
+  [ "$AAMP_TASK_AUTO_UPDATE_DONE" != "true" ] || return 0
+  [ -n "$NPM_BIN" ] || return 0
+  if [ "$mode" != "force" ] && task_update_cache_is_fresh; then
+    agent_detail "task-agent auto-update skipped: cache fresh"
+    return 0
+  fi
+
+  local latest
+  latest="$(resolve_latest_task_agent_version || true)"
+  if [ -z "$latest" ]; then
+    agent_detail "task-agent auto-update check skipped: cannot resolve latest version"
+    return 0
+  fi
+  agent_detail "task-agent auto-update check: current=$AAMP_TASK_AGENT_VERSION latest=$latest channel=$AAMP_TASK_AGENT_CHANNEL mode=$mode"
+  if ! task_agent_version_is_newer "$AAMP_TASK_AGENT_VERSION" "$latest"; then
+    write_task_update_cache "$latest"
+    return 0
+  fi
+
+  if ensure_task_agent_global_install "$latest" && \
+    install_aamp_logs_bin "$latest" && \
+    install_short_command_from_version "$latest" "$AAMP_TASK_COMMAND_PATH"; then
+    install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+    write_task_update_cache "$latest"
+    agent_detail "task-agent auto-updated from $AAMP_TASK_AGENT_VERSION to $latest"
+    agent_detail "restarting with updated task-agent $latest"
+    AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${RESTART_ARGS[@]}"
+  fi
+  agent_detail "task-agent auto-update to $latest failed; continuing current version"
+}
+
+adopt_newer_global_task_agent_if_available() {
+  local installed_version
+  installed_version="$(task_agent_global_package_version || true)"
+  [ -n "$installed_version" ] || return 0
+  task_agent_version_is_newer "$AAMP_TASK_AGENT_VERSION" "$installed_version" || return 0
+
+  agent_detail "adopting newer task-agent from npm prefix: current=$AAMP_TASK_AGENT_VERSION installed=$installed_version"
+  install_aamp_logs_bin "$installed_version" || return 1
+  install_short_command_from_version "$installed_version" "$AAMP_TASK_COMMAND_PATH" || return 1
+  install_short_command_shim "$AAMP_TASK_COMMAND_PATH"
+  write_task_update_cache "$installed_version"
+  AAMP_TASK_AUTO_UPDATE_DONE=true exec "$AAMP_TASK_COMMAND_PATH" "${RESTART_ARGS[@]}"
+}
+
+run_task_agent_update_command() {
+  local installed_version
+  auto_update_short_command_if_needed force
+  installed_version="$(script_file_task_agent_version "$AAMP_TASK_COMMAND_PATH" 2>/dev/null || printf '%s' "$AAMP_TASK_AGENT_VERSION")"
+  install_aamp_logs_bin "$installed_version" || agent_fail "failed to synchronize aamp-logs $installed_version"
+  printf '当前版本：%s\n' "$installed_version"
+}
+npm_install_global() {
+  local npm_log
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  if "$NPM_BIN" install -g \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" \
+    "$@" >"$npm_log" 2>&1; then
+    cat "$npm_log"
+    hash -r 2>/dev/null || true
+    return 0
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    cat "$npm_log" >&2
+    return 1
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npm-install-retry.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" install -g \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" \
+    "$@" >"$npm_log" 2>&1 || {
+      cat "$npm_log" >&2
+      return 1
+    }
+  cat "$npm_log"
+  hash -r 2>/dev/null || true
+}
+
+npx_package() {
+  local npm_log
+  local status
+  local package_spec=""
+  local package_args=()
+  if [ "${1:-}" = "--package" ]; then
+    [ -n "${2:-}" ] || agent_fail "npx_package requires a package value after --package"
+    package_spec="$2"
+    package_args=(--package "$package_spec")
+    shift 2
+  fi
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npx.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  set +e
+  "$NPM_BIN" exec --yes --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "${package_args[@]}" -- "$@" 2>&1 | tee "$npm_log"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+
+  if [ -n "$package_spec" ] && npm_log_indicates_exec_bin_error "$npm_log"; then
+    run_global_package_bin "$package_spec" "$@"
+    return $?
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    return "$status"
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-npx-retry.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  set +e
+  "$NPM_BIN" exec --yes --registry "$NPM_REGISTRY" --cache "$NPM_CACHE_DIR" "${package_args[@]}" -- "$@" 2>&1 | tee "$npm_log"
+  status=${PIPESTATUS[0]}
+  set -e
+  if [ "$status" -ne 0 ] && [ -n "$package_spec" ] && npm_log_indicates_exec_bin_error "$npm_log"; then
+    run_global_package_bin "$package_spec" "$@"
+    return $?
+  fi
+  return "$status"
+}
+
+npm_log_indicates_exec_bin_error() {
+  local npm_log="$1"
+  grep -Eiq '(^|[[:space:]])(sh|bash|zsh): .*command not found|not found: .*|could not determine executable to run' "$npm_log"
+}
+
+run_global_package_bin() {
+  local package_spec="$1"
+  local bin_name="$2"
+  shift 2
+  local bin_path="$NPM_GLOBAL_PREFIX/bin/$bin_name"
+
+  agent_log "npm exec could not resolve $bin_name; installing $package_spec into one-click npm prefix"
+  npm_install_global "$package_spec" || return $?
+  hash -r 2>/dev/null || true
+  [ -x "$bin_path" ] || {
+    agent_log "expected executable not found after install: $bin_path"
+    return 127
+  }
+  "$bin_path" "$@"
+}
+
+npm_log_indicates_cache_error() {
+  local npm_log="$1"
+  grep -Eiq 'Invalid response body|_cacache|ENOENT.*(_cacache|content-v2)|tarball data.*corrupted|TAR_BAD_ARCHIVE|zlib: unexpected end of file' "$npm_log"
+}
+
+reset_npm_cache_for_retry() {
+  NPM_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aamp-one-click-npm-cache.XXXXXX")"
+  export npm_config_cache="$NPM_CACHE_DIR"
+  export NPM_CONFIG_CACHE="$NPM_CACHE_DIR"
+  agent_log "npm cache appears corrupted; retrying with fresh npm cache: $NPM_CACHE_DIR"
+}
+
+npm_install_register_helper() {
+  local workdir="$1"
+  local npm_log
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-register-helper-install.XXXXXX")"
+
+  sanitize_inherited_npm_exec_env
+  if "$NPM_BIN" install \
+    --prefix "$workdir" \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    "$LARK_REGISTER_APP_SDK" >"$npm_log" 2>&1; then
+    return 0
+  fi
+
+  if ! npm_log_indicates_cache_error "$npm_log"; then
+    cat "$npm_log" >&2
+    return 1
+  fi
+
+  reset_npm_cache_for_retry
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/aamp-register-helper-install-retry.XXXXXX")"
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" install \
+    --prefix "$workdir" \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    "$LARK_REGISTER_APP_SDK" >"$npm_log" 2>&1 || {
+      cat "$npm_log" >&2
+      return 1
+    }
+}
+
+validate_agent_name() {
+  case "$1" in
+    codex|cursor) ;;
+    *) agent_fail "--agent must be codex or cursor" ;;
+  esac
+}
+
+read_tty_line() {
+  local prompt="$1"
+  local value
+  if [ ! -r /dev/tty ]; then
+    agent_fail "interactive input requires a terminal"
+  fi
+  printf '%s' "$prompt" >/dev/tty
+  IFS= read -r value </dev/tty
+  printf '%s' "$value"
+}
+
+agent_cli_detected() {
+  case "$1" in
+    codex)
+      resolve_codex_cli_for_acp >/dev/null 2>&1
+      ;;
+    cursor)
+      find_cursor_agent_cli >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+discover_interactive_agents() {
+  DETECTED_AGENTS=()
+  if agent_cli_detected codex; then
+    DETECTED_AGENTS+=("codex")
+  fi
+  if agent_cli_detected cursor; then
+    DETECTED_AGENTS+=("cursor")
+  fi
+
+  if [ "${#DETECTED_AGENTS[@]}" -eq 0 ]; then
+    agent_fail "暂未检测到本地智能体。请先安装并登录 Codex 或 Cursor CLI 后重试。"
+  fi
+}
+
+move_agent_menu_cursor_up() {
+  local line_count
+  line_count=$(( ${#DETECTED_AGENTS[@]} + 2 ))
+  printf '\033[%dA' "$line_count" >&3
+}
+
+render_agent_menu() {
+  local selected="$1"
+  local index
+
+  printf '\033[?25l' >&3
+  printf '\033[2K\r请选择要启动的 Agent:\n' >&3
+  for index in "${!DETECTED_AGENTS[@]}"; do
+    printf '\033[2K\r' >&3
+    if [ "$index" -eq "$selected" ]; then
+      printf '  > %s\n' "${DETECTED_AGENTS[$index]}" >&3
+    else
+      printf '    %s\n' "${DETECTED_AGENTS[$index]}" >&3
+    fi
+  done
+  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按数字键或 j/k。\n' >&3
+}
+
+select_agent_interactively() {
+  local selected=0
+  local key rest
+  local tty_state
+
+  discover_interactive_agents
+
+  if ! exec 3<>/dev/tty; then
+    agent_fail "missing --agent and no interactive terminal is available; pass --agent codex|cursor"
+  fi
+
+  tty_state="$(stty -g <&3)"
+  stty -echo -icanon min 1 time 0 <&3
+  render_agent_menu "$selected"
+  while true; do
+    IFS= read -rsn1 -u 3 key || {
+      stty "$tty_state" <&3
+      printf '\033[?25h\n' >&3
+      exec 3>&-
+      agent_fail "failed to read interactive agent selection"
+    }
+
+    case "$key" in
+      ""|$'\n'|$'\r')
+        AGENT="${DETECTED_AGENTS[$selected]}"
+        stty "$tty_state" <&3
+        printf '\033[?25h\n' >&3
+        exec 3>&-
+        return 0
+        ;;
+      $'\033')
+        IFS= read -rsn2 -u 3 rest || rest=""
+        case "$rest" in
+          "[A")
+            selected=$(( (selected + ${#DETECTED_AGENTS[@]} - 1) % ${#DETECTED_AGENTS[@]} ))
+            move_agent_menu_cursor_up
+            render_agent_menu "$selected"
+            ;;
+          "[B")
+            selected=$(( (selected + 1) % ${#DETECTED_AGENTS[@]} ))
+            move_agent_menu_cursor_up
+            render_agent_menu "$selected"
+            ;;
+          "[C"|"[D")
+            ;;
+        esac
+        ;;
+      k)
+        selected=$(( (selected + ${#DETECTED_AGENTS[@]} - 1) % ${#DETECTED_AGENTS[@]} ))
+        move_agent_menu_cursor_up
+        render_agent_menu "$selected"
+        ;;
+      j)
+        selected=$(( (selected + 1) % ${#DETECTED_AGENTS[@]} ))
+        move_agent_menu_cursor_up
+        render_agent_menu "$selected"
+        ;;
+      [1-9])
+        if [ "$key" -le "${#DETECTED_AGENTS[@]}" ]; then
+          selected=$(( key - 1 ))
+          AGENT="${DETECTED_AGENTS[$selected]}"
+          stty "$tty_state" <&3
+          move_agent_menu_cursor_up
+          render_agent_menu "$selected"
+          printf '\033[?25h\n' >&3
+          exec 3>&-
+          return 0
+        fi
+        ;;
+    esac
+  done
+}
+
+render_bot_menu() {
+  local selected="$1"
+  local index
+  local columns max_label_width label prefix
+
+  printf '\033[?25l' >&3
+  printf '\033[2K\r请选择飞书 Bot 应用:\n' >&3
+  columns="$(tput cols 2>/dev/null || printf '80')"
+  case "$columns" in
+    ''|*[!0-9]*) columns=80 ;;
+  esac
+  max_label_width=$((columns - 6))
+  [ "$max_label_width" -gt 20 ] || max_label_width=20
+  for index in "${!bot_labels[@]}"; do
+    printf '\033[2K\r' >&3
+    label="${bot_labels[$index]}"
+    if [ "${#label}" -gt "$max_label_width" ]; then
+      label="${label:0:$((max_label_width - 3))}..."
+    fi
+    if [ "$index" -eq "$selected" ]; then
+      prefix='  > '
+    else
+      prefix='    '
+    fi
+    printf '%s%s\n' "$prefix" "$label" >&3
+  done
+  printf '\033[2K\r使用 ↑/↓ 选择，回车确认。也可按数字键或 j/k。\n' >&3
+}
+
+select_bot_menu() {
+  local selected=0
+  local key rest
+  local tty_state
+  local line_count
+
+  if ! exec 3<>/dev/tty; then
+    agent_fail "interactive bot selection requires a terminal"
+  fi
+
+  line_count=$((${#bot_labels[@]} + 2))
+  tty_state="$(stty -g <&3)"
+  stty -echo -icanon min 1 time 0 <&3
+  render_bot_menu "$selected"
+  while true; do
+    IFS= read -rsn1 -u 3 key || {
+      stty "$tty_state" <&3
+      printf '\033[?25h\n' >&3
+      exec 3>&-
+      agent_fail "failed to read interactive bot selection"
+    }
+
+    case "$key" in
+      ""|$'\n'|$'\r')
+        stty "$tty_state" <&3
+        printf '\033[?25h\n' >&3
+        exec 3>&-
+        return "$selected"
+        ;;
+      $'\033')
+        IFS= read -rsn2 -u 3 rest || rest=""
+        case "$rest" in
+          "[A")
+            selected=$(( (selected + ${#bot_labels[@]} - 1) % ${#bot_labels[@]} ))
+            printf '\033[%dA' "$line_count" >&3
+            render_bot_menu "$selected"
+            ;;
+          "[B")
+            selected=$(( (selected + 1) % ${#bot_labels[@]} ))
+            printf '\033[%dA' "$line_count" >&3
+            render_bot_menu "$selected"
+            ;;
+          "[C"|"[D")
+            ;;
+        esac
+        ;;
+      k)
+        selected=$(( (selected + ${#bot_labels[@]} - 1) % ${#bot_labels[@]} ))
+        printf '\033[%dA' "$line_count" >&3
+        render_bot_menu "$selected"
+        ;;
+      j)
+        selected=$(( (selected + 1) % ${#bot_labels[@]} ))
+        printf '\033[%dA' "$line_count" >&3
+        render_bot_menu "$selected"
+        ;;
+      [1-9])
+        if [ "$key" -le "${#bot_labels[@]}" ]; then
+          selected=$(( key - 1 ))
+          stty "$tty_state" <&3
+          printf '\033[%dA' "$line_count" >&3
+          render_bot_menu "$selected"
+          printf '\033[?25h\n' >&3
+          exec 3>&-
+          return "$selected"
+        fi
+        ;;
+    esac
+  done
+}
+
+parse_args() {
+  local restart_source=()
+  local restart_arg
+  local restart_count=0
+  local restart_index=0
+  local restart_output_index=0
+
+  # Bash 3.2 with `set -u` treats an expanded empty array as unbound. Copy the
+  # original positional parameters one by one so the no-argument help path
+  # never expands an empty array.
+  for restart_arg in "$@"; do
+    restart_source[$restart_count]="$restart_arg"
+    restart_count=$((restart_count + 1))
+  done
+
+  # dev.150 restarted an updated launcher with its internal mode argument.
+  if [ "${1:-}" = "normal" ]; then
+    shift
+  fi
+
+  case "${1:-}" in
+    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+      AAMP_TASK_ACTION="$1"
+      shift
+      ;;
+  esac
+
+  if [ -z "$AAMP_TASK_ACTION" ]; then
+    AAMP_TASK_ACTION="${AAMP_TASK_DEFAULT_ACTION:-install}"
+  fi
+
+  case "$AAMP_TASK_ACTION" in
+    install|start|add)
+      AAMP_TASK_START_MODE="start"
+      ;;
+    *)
+      AAMP_TASK_START_MODE="install"
+      ;;
+  esac
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --agent)
+        AGENT="${2:-}"
+        shift 2
+        ;;
+      --aamp-host)
+        AAMP_HOST="${2:-}"
+        shift 2
+        ;;
+      --debug)
+        DEBUG_MODE="true"
+        shift
+        ;;
+      --mock-fail-stage)
+        AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${2:-}"
+        shift 2
+        ;;
+      -h|--help)
+        AAMP_TASK_ACTION="help"
+        shift
+        ;;
+      *)
+        agent_fail "unknown argument: $1"
+        ;;
+    esac
+  done
+
+  if [ -n "$AGENT" ]; then
+    validate_agent_name "$AGENT"
+  fi
+
+  if [ "${restart_source[0]:-}" = "normal" ]; then
+    restart_index=1
+  fi
+  RESTART_ARGS=()
+  case "${restart_source[$restart_index]:-}" in
+    install|start|list|add|remove|update|help)
+      ;;
+    *)
+      RESTART_ARGS[0]="$AAMP_TASK_ACTION"
+      restart_output_index=1
+      ;;
+  esac
+  while [ "$restart_index" -lt "$restart_count" ]; do
+    RESTART_ARGS[$restart_output_index]="${restart_source[$restart_index]}"
+    restart_index=$((restart_index + 1))
+    restart_output_index=$((restart_output_index + 1))
+  done
+}
+
+source_lark_env() {
+  unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy
+  mkdir -p "$AAMP_LARK_CLI_CONFIG_DIR"
+  export LARKSUITE_CLI_CONFIG_DIR="$AAMP_LARK_CLI_CONFIG_DIR"
+  unset LARK_CLI_NO_PROXY
+  agent_detail "online enabled, proxy env cleared, LARKSUITE_CLI_CONFIG_DIR=$LARKSUITE_CLI_CONFIG_DIR"
+}
+
+load_bot_configs() {
+  [ -f "$BOT_CONFIG_FILE" ] || return 0
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" CURRENT_RUN_FILE="$CURRENT_RUN_FILE" ACTIVE_RUNS_FILE="$ACTIVE_RUNS_FILE" BOT_RESERVATIONS_FILE="$BOT_RESERVATIONS_FILE" ONE_CLICK_RUN_ID="$ONE_CLICK_RUN_ID" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+const runFile = process.env.CURRENT_RUN_FILE;
+const activeRunsFile = process.env.ACTIVE_RUNS_FILE;
+const reservationsFile = process.env.BOT_RESERVATIONS_FILE;
+const currentRunId = String(process.env.ONE_CLICK_RUN_ID || "");
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+let currentRun;
+try {
+  currentRun = JSON.parse(fs.readFileSync(runFile, "utf8"));
+} catch {}
+let activeRunStore;
+try {
+  activeRunStore = JSON.parse(fs.readFileSync(activeRunsFile, "utf8"));
+} catch {}
+let reservationStore;
+try {
+  reservationStore = JSON.parse(fs.readFileSync(reservationsFile, "utf8"));
+} catch {}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+function pidFromRunId(runId) {
+  const match = /-(\d+)$/.exec(String(runId || ""));
+  if (!match) return 0;
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+function isRunProcessAlive(runId) {
+  return isPidAlive(pidFromRunId(runId));
+}
+function reservationPids(record) {
+  return [record?.pid, record?.main_pid, record?.acp_pid, record?.cli_pid, record?.feishu_pid]
+    .map((value) => Number(value))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+function isReservationActive(record) {
+  const pids = reservationPids(record);
+  if (pids.some(isPidAlive)) return true;
+  return isRunProcessAlive(record?.run_id);
+}
+const candidateRuns = [
+  ...(Array.isArray(activeRunStore?.runs) ? activeRunStore.runs : []),
+  ...(currentRun?.run_id ? [currentRun] : []),
+];
+const activeAppIds = new Set();
+for (const run of candidateRuns) {
+  if (!isRunProcessAlive(run?.run_id)) continue;
+  for (const pair of Array.isArray(run?.pairs) ? run.pairs : []) {
+    const appId = String(pair?.app_id || "").trim();
+    if (appId) activeAppIds.add(appId);
+  }
+}
+for (const reservation of Array.isArray(reservationStore?.reservations) ? reservationStore.reservations : []) {
+  const runId = String(reservation?.run_id || "");
+  if (runId === currentRunId || !isReservationActive(reservation)) continue;
+  const appId = String(reservation?.app_id || "").trim();
+  if (appId) activeAppIds.add(appId);
+}
+const bots = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
+const seen = new Set();
+for (const bot of bots) {
+  const appId = String(bot?.app_id || "").trim();
+  const profile = String(bot?.profile || "").trim();
+  const name = String(bot?.display_name || appId).trim();
+  const appSecret = String(bot?.app_secret || "").trim();
+  if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
+  if (!appSecret) {
+    continue;
+  }
+  seen.add(appId);
+  console.log([appId, name, profile, appSecret].join("\t"));
+}
+'
+}
+
+reserve_selected_bot() {
+  local app_id="$1"
+  local profile="$2"
+  local bot_name="$3"
+  [ -n "$app_id" ] || agent_fail "cannot reserve empty Feishu bot app id"
+  mkdir -p "$(dirname "$BOT_RESERVATIONS_FILE")"
+  set +e
+  BOT_RESERVATIONS_FILE="$BOT_RESERVATIONS_FILE" CURRENT_RUN_FILE="$CURRENT_RUN_FILE" ACTIVE_RUNS_FILE="$ACTIVE_RUNS_FILE" ONE_CLICK_RUN_ID="$ONE_CLICK_RUN_ID" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_NAME="$bot_name" node -e '
+const fs = require("fs");
+const path = require("path");
+const reservationsFile = process.env.BOT_RESERVATIONS_FILE;
+const runFile = process.env.CURRENT_RUN_FILE;
+const activeRunsFile = process.env.ACTIVE_RUNS_FILE;
+const runId = String(process.env.ONE_CLICK_RUN_ID || "");
+const appId = String(process.env.BOT_APP_ID || "").trim();
+const profile = String(process.env.BOT_PROFILE || "").trim();
+const name = String(process.env.BOT_NAME || appId).trim();
+if (!runId || !appId) process.exit(2);
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
+}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+function pidFromRunId(runId) {
+  const match = /-(\d+)$/.exec(String(runId || ""));
+  if (!match) return 0;
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : 0;
+}
+function isRunProcessAlive(runId) {
+  return isPidAlive(pidFromRunId(runId));
+}
+function reservationPids(record) {
+  return [record?.pid, record?.main_pid, record?.acp_pid, record?.cli_pid, record?.feishu_pid]
+    .map((value) => Number(value))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+function isReservationActive(record) {
+  const pids = reservationPids(record);
+  if (pids.some(isPidAlive)) return true;
+  return isRunProcessAlive(record?.run_id);
+}
+const currentRun = readJson(runFile, null);
+const activeRunStore = readJson(activeRunsFile, { version: 1, runs: [] });
+const reservationStore = readJson(reservationsFile, { version: 1, reservations: [] });
+for (const run of [
+  ...(Array.isArray(activeRunStore?.runs) ? activeRunStore.runs : []),
+  ...(currentRun?.run_id ? [currentRun] : []),
+]) {
+  if (!isRunProcessAlive(run?.run_id)) continue;
+  for (const pair of Array.isArray(run?.pairs) ? run.pairs : []) {
+    if (String(pair?.app_id || "").trim() === appId) {
+      console.error(`Feishu bot ${appId} is already running in another one-click script.`);
+      process.exit(3);
+    }
+  }
+}
+const reservations = [];
+for (const reservation of Array.isArray(reservationStore?.reservations) ? reservationStore.reservations : []) {
+  const reservationRunId = String(reservation?.run_id || "");
+  if (reservationRunId === runId || isReservationActive(reservation)) {
+    reservations.push(reservation);
+  }
+}
+if (reservations.some((reservation) => String(reservation?.app_id || "").trim() === appId && String(reservation?.run_id || "") !== runId)) {
+  console.error(`Feishu bot ${appId} is already selected by another one-click script.`);
+  process.exit(4);
+}
+const next = [
+  ...reservations.filter((reservation) => String(reservation?.run_id || "") !== runId),
+  {
+    run_id: runId,
+    pid: pidFromRunId(runId),
+    main_pid: pidFromRunId(runId),
+    app_id: appId,
+    profile,
+    display_name: name,
+    reserved_at: new Date().toISOString(),
+  },
+];
+fs.mkdirSync(path.dirname(reservationsFile), { recursive: true });
+fs.writeFileSync(reservationsFile, JSON.stringify({ version: 1, reservations: next }, null, 2) + "\n");
+'
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    agent_fail "Feishu bot $app_id is already selected or running; choose another bot or start a new app."
+  fi
+  BOT_RESERVED="true"
+}
+
+release_selected_bot_reservation() {
+  [ "$BOT_RESERVED" = "true" ] || return 0
+  [ -f "$BOT_RESERVATIONS_FILE" ] || return 0
+  BOT_RESERVATIONS_FILE="$BOT_RESERVATIONS_FILE" ONE_CLICK_RUN_ID="$ONE_CLICK_RUN_ID" node -e '
+const fs = require("fs");
+const file = process.env.BOT_RESERVATIONS_FILE;
+const runId = String(process.env.ONE_CLICK_RUN_ID || "");
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const reservations = Array.isArray(parsed?.reservations) ? parsed.reservations : [];
+const next = reservations.filter((reservation) => String(reservation?.run_id || "") !== runId);
+if (next.length !== reservations.length) {
+  fs.writeFileSync(file, JSON.stringify({ version: 1, reservations: next }, null, 2) + "\n");
+}
+'
+}
+
+update_selected_bot_reservation_pids() {
+  [ "$BOT_RESERVED" = "true" ] || return 0
+  [ -f "$BOT_RESERVATIONS_FILE" ] || return 0
+  BOT_RESERVATIONS_FILE="$BOT_RESERVATIONS_FILE" ONE_CLICK_RUN_ID="$ONE_CLICK_RUN_ID" ACP_PID="$ACP_PID" CLI_PID="$CLI_PID" FEISHU_PID="$FEISHU_PID" ACP_TAIL_PID="$ACP_TAIL_PID" CLI_TAIL_PID="$CLI_TAIL_PID" FEISHU_TAIL_PID="$FEISHU_TAIL_PID" node -e '
+const fs = require("fs");
+const file = process.env.BOT_RESERVATIONS_FILE;
+const runId = String(process.env.ONE_CLICK_RUN_ID || "");
+function numberOrUndefined(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : undefined;
+}
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const reservations = Array.isArray(parsed?.reservations) ? parsed.reservations : [];
+let changed = false;
+const next = reservations.map((reservation) => {
+  if (String(reservation?.run_id || "") !== runId) return reservation;
+  changed = true;
+  return {
+    ...reservation,
+    pid: numberOrUndefined(reservation?.pid) || numberOrUndefined(reservation?.main_pid),
+    main_pid: numberOrUndefined(reservation?.main_pid) || numberOrUndefined(reservation?.pid),
+    acp_pid: numberOrUndefined(process.env.ACP_PID),
+    cli_pid: numberOrUndefined(process.env.CLI_PID),
+    feishu_pid: numberOrUndefined(process.env.FEISHU_PID),
+    acp_tail_pid: numberOrUndefined(process.env.ACP_TAIL_PID),
+    cli_tail_pid: numberOrUndefined(process.env.CLI_TAIL_PID),
+    feishu_tail_pid: numberOrUndefined(process.env.FEISHU_TAIL_PID),
+    updated_at: new Date().toISOString(),
+  };
+});
+if (changed) {
+  fs.writeFileSync(file, JSON.stringify({ version: 1, reservations: next }, null, 2) + "\n");
+}
+'
+}
+
+has_saved_bot_configs() {
+  [ -f "$BOT_CONFIG_FILE" ] || return 1
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(1);
+}
+const bots = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
+process.exit(bots.some((bot) => String(bot?.app_id || "").trim() && String(bot?.profile || "").trim()) ? 0 : 1);
+'
+}
+
+task_profile_name_for_app_id() {
+  local app_id="$1"
+  printf 'aamp-feishu-task-%s' "$app_id"
+}
+
+save_bot_config() {
+  local bot_name="$1"
+  local app_id="$2"
+  local profile="$3"
+  local app_secret="${4:-}"
+  mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_USER_AUTH_DOMAINS="$FEISHU_USER_AUTH_DOMAINS" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+const appSecret = String(process.env.BOT_APP_SECRET || "").trim();
+const next = {
+  display_name: process.env.BOT_NAME || process.env.BOT_APP_ID,
+  app_id: process.env.BOT_APP_ID,
+  ...(appSecret ? { app_secret: appSecret } : {}),
+  profile: process.env.BOT_PROFILE,
+  auth_mode: "lark-cli",
+  capabilities: ["im", "task"],
+  domains: String(process.env.FEISHU_USER_AUTH_DOMAINS || "").split(",").map((item) => item.trim()).filter(Boolean),
+  updated_at: new Date().toISOString(),
+};
+let parsed = { version: 1, profiles: [] };
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {}
+const bots = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
+const byAppId = new Map();
+for (const bot of bots) {
+  const appId = String(bot?.app_id || "").trim();
+  if (!appId) continue;
+  byAppId.set(appId, bot);
+}
+const existing = byAppId.get(next.app_id) || {};
+byAppId.set(next.app_id, {
+  ...existing,
+  ...next,
+  app_secret: next.app_secret || existing.app_secret,
+});
+fs.writeFileSync(file, JSON.stringify({ version: 1, profiles: [...byAppId.values()] }, null, 2) + "\n");
+'
+}
+
+remove_bot_config() {
+  local app_id="$1"
+  [ -n "$app_id" ] || return 0
+  [ -f "$BOT_CONFIG_FILE" ] || return 0
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_APP_ID="$app_id" node -e '
+const fs = require("fs");
+const file = process.env.BOT_CONFIG_FILE;
+const appIdToRemove = process.env.BOT_APP_ID;
+let parsed;
+try {
+  parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+const bots = Array.isArray(parsed?.profiles) ? parsed.profiles : [];
+const filtered = bots.filter((bot) => String(bot?.app_id || "").trim() !== appIdToRemove);
+if (filtered.length !== bots.length) {
+  fs.writeFileSync(file, JSON.stringify({ version: 1, profiles: filtered }, null, 2) + "\n");
+}
+'
+}
+
+clean_bot_instance_configs_preserve_mailbox() {
+  local app_id="$1"
+  local profile="$2"
+  [ -n "$app_id" ] || return 0
+  BOT_APP_ID="$app_id" BOT_PROFILE="$profile" HOME_DIR="$HOME" node -e '
+const fs = require("fs");
+const path = require("path");
+
+const appId = String(process.env.BOT_APP_ID || "").trim();
+const profile = String(process.env.BOT_PROFILE || "").trim();
+const home = process.env.HOME_DIR || process.env.HOME;
+const instancesDir = path.join(home, ".aamp", "feishu-bridge", "task-runtime", "instances");
+if (!appId || !fs.existsSync(instancesDir)) process.exit(0);
+
+function normalizeId(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32) || "instance";
+}
+
+function readJson(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return undefined; }
+}
+
+function writeJson(file, value) {
+  fs.writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
+}
+
+function matchesApp(instanceName, config) {
+  if (String(config?.feishu?.appId || "").trim() === appId) return true;
+  const normalizedAppId = normalizeId(appId);
+  return String(instanceName || "").includes(normalizedAppId);
+}
+
+let cleaned = 0;
+for (const entry of fs.readdirSync(instancesDir, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const instanceName = entry.name;
+  const instanceDir = path.join(instancesDir, instanceName);
+  for (const kind of ["im", "task"]) {
+    const configFile = path.join(instanceDir, kind, "config.json");
+    const config = readJson(configFile);
+    if (!config || !matchesApp(instanceName, config)) continue;
+    if (!config.mailbox) continue;
+
+    const cliProfile = profile || String(config?.feishu?.cliProfile || "").trim();
+    if (kind === "task") {
+      config.feishu = {
+        appId,
+        authMode: "lark-cli",
+        ...(cliProfile ? { cliProfile } : {}),
+        userIdType: config?.feishu?.userIdType || "open_id",
+        eventNames: Array.isArray(config?.feishu?.eventNames) && config.feishu.eventNames.length
+          ? config.feishu.eventNames
+          : ["task.task.update_user_access_v2"],
+      };
+    } else {
+      config.feishu = {
+        appId,
+        authMode: "lark-cli",
+        ...(cliProfile ? { cliProfile } : {}),
+      };
+    }
+    writeJson(configFile, config);
+    cleaned += 1;
+  }
+}
+if (cleaned) {
+  console.log(`[aamp-one-click] cleaned ${cleaned} Feishu instance config file(s) for ${appId}, mailbox preserved`);
+}
+'
+}
+
+ensure_lark_cli() {
+  select_lark_cli_bin
+}
+
+lark_cli_candidate_paths() {
+  if [ -n "$AAMP_LARK_CLI_BIN" ]; then
+    printf '%s\n' "$AAMP_LARK_CLI_BIN"
+  fi
+  if [ -x "$NPM_GLOBAL_PREFIX/bin/lark-cli" ]; then
+    printf '%s\n' "$NPM_GLOBAL_PREFIX/bin/lark-cli"
+  fi
+  type -P -a lark-cli 2>/dev/null || true
+}
+
+lark_cli_version_for() {
+  local cli_bin="$1"
+  [ -x "$cli_bin" ] || return 1
+  "$cli_bin" --version 2>/dev/null | sed -E 's/.*version[[:space:]]+([0-9]+([.][0-9]+){0,2}).*/\1/' | head -n 1
+}
+
+lark_cli_version() {
+  [ -n "$LARK_CLI_CMD" ] || return 1
+  lark_cli_version_for "$LARK_CLI_CMD"
+}
+
+version_lt() {
+  VERSION_LEFT="$1" VERSION_RIGHT="$2" node -e '
+const left = String(process.env.VERSION_LEFT || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+const right = String(process.env.VERSION_RIGHT || "0").split(".").map((part) => Number.parseInt(part, 10) || 0);
+const length = Math.max(left.length, right.length);
+for (let index = 0; index < length; index += 1) {
+  const l = left[index] || 0;
+  const r = right[index] || 0;
+  if (l < r) process.exit(0);
+  if (l > r) process.exit(1);
+}
+process.exit(1);
+'
+}
+
+select_lark_cli_bin_from_candidates() {
+  local candidate version seen=""
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in
+      /*) ;;
+      *)
+        agent_detail "lark-cli candidate is not an absolute path: $candidate"
+        continue
+        ;;
+    esac
+    case "\n$seen\n" in
+      *"\n$candidate\n"*) continue ;;
+    esac
+    seen="$seen\n$candidate"
+    version="$(lark_cli_version_for "$candidate" || true)"
+    if [ -n "$version" ]; then
+      agent_detail "lark-cli candidate: $candidate version=$version"
+      if ! version_lt "$version" "$LARK_CLI_MIN_VERSION"; then
+        LARK_CLI_CMD="$candidate"
+        export AAMP_LARK_CLI_BIN="$LARK_CLI_CMD"
+        path_prepend "$(dirname "$LARK_CLI_CMD")"
+        agent_detail "using lark-cli: $LARK_CLI_CMD ($version)"
+        agent_detail "lark-cli config dir: ${LARKSUITE_CLI_CONFIG_DIR:-$AAMP_LARK_CLI_CONFIG_DIR}"
+        return 0
+      fi
+    else
+      agent_detail "lark-cli candidate unavailable: $candidate"
+    fi
+  done < <(lark_cli_candidate_paths)
+  return 1
+}
+
+install_lark_cli_in_isolated_prefix() {
+  agent_log "installing lark-cli to isolated prefix: $NPM_GLOBAL_PREFIX"
+  npm_install_global @larksuite/cli@latest
+}
+
+ensure_lark_cli_after_install_lock() {
+  if select_lark_cli_bin_from_candidates; then
+    return 0
+  fi
+  install_lark_cli_in_isolated_prefix
+}
+
+select_lark_cli_bin() {
+  if [ -n "$LARK_CLI_CMD" ] && [ -x "$LARK_CLI_CMD" ]; then
+    return 0
+  fi
+
+  if select_lark_cli_bin_from_candidates; then
+    return 0
+  fi
+
+  if [ -n "$AAMP_LARK_CLI_BIN" ]; then
+    agent_fail "AAMP_LARK_CLI_BIN does not point to lark-cli >= $LARK_CLI_MIN_VERSION: $AAMP_LARK_CLI_BIN"
+  fi
+
+  with_lark_cli_install_lock ensure_lark_cli_after_install_lock || agent_fail "failed to install lark-cli to $NPM_GLOBAL_PREFIX"
+  hash -r 2>/dev/null || true
+  if select_lark_cli_bin_from_candidates; then
+    return 0
+  fi
+
+  agent_fail "failed to select lark-cli >= $LARK_CLI_MIN_VERSION after isolated install"
+}
+
+ensure_lark_cli_min_version() {
+  select_lark_cli_bin
+}
+
+lark_cli_user_auth_satisfied() {
+  local profile="$1"
+  local status_json auth_check
+  LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
+
+  status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)" || return 1
+
+  set +e
+  auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
+function parseJsonOutput(value, label) {
+  const raw = String(value || "");
+  const start = raw.indexOf("{");
+  if (start < 0) throw new Error(`${label} did not contain JSON`);
+  return JSON.parse(raw.slice(start));
+}
+
+const status = parseJsonOutput(process.env.AUTH_STATUS_JSON, "auth status");
+const user = status?.identities?.user;
+const usableTokenStatuses = new Set(["valid", "needs_refresh"]);
+if (!user?.available || !usableTokenStatuses.has(user?.tokenStatus)) {
+  console.log("lark-cli user auth is not ready or token cannot be refreshed automatically");
+  process.exit(1);
+}
+
+const excludedScopes = new Set(String(process.env.FEISHU_USER_AUTH_EXCLUDES || "").split(",").map((item) => item.trim()).filter(Boolean));
+const requiredScopes = String(process.env.FEISHU_USER_AUTH_REQUIRED_SCOPES || "")
+  .split(/[\s,]+/)
+  .map((item) => item.trim())
+  .filter(Boolean)
+  .filter((scope) => !excludedScopes.has(scope));
+const grantedScopes = new Set(String(user.scope || "").split(/\s+/).filter(Boolean));
+const missing = [...new Set(requiredScopes)].filter((scope) => !grantedScopes.has(scope));
+if (missing.length > 0) {
+  const sample = missing.slice(0, 12).join(", ");
+  console.log(`missing lark-cli user auth scopes (${missing.length}): ${sample}${missing.length > 12 ? ", ..." : ""}`);
+  process.exit(1);
+}
+console.log("ok");
+')"
+  local node_status=$?
+  set -e
+
+  if [ "$node_status" -eq 0 ] && [ "$auth_check" = "ok" ]; then
+    return 0
+  fi
+  [ -n "$auth_check" ] && agent_log "$auth_check"
+  return 1
+}
+
+normalize_lark_cli_auth_excludes() {
+  EXCLUDES="$1" node -e '
+const excludes = String(process.env.EXCLUDES || "").split(",").map((item) => item.trim()).filter(Boolean);
+console.log([...new Set(excludes)].join(","));
+'
+}
+
+auth_scope_tokens=()
+auth_scope_capture="false"
+auth_scope_header=""
+
+auth_scope_token_exists() {
+  local expected="$1"
+  local token
+  for token in ${auth_scope_tokens[@]+"${auth_scope_tokens[@]}"}; do
+    if [ "$token" = "$expected" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+add_auth_scope_tokens() {
+  local text="$1"
+  local token
+
+  text="${text//,/ }"
+  text="${text//[/ }"
+  text="${text//]/ }"
+  text="${text//\"/ }"
+  text="${text//\'/ }"
+  text="${text//;/ }"
+  for token in $text; do
+    token="${token#-}"
+    token="${token#*：}"
+    token="${token#*: }"
+    token="${token//　/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [[ "$token" =~ ^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z0-9_.:-]+$ ]] && ! auth_scope_token_exists "$token"; then
+      auth_scope_tokens+=("$token")
+    fi
+  done
+}
+
+line_has_auth_scope_token() {
+  local text="$1"
+  local token
+
+  text="${text//,/ }"
+  text="${text//[/ }"
+  text="${text//]/ }"
+  text="${text//\"/ }"
+  text="${text//\'/ }"
+  text="${text//;/ }"
+  for token in $text; do
+    token="${token#-}"
+    token="${token#*：}"
+    token="${token#*: }"
+    token="${token//　/}"
+    token="${token#"${token%%[![:space:]]*}"}"
+    token="${token%"${token##*[![:space:]]}"}"
+    if [[ "$token" =~ ^[A-Za-z][A-Za-z0-9_.-]*:[A-Za-z0-9_.:-]+$ ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+flush_lark_cli_auth_scopes() {
+  local total sample
+
+  if [ "$auth_scope_capture" != "true" ]; then
+    return 0
+  fi
+
+  total="${#auth_scope_tokens[@]}"
+  if [ "$total" -eq 0 ]; then
+    printf '%s\n' "$auth_scope_header"
+  elif [ "$total" -eq 1 ]; then
+    printf '%s%s，共计 1 个权限。\n' "$auth_scope_header" "${auth_scope_tokens[0]}"
+  elif [ "$total" -eq 2 ]; then
+    printf '%s%s, %s，共计 2 个权限。\n' "$auth_scope_header" "${auth_scope_tokens[0]}" "${auth_scope_tokens[1]}"
+  else
+    sample="${auth_scope_tokens[0]}, ${auth_scope_tokens[1]}"
+    printf '%s%s 等共计 %s 个权限。\n' "$auth_scope_header" "$sample" "$total"
+  fi
+
+  auth_scope_tokens=()
+  auth_scope_capture="false"
+  auth_scope_header=""
+}
+
+print_lark_cli_auth_output_line() {
+  local line="$1"
+  local after_scopes
+
+  if [[ "$line" == *"本次请求 scopes:"* ]]; then
+    flush_lark_cli_auth_scopes
+    auth_scope_capture="true"
+    auth_scope_tokens=()
+    auth_scope_header="${line%%本次请求 scopes:*}本次请求 scopes: "
+    after_scopes="${line#*本次请求 scopes:}"
+    add_auth_scope_tokens "$after_scopes"
+    return 0
+  fi
+
+  if [ "$auth_scope_capture" = "true" ]; then
+    if [ -z "${line//[[:space:]]/}" ]; then
+      return 0
+    fi
+    if line_has_auth_scope_token "$line"; then
+      add_auth_scope_tokens "$line"
+      return 0
+    fi
+    flush_lark_cli_auth_scopes
+  fi
+
+  printf '%s\n' "$line"
+}
+
+run_lark_cli_auth_login_with_browser_open() {
+  local opened_url=""
+  local line=""
+  local auth_url=""
+
+  set +e
+  "$@" 2>&1 | {
+    while IFS= read -r line; do
+      print_lark_cli_auth_output_line "$line"
+      if [ "${AAMP_AUTO_OPEN_AUTH_URL:-true}" != "false" ] \
+        && [ -z "$opened_url" ] \
+        && command -v open >/dev/null 2>&1 \
+        && [[ "$line" =~ (https://[^[:space:]]+) ]]; then
+        auth_url="${BASH_REMATCH[1]}"
+        opened_url="$auth_url"
+        agent_log "opening Feishu auth URL in browser"
+        open "$auth_url" >/dev/null 2>&1 || agent_log "failed to open auth URL automatically; please open it manually"
+      fi
+    done
+    flush_lark_cli_auth_scopes
+  }
+  local auth_status=${PIPESTATUS[0]}
+  set -e
+  return "$auth_status"
+}
+
+run_lark_cli_auth_login() {
+  local profile="$1"
+  local auth_excludes="$2"
+
+  auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes")"
+  if [ -z "$auth_excludes" ]; then
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+  else
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
+  fi
+}
+
+ensure_lark_cli_profile() {
+  ensure_lark_cli
+  with_lark_cli_config_lock ensure_lark_cli_profile_locked "$@"
+}
+
+ensure_lark_cli_profile_locked() {
+  local app_id="$1"
+  local app_secret="$2"
+  local profile="$3"
+  local auth_excludes
+
+  if "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
+    agent_detail "lark-cli profile already exists: $profile"
+  else
+    [ -n "$app_secret" ] || agent_fail "missing app secret for creating lark-cli profile $profile"
+    agent_log "creating lark-cli profile: $profile"
+    printf '%s\n' "$app_secret" | "$LARK_CLI_CMD" profile add \
+      --name "$profile" \
+      --app-id "$app_id" \
+      --app-secret-stdin
+  fi
+
+  agent_detail "ensuring lark-cli user auth domains for profile: $profile"
+  auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
+  if lark_cli_user_auth_satisfied "$profile"; then
+    agent_detail "lark-cli user auth already has required scopes for profile: $profile"
+  else
+    run_lark_cli_auth_login "$profile" "$auth_excludes"
+  fi
+}
+
+forget_current_bot_after_feishu_start_failure() {
+  agent_log "Feishu bridge failed before ready; removing local bot config for $APP_ID"
+  remove_bot_config "$APP_ID"
+  clean_bot_instance_configs_preserve_mailbox "$APP_ID" "$LARK_CLI_PROFILE"
+  agent_log "Removed local bot config and cleaned stale instance Feishu config while preserving mailbox. Re-run this script and choose 新建应用/选择其他应用 to recreate it."
+}
+
+should_forget_bot_after_feishu_failure() {
+  [ -n "$FEISHU_LOG" ] && [ -f "$FEISHU_LOG" ] || return 1
+
+  if grep -F 'does not contain a readable app secret' "$FEISHU_LOG" >/dev/null 2>&1; then
+    return 0
+  fi
+  if grep -E 'code=99991672|应用尚未开通所需的应用身份权限|action_scope_required' "$FEISHU_LOG" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+forget_current_bot_after_feishu_failure_if_needed() {
+  if should_forget_bot_after_feishu_failure; then
+    forget_current_bot_after_feishu_start_failure
+  else
+    agent_log "Feishu bridge failed before ready; keeping local bot config for $APP_ID"
+  fi
+}
+
+select_existing_bot_or_create() {
+  local app_ids=()
+  local names=()
+  local profiles=()
+  local app_secrets=()
+  local bot_labels=()
+  local app_id name profile app_secret
+  local index create_index selected
+
+  acquire_bot_selection_lock
+  while IFS=$'\t' read -r app_id name profile app_secret; do
+    [ -n "$app_id" ] || continue
+    app_ids+=("$app_id")
+    names+=("${name:-$app_id}")
+    profiles+=("$profile")
+    app_secrets+=("$app_secret")
+    bot_labels+=("${name:-$app_id} ($app_id)")
+  done < <(load_bot_configs)
+
+  if [ "${#app_ids[@]}" -eq 0 ]; then
+    if has_saved_bot_configs; then
+      agent_log "saved Feishu bot(s) are unavailable or already running; choose new app to continue."
+      bot_labels+=("新建应用/选择其他应用")
+      set +e
+      select_bot_menu
+      set -e
+      release_bot_selection_lock
+      register_feishu_app
+      return 0
+    fi
+    release_bot_selection_lock
+    register_feishu_app
+    return 0
+  fi
+
+  create_index=$((${#app_ids[@]} + 1))
+  bot_labels+=("新建应用/选择其他应用")
+
+  set +e
+  select_bot_menu
+  selected=$?
+  set -e
+
+  if [ "$selected" -eq $((create_index - 1)) ]; then
+    release_bot_selection_lock
+    register_feishu_app
+    return 0
+  fi
+
+  index="$selected"
+  APP_ID="${app_ids[$index]}"
+  BOT_NAME="${names[$index]}"
+  LARK_CLI_PROFILE="${profiles[$index]}"
+  APP_SECRET="${app_secrets[$index]:-}"
+  reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$BOT_NAME"
+  release_bot_selection_lock
+  agent_detail "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
+  agent_log "正在检查飞书授权..."
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+}
+
+register_feishu_app() {
+  local workdir
+  local register_script
+  local register_log
+  local register_result_file
+  local register_status
+  local default_name
+  local bot_name
+
+  workdir="$(mktemp -d "${TMPDIR:-/tmp}/aamp-register-feishu-app.XXXXXX")"
+  register_script="$workdir/register-app.mjs"
+  if [ -n "$AAMP_RUN_LOG_DIR" ]; then
+    mkdir -p "$AAMP_RUN_LOG_DIR"
+    register_log="$(mktemp "$AAMP_RUN_LOG_DIR/feishu-register.XXXXXX")"
+  else
+    register_log="$workdir/register-app.log"
+  fi
+  chmod 600 "$register_log" 2>/dev/null || true
+  register_result_file="$workdir/register-app-result.json"
+  default_name="${AGENT} 飞书 CLI"
+
+  agent_detail "preparing Feishu app registration helper"
+  npm_install_register_helper "$workdir"
+
+  cat >"$register_script" <<'NODE'
+import * as lark from '@larksuiteoapi/node-sdk';
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { writeSync } from 'node:fs';
+
+const require = createRequire(import.meta.url);
+const sdkPackage = require('@larksuiteoapi/node-sdk/package.json');
+
+function splitList(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const tenantScopes = splitList(process.env.FEISHU_APP_SCOPES_TENANT);
+const userScopes = splitList(process.env.FEISHU_APP_SCOPES_USER);
+const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
+const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
+const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
+
+function userLog(message) {
+  writeSync(5, `${message}\n`);
+}
+
+console.log(`[aamp-one-click] registerApp sdk=${sdkPackage.version}`);
+console.log(`[aamp-one-click] registerApp appPreset.name=${appName}`);
+console.log(`[aamp-one-click] registerApp addons.counts tenantScopes=${tenantScopes.length} userScopes=${userScopes.length} tenantEvents=${tenantEvents.length} userEvents=${userEvents.length}`);
+
+const addons = {
+  scopes: {
+    tenant: tenantScopes,
+    user: userScopes,
+  },
+  events: {
+    items: {
+      tenant: tenantEvents,
+      user: userEvents,
+    },
+  },
+};
+console.log(`[aamp-one-click] registerApp addons.json=${JSON.stringify(addons)}`);
+
+const result = await lark.registerApp({
+  source: 'aamp-feishu-task-agent',
+  appPreset: {
+    name: appName,
+    desc: 'AAMP Feishu bridge bot',
+  },
+  addons,
+  onQRCodeReady(info) {
+    const url = new URL(info.url);
+    console.log(`[aamp-one-click] registerApp url.has_addons=${url.searchParams.has('addons') ? 'yes' : 'no'}`);
+    console.log(`[aamp-one-click] registerApp url.has_name=${url.searchParams.has('name') ? 'yes' : 'no'}`);
+    if (process.platform === 'darwin') {
+      execFile('open', [info.url], (error) => {
+        if (error) {
+          userLog('[aamp-one-click] 未能自动打开浏览器，请打开以下链接完成飞书 Bot 授权：');
+          userLog(info.url);
+          userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
+          return;
+        }
+        userLog(`[aamp-one-click] 已打开浏览器，请完成飞书 Bot 授权（链接 ${info.expireIn} 秒内有效）`);
+      });
+    } else {
+      userLog('[aamp-one-click] 请打开以下链接完成飞书 Bot 授权：');
+      userLog(info.url);
+      userLog(`[aamp-one-click] 授权链接将在 ${info.expireIn} 秒后过期`);
+    }
+  },
+  onStatusChange(info) {
+    if (info.status === 'polling') return;
+    console.log(`[aamp-one-click] registerApp status: ${info.status}`);
+  },
+});
+
+async function fetchRegisteredAppName(appId, appSecret) {
+  try {
+    const client = new lark.Client({
+      appId,
+      appSecret,
+    });
+    const response = await client.application.application.get({
+      path: { app_id: appId },
+      params: { lang: 'zh_cn', user_id_type: 'open_id' },
+    });
+    const app = response?.data?.app;
+    return app?.app_name || app?.i18n?.find?.((item) => item?.i18n_key === 'zh_cn')?.name || '';
+  } catch (error) {
+    console.log(`[aamp-one-click] failed to fetch registered app name; using preset name: ${error instanceof Error ? error.message : String(error)}`);
+    return '';
+  }
+}
+
+const registeredAppName = await fetchRegisteredAppName(result.client_id, result.client_secret);
+const resultPayload = {
+  app_id: result.client_id,
+  app_secret: result.client_secret,
+  app_name: registeredAppName || appName,
+};
+await import('node:fs/promises').then(({ writeFile }) => writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(resultPayload)));
+console.log(`[aamp-one-click] Feishu app registration completed: ${result.client_id}`);
+console.log(`[aamp-one-click] Feishu app name: ${resultPayload.app_name}`);
+NODE
+
+  agent_log "正在授权飞书 Bot..."
+  set +e
+  AAMP_REGISTER_APP_RESULT_FILE="$register_result_file" \
+    FEISHU_APP_SCOPES_TENANT="$FEISHU_APP_SCOPES_TENANT" \
+    FEISHU_APP_SCOPES_USER="$FEISHU_APP_SCOPES_USER" \
+    FEISHU_APP_EVENTS_TENANT="$FEISHU_APP_EVENTS_TENANT" \
+    FEISHU_APP_EVENTS_USER="$FEISHU_APP_EVENTS_USER" \
+    FEISHU_APP_PRESET_NAME="$default_name" \
+    node "$register_script" 5>&1 >"$register_log" 2>&1
+  register_status=$?
+  set -e
+  if [ "$register_status" -ne 0 ]; then
+    agent_fail "飞书 Bot 授权失败，详细日志：$register_log"
+  fi
+  agent_detail "Feishu app registration log: $register_log"
+
+  [ -s "$register_result_file" ] || agent_fail "failed to get app credentials from Feishu app registration"
+
+  APP_ID="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_id || "")' "$register_result_file")"
+  APP_SECRET="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_secret || "")' "$register_result_file")"
+  bot_name="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_name || "")' "$register_result_file")"
+  : >"$register_result_file"
+  [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
+
+  bot_name="${bot_name:-$default_name}"
+  BOT_NAME="$bot_name"
+  LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
+    agent_detail "Feishu Bot 已授权：$BOT_NAME ($APP_ID)"
+    return 0
+  fi
+  acquire_bot_selection_lock
+  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET"
+  reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$bot_name"
+  release_bot_selection_lock
+  agent_log "saved Feishu task profile config: $bot_name ($APP_ID, profile=$LARK_CLI_PROFILE)"
+}
+
+resolve_feishu_bot_credentials() {
+  select_existing_bot_or_create
+}
+
+ensure_acpx() {
+  if ! command -v acpx >/dev/null 2>&1; then
+    agent_log "acpx not found; installing acpx"
+    npm_install_global acpx --force
+  fi
+  acpx --version >/dev/null
+}
+
+ensure_node_major_at_least() {
+  local required="$1"
+  local major
+  major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || printf '0')"
+  if [ "$major" -lt "$required" ]; then
+    agent_fail "Codem requires Node.js >= $required, current version is $(node --version 2>/dev/null || printf 'unknown')"
+  fi
+}
+
+print_codem_login_notice() {
+  cat >&2 <<NOTICE
+
+============================================================
+[aamp-one-click] CodeM needs Feishu device binding before the service can run.
+[aamp-one-click] Server: $CODEM_SERVER_URL
+[aamp-one-click] If a QR code appears, scan it in Feishu or send the shown /bind command to the CodeM bot.
+============================================================
+
+NOTICE
+}
+
+print_codem_update_notice() {
+  cat >&2 <<NOTICE
+
+============================================================
+[aamp-one-click] CodeM CLI appears to be out of date or using an old login endpoint.
+[aamp-one-click] Running CodeM update automatically, then retrying service start.
+[aamp-one-click] If this still fails, run these commands manually:
+[aamp-one-click]   codem update -y
+[aamp-one-click]   hash -r
+[aamp-one-click]   codem service start
+============================================================
+
+NOTICE
+}
+
+codem_service_output_indicates_update_available() {
+  printf '%s' "$1" | grep -E '发现 CodeM CLI 新版本|CodeM CLI 新版本|codem update' >/dev/null 2>&1
+}
+
+codem_service_output_indicates_login_required() {
+  printf '%s' "$1" | grep -E 'CodeM 尚未登录|尚未登录|oauth/login/create.*404' >/dev/null 2>&1
+}
+
+codem_output_indicates_provider_unauthorized() {
+  printf '%s' "$1" | grep -Ei 'provider error: unauthorized|unauthorized.*check API key|check API key' >/dev/null 2>&1
+}
+
+install_codem_cli() {
+  command -v curl >/dev/null 2>&1 || {
+    agent_log "curl not found; cannot install Codem CLI automatically"
+    return 1
+  }
+
+  ensure_node_major_at_least 20
+  ensure_codem_local_bin_on_path
+  agent_log "installing Codem CLI"
+  printf '%s\n' "$CODEM_INSTALLER_CONFIRM" | bash <(curl -fsSL "$CODEM_INSTALLER_URL")
+  ensure_codem_local_bin_on_path
+  hash -r 2>/dev/null || true
+}
+
+codem_config_migration_reason() {
+  CODEM_CONFIG_FILE="$HOME/.codem/config.json" CODEM_SERVER_URL="$CODEM_SERVER_URL" node -e '
+const fs = require("fs");
+const file = process.env.CODEM_CONFIG_FILE;
+const expectedServer = process.env.CODEM_SERVER_URL;
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch {
+  process.exit(0);
+}
+
+const reasons = [];
+if (config.serverUrl && config.serverUrl !== expectedServer) {
+  reasons.push(`serverUrl=${config.serverUrl}`);
+}
+if (config.user && (!config.auth || config.auth.oauth == null)) {
+  reasons.push("missing_feishu_oauth");
+}
+if (reasons.length > 0) {
+  process.stdout.write(reasons.join(","));
+}
+'
+}
+
+ensure_codem_breaking_change_compat() {
+  local reason
+  reason="$(codem_config_migration_reason)"
+  [ -n "$reason" ] || return 0
+
+  agent_log "detected pre-migration CodeM config ($reason); refreshing CodeM installer and forcing Feishu OAuth login"
+  install_codem_cli || agent_fail "failed to refresh CodeM CLI with installer: $CODEM_INSTALLER_URL"
+  run_codem_login_force_once || agent_fail "codem login --force failed after CodeM service migration. Log: $CODEM_LOGIN_LOG"
+}
+
+ensure_codem_local_bin_on_path() {
+  path_prepend "$CODEM_LOCAL_BIN"
+}
+
+is_cursor_agent_cli() {
+  local candidate="$1"
+  "$candidate" login --help 2>&1 | grep -Fq 'Authenticate with Cursor'
+}
+
+find_cursor_agent_cli() {
+  if command -v cursor-agent >/dev/null 2>&1; then
+    command -v cursor-agent
+    return 0
+  fi
+  if [ -x "$CURSOR_LOCAL_BIN/cursor-agent" ]; then
+    printf '%s\n' "$CURSOR_LOCAL_BIN/cursor-agent"
+    return 0
+  fi
+  if [ -x "$CURSOR_LOCAL_BIN/agent" ] && is_cursor_agent_cli "$CURSOR_LOCAL_BIN/agent"; then
+    printf '%s\n' "$CURSOR_LOCAL_BIN/agent"
+    return 0
+  fi
+  if command -v agent >/dev/null 2>&1; then
+    local agent_bin
+    agent_bin="$(command -v agent)"
+    if is_cursor_agent_cli "$agent_bin"; then
+      printf '%s\n' "$agent_bin"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+resolve_cursor_cli_for_acp() {
+  command -v cursor
+}
+
+ensure_cursor_acp_command() {
+  local cursor_agent
+  local cursor_wrapper
+
+  if resolve_cursor_cli_for_acp >/dev/null 2>&1; then
+    return 0
+  fi
+
+  cursor_agent="$(find_cursor_agent_cli)" || return 1
+  mkdir -p "$NPM_GLOBAL_PREFIX/bin"
+  cursor_wrapper="$NPM_GLOBAL_PREFIX/bin/cursor"
+  agent_log "creating cursor command wrapper for ACP bridge: $cursor_wrapper -> $cursor_agent"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'cursor_agent=%q\n' "$cursor_agent"
+    printf 'exec "$cursor_agent" "$@"\n'
+  } > "$cursor_wrapper"
+  chmod +x "$cursor_wrapper" 2>/dev/null || true
+  hash -r 2>/dev/null || true
+  resolve_cursor_cli_for_acp >/dev/null 2>&1
+}
+
+ensure_agent_cli() {
+  if [ "$AGENT" = "codem" ]; then
+    ensure_codem_local_bin_on_path
+  fi
+
+  if [ "$AGENT" = "cursor" ]; then
+    find_cursor_agent_cli >/dev/null 2>&1 || agent_fail "未检测到 cursor CLI。请先安装 Cursor CLI 后重新运行脚本。"
+    ensure_cursor_acp_command || agent_fail "cursor ACP command is unavailable; check PATH for $NPM_GLOBAL_PREFIX/bin/cursor"
+    return 0
+  fi
+
+  if [ "$AGENT" = "codex" ]; then
+    resolve_codex_cli_for_acp >/dev/null 2>&1 || agent_fail "未检测到 codex CLI。请先安装 Codex CLI 后重新运行脚本。"
+    return 0
+  fi
+
+  command -v "$AGENT" >/dev/null 2>&1 || agent_fail "未检测到 $AGENT CLI。请先安装后重新运行脚本。"
+}
+
+clear_quarantine_path() {
+  is_macos || return 0
+  local target="$1"
+  [ -n "$target" ] || return 0
+  [ -e "$target" ] || [ -L "$target" ] || return 0
+
+  if xattr -dr com.apple.quarantine "$target" 2>/dev/null; then
+    return 0
+  fi
+
+  agent_log "need elevated permission to clear macOS quarantine for $target"
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    sudo xattr -dr com.apple.quarantine "$target" 2>/dev/null && return 0
+  fi
+
+  if command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
+    agent_log "requesting sudo to clear macOS quarantine for $target"
+    sudo xattr -dr com.apple.quarantine "$target" && return 0
+  fi
+
+  agent_log "warning: failed to clear macOS quarantine for $target"
+  agent_log "if macOS blocks this CLI, run: sudo xattr -dr com.apple.quarantine \"$target\""
+  return 1
+}
+
+clear_cli_quarantine() {
+  local label="$1"
+  local bin="$2"
+  is_macos || return 0
+  command -v xattr >/dev/null 2>&1 || return 0
+  [ -n "$bin" ] || return 0
+
+  agent_detail "clearing macOS quarantine attributes for $label CLI"
+  clear_quarantine_path "$bin" || true
+
+  local real
+  real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$bin" 2>/dev/null || true)"
+  if [ -n "$real" ] && [ "$real" != "$bin" ]; then
+    clear_quarantine_path "$real" || true
+  fi
+
+  case "$bin" in
+    /Applications/*.app/*)
+      local app_bundle
+      app_bundle="${bin%%.app/*}.app"
+      clear_quarantine_path "$app_bundle" || true
+      ;;
+  esac
+
+  case "$real" in
+    /Applications/*.app/*)
+      local app_bundle
+      app_bundle="${real%%.app/*}.app"
+      clear_quarantine_path "$app_bundle" || true
+      ;;
+  esac
+}
+
+clear_codex_quarantine() {
+  is_macos || return 0
+
+  local codex_bin
+  codex_bin="$(command -v codex || true)"
+  [ -n "$codex_bin" ] || return 0
+
+  clear_cli_quarantine "codex" "$codex_bin"
+
+  local npm_root
+  npm_root="$("$NPM_BIN" root -g 2>/dev/null || true)"
+  if [ -n "$npm_root" ]; then
+    clear_quarantine_path "$npm_root/@openai/codex" || true
+  fi
+
+  local npm_prefix
+  npm_prefix="$("$NPM_BIN" prefix -g 2>/dev/null || true)"
+  if [ -n "$npm_prefix" ]; then
+    clear_quarantine_path "$npm_prefix/bin/codex" || true
+  fi
+}
+
+clear_cursor_quarantine() {
+  local cursor_bin
+  cursor_bin="$(find_cursor_agent_cli 2>/dev/null || true)"
+  [ -n "$cursor_bin" ] || return 0
+
+  clear_cli_quarantine "cursor" "$cursor_bin"
+}
+
+print_gatekeeper_help() {
+  local label="$1"
+  local bin="$2"
+  local real="$3"
+
+  cat >&2 <<HELP
+
+macOS blocked $label CLI while starting it.
+This is usually caused by Gatekeeper quarantine on the app bundle or CLI binary.
+
+Run these commands, then retry this script:
+  sudo xattr -dr com.apple.quarantine "$bin"
+HELP
+
+  if [ -n "$real" ] && [ "$real" != "$bin" ]; then
+    printf '  sudo xattr -dr com.apple.quarantine "%s"\n' "$real" >&2
+  fi
+
+  case "$bin" in
+    /Applications/*.app/*)
+      printf '  sudo xattr -dr com.apple.quarantine "%s"\n' "${bin%%.app/*}.app" >&2
+      ;;
+  esac
+
+  case "$real" in
+    /Applications/*.app/*)
+      printf '  sudo xattr -dr com.apple.quarantine "%s"\n' "${real%%.app/*}.app" >&2
+      ;;
+  esac
+
+  printf '\n' >&2
+}
+
+print_codex_gatekeeper_help() {
+  print_gatekeeper_help "codex" "$1" "$2"
+}
+
+codex_cli_version() {
+  local codex_bin="$1"
+  "$codex_bin" --version 2>>"$ONE_CLICK_LOG" | head -n 1 | tr -d '\r'
+}
+
+codex_cli_version_number() {
+  local codex_bin="$1"
+  codex_cli_version "$codex_bin" | sed -nE 's/.*([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*).*/\1/p' | head -n 1
+}
+
+resolve_latest_codex_cli_version() {
+  [ -n "$NPM_BIN" ] || return 1
+  sanitize_inherited_npm_exec_env
+  "$NPM_BIN" view "$CODEX_NPM_PACKAGE@latest" version \
+    --registry "$NPM_REGISTRY" \
+    --cache "$NPM_CACHE_DIR" \
+    --prefix "$NPM_GLOBAL_PREFIX" 2>>"$ONE_CLICK_LOG" | tail -n 1 | tr -d '[:space:]'
+}
+
+codex_cli_update_available() {
+  CODEX_CURRENT_VERSION="$1" CODEX_LATEST_VERSION="$2" node -e '
+function parse(value) {
+  const match = String(value || "").match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    core: [Number(match[1]), Number(match[2]), Number(match[3])],
+    prerelease: match[4] ? match[4].split(".") : [],
+  };
+}
+function compareIdentifiers(left, right) {
+  const leftNumeric = /^\d+$/.test(left);
+  const rightNumeric = /^\d+$/.test(right);
+  if (leftNumeric && rightNumeric) return Number(left) - Number(right);
+  if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+  return left.localeCompare(right);
+}
+function compare(left, right) {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] - right.core[index];
+  }
+  if (left.prerelease.length === 0 || right.prerelease.length === 0) {
+    if (left.prerelease.length === right.prerelease.length) return 0;
+    return left.prerelease.length === 0 ? 1 : -1;
+  }
+  const count = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < count; index += 1) {
+    if (left.prerelease[index] === undefined) return -1;
+    if (right.prerelease[index] === undefined) return 1;
+    const result = compareIdentifiers(left.prerelease[index], right.prerelease[index]);
+    if (result !== 0) return result;
+  }
+  return 0;
+}
+const current = parse(process.env.CODEX_CURRENT_VERSION);
+const latest = parse(process.env.CODEX_LATEST_VERSION);
+if (!current || !latest) process.exit(2);
+process.exit(compare(latest, current) > 0 ? 0 : 1);
+'
+}
+
+acquire_codex_update_lock() {
+  local attempt owner owner_pid
+  mkdir -p "$(dirname "$CODEX_UPDATE_LOCK_DIR")"
+  for attempt in $(seq 1 50); do
+    if mkdir "$CODEX_UPDATE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$ONE_CLICK_RUN_ID" >"$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true
+      return 0
+    fi
+    owner="$(cat "$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true)"
+    owner_pid="${owner##*-}"
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$owner" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+      rm -f "$CODEX_UPDATE_LOCK_DIR/owner" 2>/dev/null || true
+      rmdir "$CODEX_UPDATE_LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+run_codex_cli_update() {
+  local codex_bin="$1"
+  local status
+  acquire_codex_update_lock || return 75
+  if "$codex_bin" update >>"$ONE_CLICK_LOG" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  release_dir_lock "$CODEX_UPDATE_LOCK_DIR"
+  return "$status"
+}
+
+confirm_codex_cli_update() {
+  local answer tty_path
+  tty_path="${AAMP_CODEX_UPDATE_TTY:-/dev/tty}"
+  if ! exec 5<>"$tty_path"; then
+    return 2
+  fi
+  printf '是否现在升级？[y/n] ' >&5
+  if ! IFS= read -r answer <&5; then
+    exec 5>&-
+    return 2
+  fi
+  exec 5>&-
+  case "$answer" in
+    y|Y) return 0 ;;
+    n|N) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_codex_cli_updated() {
+  [ "$AGENT" = "codex" ] || return 0
+  [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
+
+  local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 0
+  version_before="$(codex_cli_version_number "$codex_bin" || true)"
+  latest_version="$(resolve_latest_codex_cli_version || true)"
+  version_line="当前 Codex CLI 版本是：${version_before:-未知}，最新版本是：${latest_version:-获取失败}"
+  write_one_click_log "[aamp-one-click] $version_line"
+  agent_detail "checking Codex CLI update: path=$codex_bin version=${version_before:-unknown}"
+
+  if codex_cli_update_available "$version_before" "$latest_version"; then
+    comparison_status=0
+  else
+    comparison_status=$?
+  fi
+  if [ "$comparison_status" -eq 1 ]; then
+    printf '%s\n' "$version_line"
+    agent_detail "Codex CLI is already current: current=${version_before:-unknown} latest=${latest_version:-unknown}"
+    return 0
+  fi
+  if [ "$comparison_status" -ne 0 ]; then
+    agent_detail "warning: unable to compare Codex CLI versions; skipping update"
+    return 0
+  fi
+
+  printf '%s\n' "$version_line"
+  printf '%s\n' '检测到 Codex CLI 有可用更新。不升级可能导致后续任务执行失败，本次启动前需升级 Codex CLI。'
+  if confirm_codex_cli_update; then
+    confirmation_status=0
+  else
+    confirmation_status=$?
+  fi
+  if [ "$confirmation_status" -eq 2 ]; then
+    agent_fail "Codex CLI 升级需要用户确认。请在交互终端中重新运行本次启动。"
+  fi
+  if [ "$confirmation_status" -ne 0 ]; then
+    agent_fail "已取消 Codex CLI 升级，本次启动已终止。"
+  fi
+
+  agent_log "正在更新 Codex CLI..."
+  if run_codex_cli_update "$codex_bin"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -ne 0 ]; then
+    agent_fail "Codex CLI 升级失败（状态码：${status}），本次启动已终止。"
+  fi
+
+  refreshed_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$refreshed_bin" ] || refreshed_bin="$codex_bin"
+  version_after="$(codex_cli_version_number "$refreshed_bin" || true)"
+  agent_detail "Codex CLI update completed: path=$refreshed_bin version=${version_after:-unknown}"
+  if codex_cli_update_available "$version_after" "$latest_version"; then
+    agent_fail "Codex CLI 升级未生效（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+  else
+    comparison_status=$?
+  fi
+  if [ "$comparison_status" -ne 1 ]; then
+    agent_fail "无法验证 Codex CLI 升级结果（当前版本：${version_after:-未知}，目标版本：${latest_version}），本次启动已终止。"
+  fi
+}
+
+run_codex_login_status() {
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 127
+
+  set +e
+  "$codex_bin" login status >/dev/null 2>&1
+  local status=$?
+  set -e
+  if [ "$status" -eq 137 ] && is_macos; then
+    local codex_real
+    codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
+    print_codex_gatekeeper_help "$codex_bin" "$codex_real"
+    agent_fail "codex CLI was killed by macOS security policy"
+  fi
+  return "$status"
+}
+
+run_codex_login() {
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp || true)"
+  [ -n "$codex_bin" ] || return 127
+
+  set +e
+  "$codex_bin" login
+  local status=$?
+  set -e
+  if [ "$status" -eq 137 ] && is_macos; then
+    local codex_real
+    codex_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$codex_bin" 2>/dev/null || true)"
+    print_codex_gatekeeper_help "$codex_bin" "$codex_real"
+    agent_fail "codex CLI was killed by macOS security policy"
+  fi
+  return "$status"
+}
+
+print_cursor_gatekeeper_help() {
+  local cursor_bin
+  local cursor_real
+  cursor_bin="$(find_cursor_agent_cli 2>/dev/null || true)"
+  cursor_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$cursor_bin" 2>/dev/null || true)"
+  print_gatekeeper_help "cursor" "$cursor_bin" "$cursor_real"
+}
+
+run_cursor_command() {
+  local cursor_bin
+  cursor_bin="$(find_cursor_agent_cli)" || return 127
+  "$cursor_bin" "$@"
+}
+
+run_cursor_login_status() {
+  local output
+  set +e
+  output="$(run_cursor_command status 2>&1)"
+  local status=$?
+  set -e
+  if [ "$status" -eq 137 ] && is_macos; then
+    print_cursor_gatekeeper_help
+    agent_fail "cursor CLI was killed by macOS security policy"
+  fi
+  if [ "$status" -ne 0 ]; then
+    return "$status"
+  fi
+
+  case "$output" in
+    *"Not logged in"*|*"not logged in"*|*"Logged out"*|*"logged out"*)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+run_cursor_login() {
+  set +e
+  run_cursor_command login
+  local status=$?
+  set -e
+  if [ "$status" -eq 137 ] && is_macos; then
+    print_cursor_gatekeeper_help
+    agent_fail "cursor CLI was killed by macOS security policy"
+  fi
+  return "$status"
+}
+
+codem_login_output_indicates_bound() {
+  [ -n "$CODEM_LOGIN_LOG" ] || return 1
+  grep -E '绑定成功|已经绑定过设备|already bound|already.*bind|bound.*device' "$CODEM_LOGIN_LOG" >/dev/null 2>&1
+}
+
+run_codem_service_start() {
+  local output
+  set +e
+  output="$(codem service start 2>&1)"
+  local status=$?
+  set -e
+  CODEM_SERVICE_START_OUTPUT="$output"
+  if [ "$status" -eq 0 ]; then
+    agent_log "codem service is running"
+    return 0
+  fi
+
+  agent_log "codem service start failed: $output"
+  if codem_service_output_indicates_update_available "$output"; then
+    print_codem_update_notice
+  fi
+  return "$status"
+}
+
+run_codem_update_once() {
+  if [ "$CODEM_AUTO_UPDATE_DONE" = "true" ]; then
+    agent_log "codem update was already attempted in this run; not retrying update"
+    return 1
+  fi
+
+  CODEM_AUTO_UPDATE_DONE="true"
+  agent_log "running codem update"
+  set +e
+  codem update -y
+  local status=$?
+  set -e
+  hash -r 2>/dev/null || true
+  ensure_codem_local_bin_on_path
+  if [ "$status" -ne 0 ]; then
+    agent_log "codem update failed with status $status"
+    return "$status"
+  fi
+  agent_log "codem update completed"
+  return 0
+}
+
+run_codem_service_start_with_auto_update() {
+  if run_codem_service_start; then
+    return 0
+  fi
+
+  if codem_service_output_indicates_update_available "$CODEM_SERVICE_START_OUTPUT"; then
+    if run_codem_update_once; then
+      run_codem_service_start && return 0
+    fi
+  fi
+
+  return 1
+}
+
+run_codem_login() {
+  CODEM_LOGIN_LOG="$(run_log_file "codem-login.log")"
+  print_codem_login_notice
+  set +e
+  codem login --server "$CODEM_SERVER_URL" 2>&1 | tee "$CODEM_LOGIN_LOG"
+  local status=${PIPESTATUS[0]}
+  set -e
+  return "$status"
+}
+
+run_codem_login_force_once() {
+  if [ "$CODEM_FORCE_LOGIN_DONE" = "true" ]; then
+    agent_log "codem login --force was already attempted in this run; not retrying force login"
+    return 1
+  fi
+
+  CODEM_FORCE_LOGIN_DONE="true"
+  CODEM_LOGIN_LOG="$(run_log_file "codem-login-force.log")"
+  agent_log "codem still reports login is required after normal login; starting codem login --force"
+  print_codem_login_notice
+  set +e
+  codem login --force --server "$CODEM_SERVER_URL" 2>&1 | tee "$CODEM_LOGIN_LOG"
+  local status=${PIPESTATUS[0]}
+  set -e
+  return "$status"
+}
+
+print_codem_provider_auth_notice() {
+  cat >&2 <<NOTICE
+
+============================================================
+[aamp-one-click] CodeM provider authorization check failed.
+[aamp-one-click] CodeM service is running, but the selected model/provider returned unauthorized.
+[aamp-one-click] This is usually caused by an old CodeM installation, stale login, or an unavailable selected model.
+[aamp-one-click] The script will refresh CodeM and force login once, then retry the provider check.
+[aamp-one-click] If it still fails, run these commands manually:
+[aamp-one-click]   curl -fsSL $CODEM_INSTALLER_URL | bash
+[aamp-one-click]   codem login --force --server "$CODEM_SERVER_URL"
+[aamp-one-click]   codem select-model
+[aamp-one-click]   codem service start
+============================================================
+
+NOTICE
+}
+
+run_codem_provider_preflight() {
+  [ "$CODEM_PROVIDER_PREFLIGHT" = "false" ] && {
+    agent_log "codem provider preflight disabled by CODEM_PROVIDER_PREFLIGHT=false"
+    return 0
+  }
+
+  local session
+  local output_file
+  local output
+  local status
+  local pid
+  local waited
+  local prompt
+  session="aamp-codem-preflight-$(date +%s)-$$"
+  output_file="$(run_log_file "codem-preflight.log")"
+  agent_log "checking CodeM provider authorization with isolated session: $session"
+  prompt="Use the bash tool to run: echo AAMP_CODEM_PREFLIGHT_TOOL_OK. After the tool result is available, reply exactly: AAMP_CODEM_PREFLIGHT_FINAL_OK"
+
+  set +e
+  codem -p "$prompt" --sse --yolo --session "$session" >"$output_file" 2>&1 &
+  pid=$!
+  waited=0
+  status=0
+  while kill -0 "$pid" >/dev/null 2>&1; do
+    if [ "$waited" -ge "$CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS" ]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1
+      status=124
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if [ "$status" -ne 124 ]; then
+    wait "$pid"
+    status=$?
+  fi
+  set -e
+
+  output="$(cat "$output_file" 2>/dev/null || true)"
+  rm -f "$output_file" 2>/dev/null || true
+
+  if [ "$status" -eq 0 ] && printf '%s' "$output" | grep -F 'AAMP_CODEM_PREFLIGHT_FINAL_OK' >/dev/null 2>&1; then
+    agent_log "codem provider authorization check passed"
+    return 0
+  fi
+
+  if codem_output_indicates_provider_unauthorized "$output"; then
+    agent_log "codem provider authorization check failed: unauthorized"
+    return 2
+  fi
+
+  if [ "$status" -eq 124 ]; then
+    agent_log "codem provider authorization check timed out after ${CODEM_PROVIDER_PREFLIGHT_TIMEOUT_SECONDS}s; continuing"
+    return 0
+  fi
+
+  if [ "$status" -eq 0 ]; then
+    agent_log "codem provider authorization check did not produce final marker; continuing. Output: $output"
+    return 0
+  fi
+
+  agent_log "codem provider authorization check returned status $status; continuing. Output: $output"
+  return 0
+}
+
+recover_codem_provider_auth_once() {
+  if [ "$CODEM_PROVIDER_RECOVERY_DONE" = "true" ]; then
+    agent_log "codem provider recovery was already attempted in this run; not retrying"
+    return 1
+  fi
+
+  CODEM_PROVIDER_RECOVERY_DONE="true"
+  print_codem_provider_auth_notice
+  install_codem_cli || agent_log "warning: failed to refresh CodeM CLI with installer: $CODEM_INSTALLER_URL"
+  run_codem_login_force_once || agent_log "warning: codem login --force failed. Log: $CODEM_LOGIN_LOG"
+  run_codem_service_start_with_auto_update || agent_log "warning: codem service start still failed after provider recovery"
+}
+
+ensure_codem_provider_ready() {
+  local status
+  set +e
+  run_codem_provider_preflight
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$status" -ne 2 ]; then
+    return "$status"
+  fi
+
+  recover_codem_provider_auth_once || true
+
+  set +e
+  run_codem_provider_preflight
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$status" -eq 2 ]; then
+    agent_fail "codem provider authorization is still failing; run 'codem select-model' or refresh/login CodeM manually, then restart this script"
+  fi
+  return "$status"
+}
+
+ensure_agent_login() {
+  case "$AGENT" in
+    codex)
+      clear_codex_quarantine
+      if ! run_codex_login_status; then
+        agent_log "codex CLI 未登录，正在启动登录流程。"
+        run_codex_login || agent_fail "codex CLI 登录失败。请先执行 'codex login' 完成登录后重新运行脚本。"
+        run_codex_login_status || agent_fail "codex CLI 仍未登录。请先执行 'codex login' 完成登录后重新运行脚本。"
+      fi
+      ;;
+    cursor)
+      clear_cursor_quarantine
+      if run_cursor_login_status; then
+        agent_detail "cursor CLI is already logged in"
+      else
+        agent_log "cursor CLI 未登录，正在启动登录流程。"
+        run_cursor_login || agent_fail "cursor CLI 登录失败。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
+        run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
+      fi
+      ;;
+    codem)
+      ensure_codem_local_bin_on_path
+      codem --version >/dev/null
+      ensure_codem_breaking_change_compat
+      if run_codem_service_start_with_auto_update; then
+        agent_log "codem service is ready; continuing"
+        ensure_codem_provider_ready
+        return 0
+      fi
+      if codem_service_output_indicates_update_available "$CODEM_SERVICE_START_OUTPUT"; then
+        agent_fail "codem service start failed after attempting CodeM update; run 'codem update -y' and 'codem service start' manually to inspect the error"
+      fi
+
+      agent_log "codem service is not ready; checking Codem device binding"
+      if codem_service_output_indicates_login_required "$CODEM_SERVICE_START_OUTPUT"; then
+        agent_log "codem service reports login is required; starting explicit codem login"
+      fi
+      if ! run_codem_login && ! codem_login_output_indicates_bound; then
+        agent_fail "codem login failed. Log: $CODEM_LOGIN_LOG"
+      fi
+      if run_codem_service_start_with_auto_update; then
+        agent_log "codem device is bound and service is running; continuing"
+        ensure_codem_provider_ready
+        return 0
+      fi
+      if codem_service_output_indicates_login_required "$CODEM_SERVICE_START_OUTPUT"; then
+        run_codem_login_force_once || agent_fail "codem login --force failed. Log: $CODEM_LOGIN_LOG"
+      fi
+      run_codem_service_start_with_auto_update || {
+        if codem_service_output_indicates_update_available "$CODEM_SERVICE_START_OUTPUT"; then
+          agent_fail "codem service start failed after attempting CodeM update; run 'codem update -y' and 'codem service start' manually to inspect the error"
+        fi
+        agent_fail "codem service start failed after binding check; run 'codem service start' manually to inspect the error"
+      }
+      agent_log "codem device is bound and service is running; continuing"
+      ensure_codem_provider_ready
+      ;;
+    claude|gemini)
+      "$AGENT" --version >/dev/null
+      ;;
+    *)
+      "$AGENT" --version >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
+run_acp_bridge() {
+  npx_package --package "$ACP_BRIDGE_PKG" aamp-acp-bridge "$@"
+}
+
+run_cli_bridge() {
+  npx_package --package "$CLI_BRIDGE_PKG" aamp-cli-bridge "$@"
+}
+
+run_feishu_bridge() {
+  npx_package --package "$FEISHU_BRIDGE_PKG" aamp-feishu-bridge "$@"
+}
+
+uses_cli_bridge() {
+  [ "$AGENT" = "codem" ]
+}
+
+resolve_codex_cli_for_acp() {
+  if command -v codex >/dev/null 2>&1; then
+    command -v codex
+    return 0
+  fi
+
+  if is_macos && [ -x "$CODEX_APP_CLI" ]; then
+    printf '%s\n' "$CODEX_APP_CLI"
+    return 0
+  fi
+
+  return 1
+}
+
+build_acp_agent_command() {
+  ACP_AGENT_COMMAND="$AGENT"
+  if [ "$AGENT" != "codex" ]; then
+    return 0
+  fi
+
+  local codex_bin
+  codex_bin="$(resolve_codex_cli_for_acp)" || agent_fail "codex CLI is unavailable after installation"
+  ACP_AGENT_COMMAND="env CODEX_PATH=$codex_bin npx -y $CODEX_ACP_PKG"
+  agent_detail "using fixed Codex ACP command: CODEX_PATH=$codex_bin $CODEX_ACP_PKG"
+}
+
+validate_codex_acp_command() {
+  [ "$AGENT" = "codex" ] || return 0
+
+  local output
+  set +e
+  output="$(acpx --approve-all --cwd "$PWD" --timeout 30 --agent "$ACP_AGENT_COMMAND" sessions ensure --name aamp-one-click-probe 2>&1)"
+  local status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    agent_log "Codex ACP command validation failed:"
+    printf '%s\n' "$output" >&2
+    agent_fail "codex ACP command is unavailable; check Codex.app or reinstall codex CLI"
+  fi
+}
+
+start_acp_bridge_and_capture_pairing_url() {
+  ACP_LOG="$(run_log_file "acp-bridge.jsonl")"
+  write_run_manifest
+  agent_log "正在启动 $AGENT 本地桥接..."
+  agent_detail "initializing ACP bridge; log: $ACP_LOG"
+
+  local init_payload
+  local init_output
+  init_payload="$(AAMP_HOST="$AAMP_HOST" AGENT="$AGENT" ACP_AGENT_COMMAND="$ACP_AGENT_COMMAND" node -e 'process.stdout.write(JSON.stringify({ aampHost: process.env.AAMP_HOST, agents: [{ name: process.env.AGENT, acpCommand: process.env.ACP_AGENT_COMMAND, createPairing: true }] }))')"
+
+  set +e
+  init_output="$(printf '%s' "$init_payload" | run_acp_bridge init --json 2>&1)"
+  local init_status=$?
+  set -e
+  printf '%s\n' "$init_output" | tee "$ACP_LOG" >/dev/null
+  if [ "$init_status" -ne 0 ]; then
+    agent_fail "ACP bridge init failed. Log: $ACP_LOG"
+  fi
+
+  PAIRING_URL="$(printf '%s' "$init_output" | node -e 'let input = ""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => { const start = input.indexOf("{"); const end = input.lastIndexOf("}"); if (start < 0 || end < start) return; const data = JSON.parse(input.slice(start, end + 1)); process.stdout.write(data.agents?.[0]?.pairing?.connectUrl || ""); });')"
+  [ -n "$PAIRING_URL" ] || agent_fail "ACP bridge init did not return a pairing URL. Log: $ACP_LOG"
+  AGENT_BRIDGE_EMAIL="$(printf '%s' "$init_output" | extract_agent_email_from_acp_init_output)"
+  if [ -z "$AGENT_BRIDGE_EMAIL" ]; then
+    AGENT_BRIDGE_EMAIL="$(extract_email_from_pairing_url "$PAIRING_URL")"
+  fi
+  write_run_manifest
+  agent_detail "captured Pairing URL"
+
+  agent_detail "starting ACP bridge; log: $ACP_LOG"
+  local command=(
+    start
+    --agent "$AGENT"
+  )
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
+
+  start_logged_bridge "$ACP_LOG" ACP_TAIL_PID append run_acp_bridge "${command[@]}"
+  ACP_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
+
+  for _ in $(seq 1 90); do
+    if ! kill -0 "$ACP_PID" 2>/dev/null; then
+      agent_fail "ACP bridge exited before becoming ready. Log: $ACP_LOG"
+    fi
+    if grep -E 'Bridge running with|agent\(s\):' "$ACP_LOG" >/dev/null 2>&1; then
+      agent_detail "ACP bridge is ready"
+      return 0
+    fi
+    sleep 1
+  done
+
+  agent_fail "timed out waiting for ACP bridge readiness. Log: $ACP_LOG"
+}
+
+start_cli_bridge_and_capture_pairing_url() {
+  CLI_LOG="$(run_log_file "cli-bridge.jsonl")"
+  write_run_manifest
+  agent_log "正在启动 $AGENT 本地桥接..."
+  agent_detail "starting CLI bridge; log: $CLI_LOG"
+  if [ "$DEBUG_MODE" = "true" ]; then
+    export AAMP_CLI_BRIDGE_DEBUG_TASK=1
+    export AAMP_CLI_BRIDGE_DEBUG_PROMPT=1
+    export AAMP_CLI_BRIDGE_DEBUG_RESULT=1
+    export AAMP_CLI_BRIDGE_DEBUG_CLI=1
+    agent_log "CLI bridge debug logging enabled: raw prompt/result will be written to $CLI_LOG"
+  fi
+
+  local command=(
+    init
+    --agent "$AGENT"
+    --aamp-host "$AAMP_HOST"
+    --connection-setup pairing-code
+  )
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
+
+  start_logged_bridge "$CLI_LOG" CLI_TAIL_PID write run_cli_bridge "${command[@]}"
+  CLI_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
+
+  for _ in $(seq 1 90); do
+    if ! kill -0 "$CLI_PID" 2>/dev/null; then
+      agent_fail "CLI bridge exited before emitting Pairing URL. Log: $CLI_LOG"
+    fi
+    PAIRING_URL="$(grep -Eo 'aamp://connect[^[:space:]]+' "$CLI_LOG" | tail -1 || true)"
+    if [ -n "$PAIRING_URL" ]; then
+      AGENT_BRIDGE_EMAIL="$(extract_email_from_pairing_url "$PAIRING_URL")"
+      write_run_manifest
+      agent_detail "captured Pairing URL"
+      return 0
+    fi
+    sleep 1
+  done
+
+  agent_fail "timed out waiting for Pairing URL. Log: $CLI_LOG"
+}
+
+start_feishu_task_bridge() {
+  FEISHU_LOG="$(run_log_file "feishu-bridge.jsonl")"
+  write_run_manifest
+  agent_log "正在连接飞书任务..."
+  agent_detail "starting Feishu bridge with task enabled; log: $FEISHU_LOG"
+  agent_detail "Feishu bridge profile: app=$APP_ID lark-cli-profile=$LARK_CLI_PROFILE use-feishu-cli=yes"
+  local command=(
+    start
+    --enable-task
+    --aamp-host "$AAMP_HOST" \
+    --agent "$AGENT" \
+    --app-id "$APP_ID" \
+    --use-feishu-cli \
+    --feishu-cli-profile "$LARK_CLI_PROFILE" \
+    --feishu-cli-bin "$LARK_CLI_CMD" \
+    --pairing-url "$PAIRING_URL"
+  )
+
+  if [ -n "$APP_SECRET" ]; then
+    command+=(--app-secret "$APP_SECRET")
+  fi
+  if [ "$DEBUG_MODE" = "true" ]; then
+    command+=(--debug)
+  fi
+
+  start_logged_bridge "$FEISHU_LOG" FEISHU_TAIL_PID write run_feishu_bridge "${command[@]}"
+  FEISHU_PID="$STARTED_BRIDGE_PID"
+  update_selected_bot_reservation_pids
+  maybe_mock_fail "feishu-bridge"
+
+  for _ in $(seq 1 90); do
+    if ! kill -0 "$FEISHU_PID" 2>/dev/null; then
+      agent_log "Feishu bridge exited before becoming ready. Log: $FEISHU_LOG"
+      agent_log "last 80 lines from Feishu bridge log:"
+      tail -80 "$FEISHU_LOG" >&2 || true
+      forget_current_bot_after_feishu_failure_if_needed
+      agent_fail "Feishu bridge exited before ready"
+    fi
+
+    if [ -z "$FEISHU_BRIDGE_EMAIL" ]; then
+      FEISHU_BRIDGE_EMAIL="$(extract_feishu_email_from_log "$FEISHU_LOG")"
+      if [ -n "$FEISHU_BRIDGE_EMAIL" ]; then
+        write_run_manifest
+      fi
+    fi
+
+    if grep -E 'Feishu bridge IM \+ Task is running for|bridge.task_runtime.running|\[feishu\] listener started|\[feishu ws\] connected' "$FEISHU_LOG" >/dev/null 2>&1; then
+      if [ -z "$FEISHU_BRIDGE_EMAIL" ]; then
+        FEISHU_BRIDGE_EMAIL="$(extract_feishu_email_from_log "$FEISHU_LOG")"
+      fi
+      write_run_manifest
+      agent_detail "Feishu bridge is ready. Keep this terminal open. Press Ctrl+C to stop."
+      agent_success
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  agent_log "timed out waiting for Feishu bridge readiness. Log: $FEISHU_LOG"
+  agent_log "last 80 lines from Feishu bridge log:"
+  tail -80 "$FEISHU_LOG" >&2 || true
+  forget_current_bot_after_feishu_failure_if_needed
+  agent_fail "timed out waiting for Feishu bridge readiness"
+}
+
+emit_internal_result() {
+  local payload="$1"
+  printf '%s\n' "$payload" >&"$AAMP_TASK_INTERNAL_RESULT_FD"
+}
+
+binding_json_field() {
+  local path_value="$1"
+  printf '%s' "${AAMP_TASK_INTERNAL_BINDING_JSON:-}" | AAMP_BINDING_PATH="$path_value" node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+const data = JSON.parse(input || "{}");
+const value = String(process.env.AAMP_BINDING_PATH || "")
+  .split(".")
+  .filter(Boolean)
+  .reduce((current, key) => current == null ? undefined : current[key], data);
+if (value !== undefined && value !== null) process.stdout.write(String(value));
+});
+'
+}
+
+run_internal_discover_agents() {
+  local agents=()
+  if agent_cli_detected codex; then
+    agents+=("codex")
+  fi
+  if agent_cli_detected cursor; then
+    agents+=("cursor")
+  fi
+  local joined=""
+  if [ "${#agents[@]}" -gt 0 ]; then
+    joined="$(IFS=,; printf '%s' "${agents[*]}")"
+  fi
+  AAMP_DISCOVERED_AGENTS="$joined" node -e '
+const agents = String(process.env.AAMP_DISCOVERED_AGENTS || "").split(",").filter(Boolean);
+process.stdout.write(JSON.stringify({ agents }));
+' >&"$AAMP_TASK_INTERNAL_RESULT_FD"
+}
+
+prepare_internal_agent_environment() {
+  [ -n "$AGENT" ] || agent_fail "internal Agent preparation requires --agent"
+  validate_agent_name "$AGENT"
+  source_lark_env
+  ensure_agent_cli
+}
+
+run_internal_register_binding() {
+  [ -n "$AGENT" ] || agent_fail "internal Bot registration requires --agent"
+  validate_agent_name "$AGENT"
+  source_lark_env
+  register_feishu_app
+  emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\"}"
+}
+
+run_internal_prepare_agent() {
+  prepare_internal_agent_environment
+  ensure_codex_cli_updated
+  ensure_agent_login
+  maybe_mock_fail "agent-login"
+  ensure_acpx
+  build_acp_agent_command
+  emit_internal_result "{\"agent_type\":\"$(json_escape "$AGENT")\",\"acp_command\":\"$(json_escape "$ACP_AGENT_COMMAND")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+}
+
+run_internal_ensure_profile() {
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  IFS= read -r AAMP_TASK_INTERNAL_BINDING_JSON <&"$AAMP_TASK_INTERNAL_INPUT_FD" || true
+  [ -n "$AAMP_TASK_INTERNAL_BINDING_JSON" ] || agent_fail "missing internal binding payload"
+  APP_ID="$(binding_json_field bot.app_id)"
+  APP_SECRET="$(binding_json_field bot.app_secret)"
+  BOT_NAME="$(binding_json_field bot.display_name)"
+  LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
+  [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu credentials or profile"
+  AAMP_TASK_INTERNAL_BINDING_JSON=""
+  source_lark_env
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  APP_SECRET=""
+  emit_internal_result "{\"lark_cli_bin\":\"$(json_escape "$LARK_CLI_CMD")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
+}
+
+run_internal_action() {
+  AAMP_TASK_INTERNAL="true"
+  ensure_node_toolchain
+  case "$AAMP_TASK_ACTION" in
+    __discover-agents)
+      run_internal_discover_agents
+      ;;
+    __register-binding)
+      run_internal_register_binding
+      ;;
+    __prepare-agent)
+      run_internal_prepare_agent
+      ;;
+    __ensure-profile)
+      run_internal_ensure_profile
+      ;;
+    *)
+      agent_fail "unknown internal action: $AAMP_TASK_ACTION"
+      ;;
+  esac
+}
+
+task_agent_controller_path() {
+  printf '%s/bin/feishu-task-agent-controller.mjs\n' "$(task_agent_global_package_dir)"
+}
+
+run_task_agent_controller() {
+  local controller bootstrap_path install_command
+  controller="$(task_agent_controller_path)"
+  [ -r "$controller" ] || agent_fail "Task Agent controller is missing: $controller"
+  bootstrap_path="$AAMP_TASK_COMMAND_PATH"
+  [ -r "$bootstrap_path" ] || agent_fail "installed Task Agent command is missing: $bootstrap_path"
+  install_command="npx -y --package $AAMP_TASK_AGENT_NAME@$AAMP_TASK_AGENT_CHANNEL feishu-task-agent install"
+  export AAMP_TASK_BOOTSTRAP_PATH="$bootstrap_path"
+  export AAMP_TASK_NPM_BIN="$NPM_BIN"
+  export AAMP_TASK_NPX_BIN="$NPX_BIN"
+  export AAMP_TASK_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
+  export AAMP_TASK_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
+  export AAMP_TASK_CODEX_ACP_PKG="$CODEX_ACP_PKG"
+  export AAMP_TASK_AGENT_VERSION
+  export AAMP_TASK_DEFAULT_AGENT="$AGENT"
+  export AAMP_TASK_AAMP_HOST="$AAMP_HOST"
+  export AAMP_TASK_DEBUG_MODE="$DEBUG_MODE"
+  export AAMP_TASK_INSTALL_COMMAND="$install_command"
+  export AAMP_TASK_NPM_REGISTRY="$NPM_REGISTRY"
+  export AAMP_TASK_NPM_CACHE_DIR="$NPM_CACHE_DIR"
+  export AAMP_TASK_NPM_GLOBAL_PREFIX="$NPM_GLOBAL_PREFIX"
+  export AAMP_LARK_CLI_CONFIG_DIR
+  trap - EXIT INT TERM HUP
+  exec node "$controller" "$AAMP_TASK_ACTION"
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [ -n "$FEISHU_TAIL_PID" ]; then
+    kill "$FEISHU_TAIL_PID" 2>/dev/null || true
+  fi
+  if [ -n "$CLI_TAIL_PID" ]; then
+    kill "$CLI_TAIL_PID" 2>/dev/null || true
+  fi
+  if [ -n "$ACP_TAIL_PID" ]; then
+    kill "$ACP_TAIL_PID" 2>/dev/null || true
+  fi
+  if [ -n "$FEISHU_PID" ]; then
+    force_kill_process_tree "$FEISHU_PID"
+  fi
+  if [ -n "$CLI_PID" ]; then
+    force_kill_process_tree "$CLI_PID"
+  fi
+  if [ -n "$ACP_PID" ]; then
+    force_kill_process_tree "$ACP_PID"
+  fi
+  release_selected_bot_reservation
+  release_bot_selection_lock
+  exit "$status"
+}
+
+main() {
+  if [ "$#" -eq 0 ] && { \
+    [ "$AAMP_TASK_ENTRY" = "short" ] \
+      || [ "${0:-}" = "$AAMP_TASK_COMMAND_PATH" ] \
+      || [ "${0:-}" = "$NPM_GLOBAL_PREFIX/bin/$AAMP_TASK_COMMAND_NAME" ]; \
+  }; then
+    AAMP_TASK_DEFAULT_ACTION="help"
+  else
+    AAMP_TASK_DEFAULT_ACTION="install"
+  fi
+  parse_args "$@"
+
+  if [ "$AAMP_TASK_ACTION" = "help" ]; then
+    usage
+    return 0
+  fi
+
+  case "$AAMP_TASK_ACTION" in
+    __discover-agents|__register-binding|__prepare-agent|__ensure-profile)
+      run_internal_action
+      return 0
+      ;;
+  esac
+
+  trap cleanup EXIT INT TERM HUP
+  init_log_run
+  validate_mock_fail_stage
+  # Do not clean globally by default: users may run one-click scripts in
+  # multiple terminals. Cleanup on exit is limited to pids started by this run.
+  cleanup_stale_one_click_processes
+  ensure_node_toolchain
+  maybe_mock_fail "node-toolchain"
+  install_short_command || agent_fail "failed to install $AAMP_TASK_COMMAND_NAME"
+  if [ "$AAMP_TASK_ACTION" = "update" ]; then
+    run_task_agent_update_command
+    return 0
+  fi
+  auto_update_short_command_if_needed normal
+  adopt_newer_global_task_agent_if_available
+  install_aamp_logs_bin "$AAMP_TASK_AGENT_VERSION" || agent_log "warning: aamp-logs command is unavailable for this run"
+  adopt_newer_global_task_agent_if_available
+  ensure_task_agent_global_install "$AAMP_TASK_AGENT_VERSION" || agent_fail "failed to install the complete Task Agent package"
+  record_version_line
+  write_task_update_cache "$AAMP_TASK_AGENT_VERSION"
+  run_task_agent_controller
+}
+
+main "$@"

@@ -6,7 +6,9 @@ import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
 import { AampAcpBridge } from './bridge.js'
 import { renderPairingCode, runInit } from './cli/init.js'
 import { discoverAcpBridgeAgents } from './discovery.js'
+import { describeBridgeError } from './errors.js'
 import { runJsonInit } from './json-init.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getAgentSenderPolicy, setAgentSenderPolicy } from './sender-policy.js'
 import { resolveConfigPath, resolveCredentialsFile } from './storage.js'
@@ -17,6 +19,10 @@ const jsonOutput = args.includes('--json') || getOptionValue('--output') === 'js
 const configPath = resolveConfigPath(
   args.includes('--config') ? (args[args.indexOf('--config') + 1] ?? '') : undefined,
 )
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'acp-bridge',
+  mirrorToConsole: jsonOutput,
+})
 
 function getOptionValue(flag: string): string | undefined {
   const idx = args.indexOf(flag)
@@ -59,6 +65,20 @@ async function readJsonInput(): Promise<unknown> {
   }
 
   return JSON.parse(raw)
+}
+
+function getConnectionSetupOption(): 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later' | undefined {
+  const value = getOptionValue('--connection-setup')
+  if (!value) return undefined
+  if (
+    value === 'pairing-code'
+    || value === 'manual-sender-policy'
+    || value === 'reuse-sender-policy'
+    || value === 'later'
+  ) {
+    return value
+  }
+  throw new Error('--connection-setup must be one of pairing-code, manual-sender-policy, reuse-sender-policy, later')
 }
 
 function getAgent(config: BridgeConfig, agentName: string): AgentConfig {
@@ -139,7 +159,7 @@ function createPairingForAgent(configPathValue: string, agentName: string) {
 
 async function startBridge(
   configPathValue: string,
-  options: { quiet?: boolean; agent?: string; json?: boolean } = {},
+  options: { quiet?: boolean; agent?: string; json?: boolean; debug?: boolean } = {},
 ): Promise<void> {
   if (options.json) {
     redirectConsoleToStderr()
@@ -150,6 +170,10 @@ async function startBridge(
     ...config,
     agents,
   })
+  const emitRuntimeEvent = (event: Record<string, unknown>) => {
+    if (localBridgeLogger.enabled) localBridgeLogger.event(event)
+    if (options.json) writeJsonEvent(event)
+  }
 
   // Graceful shutdown
   let shuttingDown = false
@@ -157,11 +181,12 @@ async function startBridge(
     if (shuttingDown) return
     shuttingDown = true
     if (options.json) {
-      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'acp-bridge', reason: 'signal' })
+      emitRuntimeEvent({ type: 'bridge.shutdown', bridge: 'acp-bridge', reason: 'signal' })
     } else {
       console.log('\nShutting down...')
     }
     await bridge.stop()
+    localBridgeLogger.flush()
     process.exit(0)
   }
   process.on('SIGTERM', () => { void shutdown() })
@@ -169,7 +194,8 @@ async function startBridge(
 
   await bridge.start({
     quiet: options.quiet || options.json,
-    onEvent: options.json ? writeJsonEvent : undefined,
+    onEvent: (options.json || localBridgeLogger.enabled) ? emitRuntimeEvent : undefined,
+    debug: options.debug,
   })
 
   // Keep alive
@@ -184,19 +210,31 @@ async function main() {
         console.log(JSON.stringify(result, null, 2))
         break
       }
-      const initialized = await runInit(configPath, { agent: getOptionValue('--agent') })
+      const initialized = await runInit(configPath, {
+        agent: getOptionValue('--agent'),
+        aampHost: getOptionValue('--aamp-host'),
+        connectionSetup: getConnectionSetupOption(),
+      })
       if (!initialized) break
       if (args.includes('--no-start')) {
         console.log(`Bridge not started because --no-start was provided.`)
         console.log(`Run: npx aamp-acp-bridge start\n`)
         break
       }
-      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent') })
+      await startBridge(configPath, {
+        quiet: true,
+        agent: getOptionValue('--agent'),
+        debug: args.includes('--debug'),
+      })
       break
     }
 
     case 'start': {
-      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent') })
+      await startBridge(configPath, {
+        json: jsonOutput,
+        agent: getOptionValue('--agent'),
+        debug: args.includes('--debug'),
+      })
       break
     }
 
@@ -206,12 +244,17 @@ async function main() {
       if (jsonOutput) {
         console.log(JSON.stringify(createPairingForAgent(configPath, agentName), null, 2))
         if (args.includes('--no-start')) break
-        await startBridge(configPath, { quiet: true, agent: agentName, json: true })
+        await startBridge(configPath, {
+          quiet: true,
+          agent: agentName,
+          json: true,
+          debug: args.includes('--debug'),
+        })
         break
       }
       renderPairingForAgent(configPath, agentName)
       if (args.includes('--no-start')) break
-      await startBridge(configPath, { quiet: true, agent: agentName })
+      await startBridge(configPath, { quiet: true, agent: agentName, debug: args.includes('--debug') })
       break
     }
 
@@ -346,10 +389,10 @@ async function main() {
 AAMP ACP Bridge -- Connect ACP agents to the AAMP email network
 
 Usage:
-  aamp-acp-bridge init [--agent NAME] [--no-start]  Interactive setup wizard, then start bridge
+  aamp-acp-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]  Interactive setup wizard, then start bridge
   aamp-acp-bridge init --json --input -  Non-interactive setup for desktop clients
-  aamp-acp-bridge start [--agent NAME] [--config X] [--json]  Start the bridge (default: ~/.aamp/acp-bridge/config.json)
-  aamp-acp-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
+  aamp-acp-bridge start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ~/.aamp/acp-bridge/config.json)
+  aamp-acp-bridge pair --agent NAME [--config X] [--no-start] [--json] [--debug]  Show a pairing QR code, then start that agent
   aamp-acp-bridge list  [--config X]   List configured agents
   aamp-acp-bridge discover [--config X] [--json]  Discover local ACP agent candidates
   aamp-acp-bridge status               Show live connection status
@@ -360,9 +403,11 @@ Usage:
 
 Examples:
   npx aamp-acp-bridge init --agent claude
+  npx aamp-acp-bridge init --agent codex --aamp-host https://meshmail.ai --connection-setup pairing-code
   npx aamp-acp-bridge init --agent claude --no-start
   npx aamp-acp-bridge pair --agent claude
   npx aamp-acp-bridge start
+  npx aamp-acp-bridge start --debug
   npx aamp-acp-bridge start --config production.json
   npx aamp-acp-bridge directory-search --agent claude --query reviewer
 `)
@@ -371,14 +416,16 @@ Examples:
 }
 
 main().catch((err) => {
+  const detail = describeBridgeError(err)
   if (jsonOutput) {
     console.error(JSON.stringify({
       type: 'error',
       bridge: 'acp-bridge',
-      message: (err as Error).message,
+      message: detail,
     }))
   } else {
-    console.error(`Error: ${(err as Error).message}`)
+    console.error(`Error: ${detail}`)
   }
+  localBridgeLogger.flush()
   process.exit(1)
 })

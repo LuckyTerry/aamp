@@ -9,6 +9,7 @@ import { runProfileMaker } from './cli/profile-maker.js'
 import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
 import { discoverCliBridgeAgents } from './discovery.js'
 import { runJsonInit } from './json-init.js'
+import { installLocalBridgeConsoleLogger } from './local-logger.js'
 import { createPairingCode, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getAgentSenderPolicy, setAgentSenderPolicy } from './sender-policy.js'
 import { getDefaultProfilesDir, resolveConfigPath, resolveCredentialsFile } from './storage.js'
@@ -19,6 +20,10 @@ const jsonOutput = args.includes('--json') || getOptionValue('--output') === 'js
 const configPath = resolveConfigPath(
   args.includes('--config') ? (args[args.indexOf('--config') + 1] ?? '') : undefined,
 )
+const localBridgeLogger = installLocalBridgeConsoleLogger({
+  bridge: 'cli-bridge',
+  mirrorToConsole: jsonOutput,
+})
 
 function getOptionValue(flag: string): string | undefined {
   const idx = args.indexOf(flag)
@@ -69,6 +74,20 @@ function getAgent(config: BridgeConfig, agentName: string): AgentConfig {
     throw new Error(`Agent "${agentName}" not found in config`)
   }
   return agent
+}
+
+function getConnectionSetupOption(): 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later' | undefined {
+  const value = getOptionValue('--connection-setup')
+  if (!value) return undefined
+  if (
+    value === 'pairing-code'
+    || value === 'manual-sender-policy'
+    || value === 'reuse-sender-policy'
+    || value === 'later'
+  ) {
+    return value
+  }
+  throw new Error('--connection-setup must be one of pairing-code, manual-sender-policy, reuse-sender-policy, later')
 }
 
 function loadAgentCredentials(agent: AgentConfig): { email: string; smtpPassword: string } {
@@ -141,7 +160,7 @@ function createPairingForAgent(configPathValue: string, agentName: string) {
 
 async function startBridge(
   configPathValue: string,
-  options: { quiet?: boolean; agent?: string; json?: boolean } = {},
+  options: { quiet?: boolean; agent?: string; json?: boolean; debug?: boolean } = {},
 ): Promise<void> {
   if (options.json) {
     redirectConsoleToStderr()
@@ -152,14 +171,19 @@ async function startBridge(
     ...config,
     agents,
   })
+  const emitRuntimeEvent = (event: Record<string, unknown>) => {
+    if (localBridgeLogger.enabled) localBridgeLogger.event(event)
+    if (options.json) writeJsonEvent(event)
+  }
 
   const shutdown = () => {
     if (options.json) {
-      writeJsonEvent({ type: 'bridge.shutdown', bridge: 'cli-bridge', reason: 'signal' })
+      emitRuntimeEvent({ type: 'bridge.shutdown', bridge: 'cli-bridge', reason: 'signal' })
     } else {
       console.log('\nShutting down...')
     }
     bridge.stop()
+    localBridgeLogger.flush()
     process.exit(0)
   }
   process.on('SIGTERM', shutdown)
@@ -167,7 +191,8 @@ async function startBridge(
 
   await bridge.start({
     quiet: options.quiet || options.json,
-    onEvent: options.json ? writeJsonEvent : undefined,
+    onEvent: (options.json || localBridgeLogger.enabled) ? emitRuntimeEvent : undefined,
+    debug: options.debug,
   })
   setInterval(() => {}, 60_000)
 }
@@ -180,19 +205,23 @@ async function main() {
         console.log(JSON.stringify(result, null, 2))
         break
       }
-      const initialized = await runInit(configPath)
+      const initialized = await runInit(configPath, {
+        agent: getOptionValue('--agent'),
+        aampHost: getOptionValue('--aamp-host'),
+        connectionSetup: getConnectionSetupOption(),
+      })
       if (!initialized) break
       if (args.includes('--no-start')) {
         console.log(`CLI bridge not started because --no-start was provided.`)
         console.log(`Run: npx aamp-cli-bridge start\n`)
         break
       }
-      await startBridge(configPath, { quiet: true })
+      await startBridge(configPath, { quiet: true, agent: getOptionValue('--agent'), debug: args.includes('--debug') })
       break
     }
 
     case 'start': {
-      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent') })
+      await startBridge(configPath, { json: jsonOutput, agent: getOptionValue('--agent'), debug: args.includes('--debug') })
       break
     }
 
@@ -202,12 +231,12 @@ async function main() {
       if (jsonOutput) {
         console.log(JSON.stringify(createPairingForAgent(configPath, agentName), null, 2))
         if (args.includes('--no-start')) break
-        await startBridge(configPath, { quiet: true, agent: agentName, json: true })
+        await startBridge(configPath, { quiet: true, agent: agentName, json: true, debug: args.includes('--debug') })
         break
       }
       renderPairingForAgent(configPath, agentName)
       if (args.includes('--no-start')) break
-      await startBridge(configPath, { quiet: true, agent: agentName })
+      await startBridge(configPath, { quiet: true, agent: agentName, debug: args.includes('--debug') })
       break
     }
 
@@ -378,10 +407,10 @@ async function main() {
 AAMP CLI Bridge -- Connect direct CLI agents to the AAMP email network
 
 Usage:
-  aamp-cli-bridge init [--no-start]    Interactive setup wizard, then start bridge
+  aamp-cli-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]
   aamp-cli-bridge init --json --input -  Non-interactive setup for desktop clients
-  aamp-cli-bridge start [--agent NAME] [--config X] [--json]  Start the bridge (default: ~/.aamp/cli-bridge/config.json)
-  aamp-cli-bridge pair --agent NAME [--config X] [--no-start]  Show a pairing QR code, then start that agent
+  aamp-cli-bridge start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ~/.aamp/cli-bridge/config.json)
+  aamp-cli-bridge pair --agent NAME [--config X] [--no-start] [--debug]  Show a pairing QR code, then start that agent
   aamp-cli-bridge list  [--config X]   List configured agents
   aamp-cli-bridge discover [--config X] [--json]  Discover local CLI agent candidates
   aamp-cli-bridge status               Show live connection status
@@ -397,6 +426,7 @@ Usage:
 Examples:
   npx aamp-cli-bridge profile-maker
   npx aamp-cli-bridge init
+  npx aamp-cli-bridge init --agent codem --aamp-host https://meshmail.ai --connection-setup pairing-code
   npx aamp-cli-bridge init --no-start
   npx aamp-cli-bridge pair --agent codex
   npx aamp-cli-bridge start
@@ -416,5 +446,6 @@ main().catch((err) => {
   } else {
     console.error(`Error: ${(err as Error).message}`)
   }
+  localBridgeLogger.flush()
   process.exit(1)
 })
