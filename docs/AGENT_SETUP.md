@@ -43,15 +43,16 @@ Use this order:
 | --- | --- | --- |
 | `codex` | `aamp-acp-bridge` | `aamp-cli-bridge` with built-in `codex` profile |
 | `claude` | `aamp-acp-bridge` | `aamp-cli-bridge` with built-in `claude` profile |
+| `workbuddy` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
 | `openclaw` | `aamp-openclaw-plugin` | `aamp-acp-bridge`, then `aamp-cli-bridge` |
 | known ACP-compatible agent | `aamp-acp-bridge` | `aamp-cli-bridge` |
 | custom ACP-compatible agent | `aamp-acp-bridge` with explicit `acpCommand` | `aamp-cli-bridge` |
 | CLI-callable agent | `aamp-cli-bridge` with a built-in or custom profile | ask for the command/profile details |
 
-Prefer `aamp-acp-bridge` for Codex and Claude because it preserves richer ACP
-task events. Use `aamp-cli-bridge` when the agent is only available as a direct
-CLI command, or when the installed/published ACP bridge does not expose the
-JSON automation commands used below.
+Prefer `aamp-acp-bridge` for Codex, Claude, and WorkBuddy because it preserves
+richer ACP task events. Use `aamp-cli-bridge` when the agent is only available
+as a direct CLI command, or when the installed/published ACP bridge does not
+expose the JSON automation commands used below.
 
 Known ACP agent names:
 
@@ -68,11 +69,17 @@ Known ACP agent names:
 | `kimi` | `kimi` |
 | `kiro` | `kiro` |
 | `hermes` | `hermes acp` |
+| `workbuddy` | macOS WorkBuddy app embedded `codebuddy --acp` |
 
 If one of these is requested and installed, configure it with ACP Bridge unless
 the table above says a more native connector is preferred, as with OpenClaw.
 If a different agent can speak ACP, still use ACP Bridge, but provide its
 explicit `acpCommand`.
+
+WorkBuddy auto-detection currently checks the standard macOS app path:
+`/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy`.
+Open WorkBuddy and sign in before starting the bridge. For another platform or
+installation path, configure the embedded CLI plus `--acp` explicitly.
 
 Built-in CLI Bridge profiles:
 

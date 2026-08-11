@@ -16,7 +16,7 @@ Initialize the bridge:
 npx aamp-acp-bridge init
 ```
 
-The init wizard scans installed ACP-capable agents, including Hermes, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
+The init wizard scans installed ACP-capable agents, including Hermes and the macOS WorkBuddy app, then lets you select multiple entries with arrow keys, Space, and Enter. For each selected agent, choose one authorization setup method:
 
 - Pair with a five-minute terminal QR code plus the matching `aamp://connect?...` URL.
 - Manually enter `senderPolicies`.
@@ -55,7 +55,7 @@ npx aamp-acp-bridge start --json
 npx aamp-acp-bridge pair --agent claude --json --no-start
 ```
 
-`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH, also detects the Codex CLI bundled inside `/Applications/Codex.app`, and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
+`init --json` is an upsert operation for desktop clients: it writes the bridge config, reuses existing credentials when available, registers missing mailboxes, and does not auto-start the bridge. `discover --json` scans known ACP-capable agents on PATH, detects the CLIs bundled inside the macOS Codex and WorkBuddy apps, and includes already configured agents from the bridge config. `start --json` emits JSONL runtime events on stdout and sends human-readable logs to stderr. `pair --json --no-start` creates a pairing URL without rendering a terminal QR code.
 
 Example JSON init input:
 
@@ -148,3 +148,46 @@ Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP com
 ```
 
 `init --agent hermes` writes this command automatically when Hermes is installed.
+
+### Traex
+
+Trae CLI 2.0 exposes a native ACP server through `traex`. Sign in first, then
+initialize the native Traex profile:
+
+```bash
+traex login
+npx aamp-acp-bridge init --agent traex
+```
+
+The generated agent config uses:
+
+```json
+{
+  "name": "traex",
+  "acpCommand": "traex acp serve",
+  "slug": "traex-bridge"
+}
+```
+
+ACP Bridge detects only the `traex` executable for this profile. It does not
+fall back to Coco, `trae`, or `traecli`. The generated command deliberately
+omits `--yolo`.
+
+### WorkBuddy
+
+On macOS, the bridge detects WorkBuddy at:
+
+```text
+/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy
+```
+
+`init --agent workbuddy` automatically uses the embedded ACP entrypoint:
+
+```text
+/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --acp
+```
+
+Open WorkBuddy and sign in before starting the bridge so the embedded CLI can
+reuse its local authentication state. Automatic WorkBuddy detection is limited
+to the standard macOS application path; on other platforms or for a custom
+installation, provide an explicit `acpCommand`.

@@ -4,7 +4,12 @@ import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
 import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
-import { defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
+import {
+  KNOWN_AGENTS,
+  defaultAcpCommand,
+  detectKnownAgent,
+  missingAgentWarning,
+} from '../agent-resolver.js'
 import { getDefaultCredentialsPath } from '../storage.js'
 import {
   createPairingCode,
@@ -12,12 +17,6 @@ import {
   defaultSenderPoliciesFile,
   pairingUrlToWebUrl,
 } from '../pairing.js'
-
-const KNOWN_AGENTS = [
-  'claude', 'codex', 'gemini', 'goose', 'openclaw',
-  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes',
-]
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   if ((rl as unknown as { closed?: boolean }).closed) return Promise.resolve('')
@@ -475,6 +474,19 @@ export function renderPairingCode(name: string, mailbox: string, pairingFile: st
   console.log(`  Pairing URL: ${pairing.connectUrl}`)
 }
 
+export function resolveInitScanTargets(agent?: string): string[] {
+  if (!agent) return [...KNOWN_AGENTS]
+  if (!KNOWN_AGENTS.includes(agent)) {
+    throw new Error(`Unknown ACP agent "${agent}". Known agents: ${KNOWN_AGENTS.join(', ')}`)
+  }
+  return [agent]
+}
+
+export function noAgentsFoundMessage(agent?: string): string {
+  if (agent) return `No ACP agent found. ${missingAgentWarning(agent)}`
+  return 'No ACP agents found. Install an agent first (e.g. npm i -g @anthropic-ai/claude-code).'
+}
+
 export async function runInit(configPath: string, opts: { agent?: string } = {}): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
 
@@ -499,13 +511,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   }
 
   // 2. Scan for ACP agents
-  const scanTargets = opts.agent
-    ? KNOWN_AGENTS.filter((name) => name === opts.agent)
-    : KNOWN_AGENTS
-  if (opts.agent && scanTargets.length === 0) {
-    rl.close()
-    throw new Error(`Unknown ACP agent "${opts.agent}". Known agents: ${KNOWN_AGENTS.join(', ')}`)
-  }
+  const scanTargets = resolveInitScanTargets(opts.agent)
 
   console.log(opts.agent ? `? Scanning for ACP agent: ${opts.agent}` : '? Scanning for ACP agents...')
   const detected: Array<{ name: string; version: string }> = []
@@ -521,7 +527,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   console.log()
 
   if (detected.length === 0) {
-    console.log('No ACP agents found. Install an agent first (e.g. npm i -g @anthropic-ai/claude-code).')
+    console.log(noAgentsFoundMessage(opts.agent))
     rl.close()
     return false
   }
