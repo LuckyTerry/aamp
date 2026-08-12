@@ -148,3 +148,40 @@ Hermes exposes ACP through `hermes acp`, so its bridge config uses a raw ACP com
 ```
 
 `init --agent hermes` writes this command automatically when Hermes is installed.
+
+### ZCode
+
+ZCode can be connected in one step on macOS; the adapter is included in this
+package, so no separate global package or shell alias is needed:
+
+```bash
+npx aamp-acp-bridge init --agent zcode
+```
+
+The bridge detects ZCode's embedded CLI at
+`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`. Set
+`AAMP_ZCODE_CLI_PATH` when ZCode is installed elsewhere. New and explicitly
+reinitialized ZCode entries use the sibling command `aamp-zcode-acp serve`;
+discovery does not rewrite a custom command already present in the config.
+
+The adapter supports text and resource-link prompts, new/load/resume/list/close
+sessions, streaming text and reasoning, tool and plan updates, permission
+choices, cancellation, and confirmed mode/model changes. This first release
+does not support image or audio prompts, embedded-context blocks,
+`additionalDirectories`, or ACP-transport MCP servers. Stdio, HTTP, and SSE MCP
+servers remain supported.
+
+If ZCode reports `model_config_missing`, configure its model access with the
+official CLI command:
+
+```bash
+node "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs" login
+```
+
+For a missing app, verify the default path above or set
+`AAMP_ZCODE_CLI_PATH`. A protocol-version mismatch means the installed ZCode
+and adapter do not agree on ZCode Protocol v1; update them together. A child
+timeout usually means ZCode's embedded app server did not answer within the
+bounded request window, so retry after checking ZCode's local configuration.
+The adapter reserves stdout exclusively for ACP JSON; diagnostics and errors
+are written to stderr.

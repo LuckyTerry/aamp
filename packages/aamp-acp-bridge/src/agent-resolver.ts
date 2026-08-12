@@ -1,5 +1,10 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import {
+  DEFAULT_ZCODE_CLI_PATH,
+  detectZcodeInstallation,
+  ZCODE_CLI_OVERRIDE,
+} from './zcode-acp/app-locator.js'
 
 const CODEX_APP_CLI = '/Applications/Codex.app/Contents/Resources/codex'
 const CODEX_APP_ACP_COMMAND = `env CODEX_PATH=${CODEX_APP_CLI} npx -y @agentclientprotocol/codex-acp`
@@ -35,6 +40,10 @@ function findOnPath(command: string): boolean {
 }
 
 export function detectKnownAgent(name: string): AgentResolution | undefined {
+  if (name === 'zcode') {
+    return detectZcodeInstallation()
+  }
+
   if (findOnPath(name)) {
     return {
       command: name,
@@ -63,6 +72,9 @@ export function defaultAcpCommand(name: string, previousCommand?: string): strin
 }
 
 export function missingAgentWarning(name: string): string {
+  if (name === 'zcode') {
+    return `zcode was not found at ${DEFAULT_ZCODE_CLI_PATH}. Set ${ZCODE_CLI_OVERRIDE} to override the embedded CLI path.`
+  }
   if (name === 'codex' && process.platform === 'darwin') {
     return `codex was not found on PATH or at ${CODEX_APP_CLI}.`
   }

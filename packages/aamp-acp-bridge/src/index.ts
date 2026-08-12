@@ -360,6 +360,7 @@ Usage:
 
 Examples:
   npx aamp-acp-bridge init --agent claude
+  npx aamp-acp-bridge init --agent zcode
   npx aamp-acp-bridge init --agent claude --no-start
   npx aamp-acp-bridge pair --agent claude
   npx aamp-acp-bridge start
