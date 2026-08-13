@@ -337,13 +337,20 @@ The CLI agent can use these plain-output conventions:
 - Start final output with `HELP:` to send `task.help_needed`
 - End output with `FILE:/absolute/path/to/file` lines to attach generated files to `task.result`
 
+When debugging task routing, add `--debug` to print the exact prompt sent to
+the CLI agent for each `task.dispatch`:
+
+```bash
+npx aamp-cli-bridge start --debug
+```
+
 ## Commands
 
 ```bash
-npx aamp-cli-bridge init [--no-start]
+npx aamp-cli-bridge init [--no-start] [--debug]
 npx aamp-cli-bridge init --json --input -
-npx aamp-cli-bridge start [--config X] [--json]
-npx aamp-cli-bridge pair --agent NAME [--config X] [--no-start]
+npx aamp-cli-bridge start [--config X] [--json] [--debug]
+npx aamp-cli-bridge pair --agent NAME [--config X] [--no-start] [--debug]
 npx aamp-cli-bridge list [--config X]
 npx aamp-cli-bridge discover [--config X] [--json]
 npx aamp-cli-bridge status

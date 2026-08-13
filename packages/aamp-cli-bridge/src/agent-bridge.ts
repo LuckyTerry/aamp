@@ -7,7 +7,9 @@ import {
   type TaskCancel,
   type TaskDispatch,
 } from 'aamp-sdk'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import type { AgentConfig, BridgeConfig } from './config.js'
 import { CliAgentClient } from './cli-agent-client.js'
@@ -26,6 +28,40 @@ import {
 } from './pairing.js'
 import type { ParsedCliStreamUpdate } from './stream-parser.js'
 import type { BridgeRuntimeEvent } from './bridge.js'
+
+const IDENTITY_AUTH_RETRY_COUNT = 5
+const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
+const PROMPT_MATERIALIZATION_THRESHOLD_CHARS = 8_000
+const STRUCTURED_RESULT_MARKER = 'AAMP_RESULT_JSON:'
+const DEFAULT_PROMPT_FILE_DIR = process.platform === 'win32' ? join(tmpdir(), 'aamp-p') : '/tmp/aamp-p'
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
+
+function isEnvFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'yes' || value === 'on'
+}
+
+function isCliTaskDebugEnabled(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_PROMPT')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_RESULT')
+}
+
+function shouldLogRawPrompt(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_PROMPT')
+}
+
+function shouldLogRawResult(): boolean {
+  return isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_TASK')
+    || isEnvFlagEnabled('AAMP_CLI_BRIDGE_DEBUG_RESULT')
+}
+
+function logDebugBlock(agentName: string, taskId: string, label: string, content: string): void {
+  console.log(`[${agentName}] ~~ debug.${label}.begin task=${taskId} chars=${content.length}`)
+  console.log(content)
+  console.log(`[${agentName}] ~~ debug.${label}.end task=${taskId}`)
+}
 
 export interface AgentIdentity {
   email: string
@@ -75,6 +111,36 @@ function matchesSenderPattern(senderEmail: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`, 'i').test(normalizedSender)
 }
 
+function normalizeSessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+export function resolveTaskSessionKey(
+  task: Pick<TaskDispatch, 'taskId' | 'sessionKey' | 'dispatchContext'>,
+  hydratedTask: Pick<TaskDispatch, 'sessionKey' | 'dispatchContext'>,
+): string | undefined {
+  return normalizeSessionKey(hydratedTask.sessionKey)
+    ?? normalizeSessionKey(task.sessionKey)
+    ?? normalizeSessionKey(hydratedTask.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+    ?? normalizeSessionKey(task.dispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+    ?? normalizeSessionKey(task.taskId)
+}
+
+export function stripAampInternalDispatchContext<T extends { dispatchContext?: Record<string, string> }>(
+  task: T,
+): T {
+  const context = task.dispatchContext
+  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
+  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  const stripped = { ...task }
+  if (Object.keys(publicContext).length > 0) {
+    stripped.dispatchContext = publicContext
+  } else {
+    delete stripped.dispatchContext
+  }
+  return stripped
+}
+
 function matchPairedSenderPolicy(
   task: TaskDispatch,
   senderPolicies: SenderPolicy[],
@@ -116,18 +182,97 @@ function matchCombinedSenderPolicy(
   return configuredDecision.reason ? configuredDecision : pairedDecision
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function toBasicAuth(email: string, password: string): string {
+  return `Basic ${Buffer.from(`${email}:${password}`).toString('base64')}`
+}
+
 export interface AgentBridgeStartOptions {
   quiet?: boolean
   onEvent?: (event: BridgeRuntimeEvent) => void
+  debug?: boolean
+}
+
+export function formatDebugPromptLog(options: {
+  agentName: string
+  taskId: string
+  sessionKey: string | undefined
+  prompt: string
+}): string {
+  return [
+    `[${options.agentName}] CLI prompt debug task=${options.taskId} session=${options.sessionKey ?? '(none)'}`,
+    '--- BEGIN CLI PROMPT ---',
+    options.prompt,
+    '--- END CLI PROMPT ---',
+  ].join('\n')
+}
+
+export interface MaterializedPrompt {
+  prompt: string
+  materializedPath?: string
+  originalLength: number
+}
+
+function promptHash(prompt: string): string {
+  return createHash('sha256').update(prompt).digest('hex').slice(0, 12)
+}
+
+function buildMaterializedPromptWrapper(filePath: string): string {
+  return [
+    '## AAMP Prompt File',
+    '',
+    'The complete AAMP task prompt was materialized to this local file:',
+    '',
+    filePath,
+    '',
+    `Run this first if needed: cat ${filePath}`,
+    '',
+    'Read the entire file before acting. Treat the file content as the current task prompt and follow all instructions, rules, and final-result contracts in it.',
+    '',
+    'Do not answer from this wrapper alone. If the file cannot be read, finish with exactly `AAMP_RESULT_JSON: {"output":"Unable to read materialized AAMP prompt file: <exact read failure>"}`.',
+  ].join('\n')
+}
+
+export function materializePromptIfNeeded(options: {
+  taskId: string
+  prompt: string
+  thresholdChars?: number
+  baseDir?: string
+  now?: Date
+}): MaterializedPrompt {
+  const thresholdChars = options.thresholdChars ?? PROMPT_MATERIALIZATION_THRESHOLD_CHARS
+  if (options.prompt.length <= thresholdChars) {
+    return {
+      prompt: options.prompt,
+      originalLength: options.prompt.length,
+    }
+  }
+
+  const promptDir = options.baseDir ?? DEFAULT_PROMPT_FILE_DIR
+  mkdirSync(promptDir, { recursive: true, mode: 0o700 })
+
+  const filePath = join(promptDir, `p-${promptHash(options.prompt)}.md`)
+  writeFileSync(filePath, options.prompt, { encoding: 'utf8', mode: 0o600 })
+
+  return {
+    prompt: buildMaterializedPromptWrapper(filePath),
+    materializedPath: filePath,
+    originalLength: options.prompt.length,
+  }
 }
 
 interface HandleEventOptions {
   historical?: boolean
 }
 
-function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
+export function threadAlreadyTerminal(events: AampThreadEvent[] | undefined): boolean {
   return (events ?? []).some((event) =>
-    event.intent === 'task.result' || event.intent === 'task.cancel',
+    event.intent === 'task.result'
+    || event.intent === 'task.cancel'
+    || event.intent === 'task.help_needed',
   )
 }
 
@@ -247,6 +392,7 @@ export class AgentBridge {
   private senderPolicies: SenderPolicy[] = []
   private isHistoricalReconcile = false
   private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
+  private debugPrompt = false
 
   constructor(
     private readonly agentConfig: AgentConfig,
@@ -303,6 +449,7 @@ export class AgentBridge {
 
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
     this.onEvent = options.onEvent
+    this.debugPrompt = options.debug === true
     let quietStartup = options.quiet === true
     this.identity = await this.resolveIdentity()
     this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
@@ -493,8 +640,14 @@ export class AgentBridge {
       }
       return
     }
+    const publicTask = stripAampInternalDispatchContext(task)
+    const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
 
-    const senderDecision = matchCombinedSenderPolicy(task, this.agentConfig.senderPolicies, this.senderPolicies)
+    this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
+      this.agentConfig.senderPoliciesFile,
+      this.agentConfig.name,
+    ))
+    const senderDecision = matchCombinedSenderPolicy(publicTask, this.agentConfig.senderPolicies, this.senderPolicies)
     if (!senderDecision.allowed) {
       if (options.historical) return
       console.warn(`[${this.name}] Rejecting task ${task.taskId}: ${senderDecision.reason ?? 'sender policy rejected the task'}`)
@@ -680,8 +833,40 @@ export class AgentBridge {
         }
       }
 
-      const prompt = buildPrompt(hydratedTask, hydratedTask.threadContextText, this.name)
-      const result = await this.cli.prompt(hydratedTask.sessionKey, prompt, {
+      const builtPrompt = buildPrompt(publicHydratedTask, publicHydratedTask.threadContextText, this.name)
+      const materializedPrompt = materializePromptIfNeeded({
+        taskId: task.taskId,
+        prompt: builtPrompt,
+      })
+      const prompt = materializedPrompt.prompt
+      const sessionKey = resolveTaskSessionKey(task, hydratedTask)
+      const promptMarkerIndex = prompt.lastIndexOf(STRUCTURED_RESULT_MARKER)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.task_prompt task=${task.taskId} session=${sessionKey ?? '(none)'} chars=${prompt.length} ` +
+          `hasStructuredMarker=${promptMarkerIndex >= 0} markerIndex=${promptMarkerIndex}`,
+        )
+      }
+      if (shouldLogRawPrompt()) {
+        logDebugBlock(this.name, task.taskId, 'raw_prompt', prompt)
+      }
+      if (sessionKey !== hydratedTask.sessionKey) {
+        console.log(`[${this.name}] using dispatch session for ${task.taskId}: ${sessionKey}`)
+      }
+      if (this.debugPrompt) {
+        if (materializedPrompt.materializedPath) {
+          console.log(
+            `[${this.name}] CLI prompt materialized task=${task.taskId} file=${materializedPrompt.materializedPath} original_chars=${materializedPrompt.originalLength}`,
+          )
+        }
+        console.log(formatDebugPromptLog({
+          agentName: this.name,
+          taskId: task.taskId,
+          sessionKey,
+          prompt,
+        }))
+      }
+      const result = await this.cli.prompt(sessionKey, prompt, {
         onStreamUpdate: handleStreamUpdate,
       })
       if (this.cancelledTaskIds.has(task.taskId)) {
@@ -690,7 +875,25 @@ export class AgentBridge {
       }
       await flushStreamWrites()
 
+      const resultMarkerIndex = result.output.lastIndexOf(STRUCTURED_RESULT_MARKER)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.cli_result task=${task.taskId} chars=${result.output.length} ` +
+          `streamed=${result.streamedText} events=${result.events.length} ` +
+          `hasStructuredMarker=${resultMarkerIndex >= 0} markerIndex=${resultMarkerIndex}`,
+        )
+      }
+      if (shouldLogRawResult()) {
+        logDebugBlock(this.name, task.taskId, 'raw_cli_result', result.output)
+      }
       const parsed = parseResponse(result.output)
+      if (isCliTaskDebugEnabled()) {
+        console.log(
+          `[${this.name}] ~~ debug.parsed_result task=${task.taskId} isHelp=${parsed.isHelp} ` +
+          `outputChars=${parsed.output.length} files=${parsed.files.length} ` +
+          `structuredFields=${parsed.structuredResult?.length ?? 0} attachments=${parsed.attachments?.length ?? 0}`,
+        )
+      }
       if (!parsed.isHelp
         && !parsed.output
         && parsed.files.length === 0
@@ -941,15 +1144,24 @@ export class AgentBridge {
       try {
         const data = JSON.parse(readFileSync(credFile, 'utf-8'))
         if (data.email && data.mailboxToken && data.smtpPassword) {
-          return {
+          const identity = {
             email: data.email,
             mailboxToken: data.mailboxToken,
             smtpPassword: data.smtpPassword,
           }
+          const authState = await this.checkIdentityAuthorization(identity)
+          if (authState === 'authorized' || authState === 'unknown') {
+            return identity
+          }
+          console.warn(`[${this.name}] Stored AAMP credentials are unauthorized; re-registering mailbox`)
         }
       } catch { /* re-register */ }
     }
 
+    return this.registerIdentity(credFile)
+  }
+
+  private async registerIdentity(credFile: string): Promise<AgentIdentity> {
     const slug = this.agentConfig.slug ?? `${this.agentConfig.name}-cli-bridge`
     const description = this.agentConfig.description ?? `${this.agentConfig.name} via CLI bridge`
     const creds = await AampClient.registerMailbox({
@@ -965,6 +1177,33 @@ export class AgentBridge {
       smtpPassword: creds.smtpPassword,
     }, null, 2))
 
+    await this.waitForIdentityAuthorization(creds)
     return creds
+  }
+
+  private async checkIdentityAuthorization(identity: AgentIdentity): Promise<'authorized' | 'unauthorized' | 'unknown'> {
+    try {
+      const base = this.aampHost.replace(/\/$/, '')
+      const res = await fetch(`${base}/.well-known/jmap`, {
+        headers: { Authorization: toBasicAuth(identity.email, identity.smtpPassword) },
+      })
+      if (res.ok) return 'authorized'
+      if (res.status === 401 || res.status === 403) return 'unauthorized'
+      return 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  private async waitForIdentityAuthorization(identity: AgentIdentity): Promise<void> {
+    for (let attempt = 1; attempt <= IDENTITY_AUTH_RETRY_COUNT; attempt += 1) {
+      const authState = await this.checkIdentityAuthorization(identity)
+      if (authState === 'authorized' || authState === 'unknown') return
+      if (attempt < IDENTITY_AUTH_RETRY_COUNT) {
+        await sleep(IDENTITY_AUTH_RETRY_DELAY_MS)
+      }
+    }
+
+    throw new Error(`Registered AAMP credentials for ${identity.email} are not authorized by JMAP`)
   }
 }

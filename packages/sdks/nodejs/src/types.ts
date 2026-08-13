@@ -39,6 +39,7 @@ export const AAMP_HEADER = {
   TASK_ID: 'X-AAMP-TaskId',
   SESSION_KEY: 'X-AAMP-Session-Key',
   DISPATCH_CONTEXT: 'X-AAMP-Dispatch-Context',
+  PROMPT_RULES: 'X-AAMP-Prompt-Rules',
   PRIORITY: 'X-AAMP-Priority',
   EXPIRES_AT: 'X-AAMP-Expires-At',
   STATUS: 'X-AAMP-Status',
@@ -76,6 +77,7 @@ export interface TaskDispatch {
   priority: TaskPriority
   expiresAt?: string
   dispatchContext?: Record<string, string>
+  promptRules?: string
   parentTaskId?: string
   // Email metadata
   from: string
@@ -431,6 +433,8 @@ export interface SendTaskOptions {
   expiresAt?: string
   sessionKey?: string
   dispatchContext?: Record<string, string>
+  /** When set, replaces the default task prompt rules as one complete text block. */
+  promptRules?: string
   parentTaskId?: string
   /** Attachments to include with the dispatch email */
   attachments?: AampAttachment[]

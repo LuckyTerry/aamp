@@ -1,7 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs'
 import type { AgentConfig, BridgeConfig } from './config.js'
 import { resolveCredentialsFile } from './storage.js'
-import { defaultAcpCommand, detectKnownAgent, missingAgentWarning } from './agent-resolver.js'
+import {
+  KNOWN_AGENTS,
+  defaultAcpCommand,
+  defaultAgentCommand,
+  detectKnownAgent,
+  missingAgentWarning,
+} from './agent-resolver.js'
 
 export interface AcpBridgeAgentCandidate {
   id: string
@@ -22,12 +28,6 @@ export interface AcpBridgeDiscovery {
   bridge: 'acp-bridge'
   candidates: AcpBridgeAgentCandidate[]
 }
-
-const KNOWN_AGENTS = [
-  'claude', 'codex', 'gemini', 'goose', 'openclaw',
-  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes',
-]
 
 function loadPreviousConfig(configPath: string): BridgeConfig | undefined {
   if (!existsSync(configPath)) return undefined
@@ -67,7 +67,7 @@ export function discoverAcpBridgeAgents(configPath: string): AcpBridgeDiscovery 
   const candidates = names.map((name): AcpBridgeAgentCandidate => {
     const existingAgent = previousAgents.get(name)
     const resolution = detectKnownAgent(name)
-    const command = resolution?.command ?? name
+    const command = resolution?.command ?? defaultAgentCommand(name)
     const detected = Boolean(resolution)
     const configured = Boolean(existingAgent)
     const warnings = detected ? [] : [missingAgentWarning(name)]

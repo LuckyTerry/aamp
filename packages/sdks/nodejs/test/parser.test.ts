@@ -109,6 +109,72 @@ describe('parseAampHeaders', () => {
       if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
       expect(result.expiresAt).toBeUndefined()
     })
+
+    it('round-trips promptRules through task.dispatch headers', () => {
+      const promptRules = [
+        'Feishu task rules:',
+        '- Treat the Feishu task prompt as the complete task context.',
+        '- Do not use the generic ACP task rules.',
+        '- Follow the Feishu Write Contract.',
+        '- Finish with FEISHU_TASK_RESULT_JSON.',
+      ].join('\n')
+      const headers = buildDispatchHeaders({
+        taskId: 'task-with-prompt-rules',
+        dispatchContext: { source: 'feishu-task' },
+        promptRules,
+      })
+
+      expect(headers['X-AAMP-Prompt-Rules']).toBeTruthy()
+
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-prompt-rules>',
+        subject: '[AAMP Task] Feishu task',
+        headers,
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+      expect(result.promptRules).toEqual(promptRules)
+    })
+
+    it('restores sessionKey from dispatchContext compatibility field', () => {
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-session-key-fallback>',
+        subject: '[AAMP Task] Feishu task',
+        headers: {
+          'X-AAMP-Intent': 'task.dispatch',
+          'X-AAMP-TaskId': 'task-session-fallback',
+          'X-AAMP-Dispatch-Context': 'source=feishu-task; aamp_session_key=feishu-task%3Aguid-1',
+        },
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.sessionKey).toBe('feishu-task:guid-1')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+    })
+
+    it('prefers the sessionKey header over the dispatchContext compatibility field', () => {
+      const result = parseAampHeaders({
+        from: 'coordinator@aamp.example.com',
+        to: 'agent@aamp.example.com',
+        messageId: '<msg-session-key-canonical>',
+        subject: '[AAMP Task] Feishu task',
+        headers: {
+          'X-AAMP-Intent': 'task.dispatch',
+          'X-AAMP-TaskId': 'task-session-canonical',
+          'X-AAMP-Session-Key': 'feishu-task:canonical-guid',
+          'X-AAMP-Dispatch-Context': 'source=feishu-task; aamp_session_key=feishu-task%3Ashadow-guid',
+        },
+      })
+
+      if (result?.intent !== 'task.dispatch') throw new Error('wrong intent')
+      expect(result.sessionKey).toBe('feishu-task:canonical-guid')
+      expect(result.dispatchContext).toEqual({ source: 'feishu-task' })
+    })
   })
 
   describe('task.result', () => {
@@ -287,6 +353,18 @@ describe('buildDispatchHeaders', () => {
     expect(headers['X-AAMP-TaskId']).toBe('task-123')
     expect(headers['X-AAMP-Expires-At']).toBe('2026-04-07T12:00:00.000Z')
   })
+
+  it('mirrors sessionKey into dispatchContext for transport compatibility', () => {
+    const headers = buildDispatchHeaders({
+      taskId: 'task-session-key',
+      sessionKey: 'feishu-task:guid-1',
+      dispatchContext: { source: 'feishu-task' },
+    })
+
+    expect(headers['X-AAMP-Session-Key']).toBe('feishu-task:guid-1')
+    expect(headers['X-AAMP-Dispatch-Context']).toContain('source=feishu-task')
+    expect(headers['X-AAMP-Dispatch-Context']).toContain('aamp_session_key=feishu-task%3Aguid-1')
+  })
 })
 
 describe('buildResultHeaders', () => {
@@ -354,6 +432,30 @@ describe('round-trip: build headers then parse them', () => {
     if (parsed?.intent !== 'task.dispatch') throw new Error('expected task.dispatch')
     expect(parsed.taskId).toBe('task-rt-1')
     expect(parsed.expiresAt).toBe('2026-04-07T12:00:00.000Z')
+  })
+
+  it('round-trips task.dispatch prompt rules', () => {
+    const promptRules = [
+      'Domain task rules:',
+      '- Run the domain runtime first.',
+      '- Return HELP for missing permissions.',
+      '- Do not emit structured output by default.',
+    ].join('\n')
+    const built = buildDispatchHeaders({
+      taskId: 'task-prompt-rules',
+      promptRules,
+    })
+
+    const parsed = parseAampHeaders({
+      from: 'coordinator@aamp.example.com',
+      to: 'agent@aamp.example.com',
+      messageId: 'msg-prompt-rules',
+      subject: '[AAMP Task] Prompt rules',
+      headers: built as Record<string, string>,
+    })
+
+    if (parsed?.intent !== 'task.dispatch') throw new Error('expected task.dispatch')
+    expect(parsed.promptRules).toEqual(promptRules)
   })
 
   it('round-trips task.result', () => {

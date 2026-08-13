@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import { z } from 'zod'
-import type { AgentConfig, BridgeConfig, SenderPolicy } from './config.js'
+import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from './config.js'
 import { defaultAcpCommand } from './agent-resolver.js'
 import { createPairingCode, defaultPairingFile, defaultSenderPoliciesFile, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getDefaultCredentialsPath, resolveCredentialsFile } from './storage.js'
@@ -12,9 +12,14 @@ const senderPolicySchema = z.object({
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
 })
 
+const acpCommandSchema = z.string().min(1).refine(
+  (command) => command.trim().length > 0,
+  { message: 'ACP command must contain a non-whitespace character' },
+)
+
 const jsonInitAgentSchema = z.object({
   name: z.string().min(1),
-  acpCommand: z.string().min(1).optional(),
+  acpCommand: acpCommandSchema.optional(),
   slug: z.string().regex(/^[a-z0-9-]+$/).optional(),
   description: z.string().optional(),
   summary: z.string().optional(),
@@ -104,7 +109,7 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       ?? defaultSenderPoliciesFile(requestedAgent.name)
     const slug = requestedAgent.slug
       ?? previousAgent?.slug
-      ?? `${requestedAgent.name}-bridge`
+      ?? defaultAgentSlug(requestedAgent.name)
     const description = requestedAgent.description
       ?? previousAgent?.description
       ?? `${requestedAgent.name} via ACP bridge`

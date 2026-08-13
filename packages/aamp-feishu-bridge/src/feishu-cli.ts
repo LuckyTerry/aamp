@@ -1,4 +1,5 @@
 import { execFile, spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -28,7 +29,7 @@ interface LarkCliProfile {
   active?: boolean
 }
 
-interface LarkCliConfig {
+export interface LarkCliConfig {
   apps?: Array<{
     appId?: string
     appSecret?: unknown
@@ -36,6 +37,17 @@ interface LarkCliConfig {
     name?: string
     profile?: string
   }>
+}
+
+export interface LarkCliProfileCredentialRequest {
+  appId?: string
+  profile?: string
+}
+
+export interface LarkCliProfileCredentials {
+  appId: string
+  appSecret?: string
+  profile?: string
 }
 
 function larkCliConfigPath(): string {
@@ -202,10 +214,40 @@ function resolveAppSecret(value: unknown, appId: string): string | undefined {
   return undefined
 }
 
+export function resolveLarkCliProfileCredentials(
+  config: LarkCliConfig,
+  request: LarkCliProfileCredentialRequest = {},
+): LarkCliProfileCredentials {
+  const requestedAppId = request.appId?.trim()
+  const requestedProfile = request.profile?.trim()
+  const app = config.apps?.find((candidate) => {
+    if (requestedAppId && candidate.appId === requestedAppId) return true
+    if (requestedProfile && (candidate.name === requestedProfile || candidate.profile === requestedProfile)) return true
+    return false
+  })
+  const resolvedAppId = app?.appId?.trim() ?? requestedAppId
+  if (!resolvedAppId) {
+    throw new Error('Could not resolve Feishu App ID from lark-cli profile config.')
+  }
+  const appSecret = resolveAppSecret(app?.appSecret, resolvedAppId)
+  return {
+    appId: resolvedAppId,
+    ...(appSecret && appSecret !== '****' ? { appSecret } : {}),
+    ...((requestedProfile ?? app?.name ?? app?.profile) ? { profile: requestedProfile ?? app?.name ?? app?.profile } : {}),
+  }
+}
+
+export function resolveLarkCliProfileCredentialsFromDisk(
+  request: LarkCliProfileCredentialRequest = {},
+): LarkCliProfileCredentials {
+  const raw = readFileSync(larkCliConfigPath(), 'utf8')
+  return resolveLarkCliProfileCredentials(JSON.parse(raw) as LarkCliConfig, request)
+}
+
 export async function resolveFeishuCliCredentials(
   options: FeishuCliCredentialOptions = {},
 ): Promise<FeishuCliCredentials> {
-  const cliBin = options.cliBin?.trim() || 'lark-cli'
+  const cliBin = options.cliBin?.trim() || process.env.AAMP_LARK_CLI_BIN?.trim() || 'lark-cli'
   let createdCredentials: Partial<Pick<FeishuCliCredentials, 'appId' | 'appSecret'>> = {}
   if (options.createNew) {
     createdCredentials = await createLarkCliApp(options, cliBin)
@@ -222,8 +264,12 @@ export async function resolveFeishuCliCredentials(
     return !appId && candidate.appId === selectedProfile?.appId
   }) ?? config.apps?.[0]
 
-  const resolvedAppId = createdCredentials.appId ?? app?.appId?.trim()
-  const appSecret = createdCredentials.appSecret ?? (resolvedAppId ? resolveAppSecret(app?.appSecret, resolvedAppId) : undefined)
+  const resolvedProfileCredentials = resolveLarkCliProfileCredentials(config, {
+    appId: app?.appId ?? selectedProfile?.appId ?? options.profile,
+    profile: requestedProfile,
+  })
+  const resolvedAppId = createdCredentials.appId ?? resolvedProfileCredentials.appId
+  const appSecret = createdCredentials.appSecret ?? resolvedProfileCredentials.appSecret
   if (!resolvedAppId) {
     throw new Error(
       'Could not read Feishu App ID from lark-cli. Run "lark-cli config init --new" or pass --app-id/--app-secret.',

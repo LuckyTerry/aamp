@@ -603,6 +603,7 @@ export class SmtpSender {
       expiresAt: opts.expiresAt,
       sessionKey: opts.sessionKey,
       dispatchContext: opts.dispatchContext,
+      promptRules: opts.promptRules,
       parentTaskId: opts.parentTaskId,
     })
 

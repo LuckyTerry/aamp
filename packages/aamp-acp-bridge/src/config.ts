@@ -6,9 +6,14 @@ const senderPolicySchema = z.object({
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
 })
 
+const acpCommandSchema = z.string().min(1).refine(
+  (command) => command.trim().length > 0,
+  { message: 'ACP command must contain a non-whitespace character' },
+)
+
 const agentConfigSchema = z.object({
   name: z.string().min(1),
-  acpCommand: z.string().min(1),
+  acpCommand: acpCommandSchema,
   slug: z.string().regex(/^[a-z0-9-]+$/).optional(),
   description: z.string().optional(),
   summary: z.string().optional(),
@@ -31,6 +36,18 @@ const bridgeConfigSchema = z.object({
 export type SenderPolicy = z.infer<typeof senderPolicySchema>
 export type AgentConfig = z.infer<typeof agentConfigSchema>
 export type BridgeConfig = z.infer<typeof bridgeConfigSchema>
+
+export function defaultAgentSlug(agentName: string): string {
+  const normalizedName = agentName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  if (!normalizedName) {
+    throw new Error(`Cannot derive a valid default Agent slug from name: ${JSON.stringify(agentName)}`)
+  }
+  return `${normalizedName}-bridge`
+}
 
 function normalizeSenderPolicies(
   senderPolicies: SenderPolicy[] | undefined,

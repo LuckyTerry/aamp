@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
 export interface AcpEvent {
@@ -47,6 +50,19 @@ export interface AcpResult {
   events: AcpEvent[]
   stopReason?: string
   streamedAssistantText: boolean
+}
+
+export interface AcpAgentProbeOptions {
+  sessionName?: string
+  timeoutMs?: number
+}
+
+interface AcpxProcessControl {
+  cancel: () => Promise<void>
+}
+
+interface AcpxExecution<T> extends AcpxProcessControl {
+  promise: Promise<T>
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -251,6 +267,42 @@ function sanitizePromptOutput(output: string): string {
   return extractFinalReplyFromTranscript(trimmed)
 }
 
+const AUTHENTICATION_FAILURE_LINE = /^Authentication (?:required|failed)(?:\. Please use \/login command to sign in to your account\.?)?$/i
+
+function findAuthenticationFailureLine(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line
+        .replace(/\u001b\[[0-9;]*m/g, '')
+        .trim()
+        .replace(/^(?:(?:\[(?:error|warning|acpx|client)\]|error:|stderr:)\s*)+/i, '')
+        .trim())
+      .find((line) => AUTHENTICATION_FAILURE_LINE.test(line))
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findAuthenticationFailureLine(item)
+      if (match) return match
+    }
+    return undefined
+  }
+
+  const record = asRecord(value)
+  if (!record) return undefined
+  for (const item of Object.values(record)) {
+    const match = findAuthenticationFailureLine(item)
+    if (match) return match
+  }
+  return undefined
+}
+
+function throwIfAuthenticationFailure(...values: unknown[]): void {
+  const failure = findAuthenticationFailureLine(values)
+  if (failure) throw new Error(failure)
+}
+
 /**
  * Wrapper around acpx CLI.
  * Invokes acpx as a subprocess and parses NDJSON output.
@@ -287,13 +339,35 @@ export class AcpxClient {
   }
 
   private acpxEnv(): NodeJS.ProcessEnv {
-    return {
-      ...process.env,
-      PATH: [
-        join(this.cwd, 'node_modules', '.bin'),
-        process.env.PATH ?? '',
-      ].filter(Boolean).join(delimiter),
+    const env = { ...process.env }
+    const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/'
+    const cache = env.npm_config_cache || env.NPM_CONFIG_CACHE || `${tmpdir()}/aamp-acpx-npm-cache`
+
+    for (const key of Object.keys(env)) {
+      const lower = key.toLowerCase()
+      if (
+        lower.startsWith('npm_config_')
+        || lower.startsWith('npm_package_')
+        || lower.startsWith('npm_lifecycle_')
+        || lower === 'npm_command'
+        || lower === 'npm_execpath'
+        || lower === 'npm_node_execpath'
+        || lower === 'init_cwd'
+      ) {
+        delete env[key]
+      }
     }
+
+    mkdirSync(cache, { recursive: true })
+    env.PATH = [
+      join(this.cwd, 'node_modules', '.bin'),
+      process.env.PATH ?? '',
+    ].filter(Boolean).join(delimiter)
+    env.npm_config_registry = registry
+    env.NPM_CONFIG_REGISTRY = registry
+    env.npm_config_cache = cache
+    env.NPM_CONFIG_CACHE = cache
+    return env
   }
 
   private spawnAcpx(args: string[]): ChildProcessWithoutNullStreams {
@@ -328,37 +402,79 @@ export class AcpxClient {
       onClose: (code: number | null) => void
       onError: (err: Error) => void
     },
-  ): void {
+  ): AcpxProcessControl {
     let startedFallback = false
     let settled = false
+    let cancelled = false
+    const ownedProcesses = new Set<ChildProcessWithoutNullStreams>()
+    const forcedKillTimers = new Map<ChildProcessWithoutNullStreams, NodeJS.Timeout>()
+    let resolveExited: (() => void) | undefined
+    const exited = new Promise<void>((resolve) => { resolveExited = resolve })
+    const resolveExitedIfComplete = () => {
+      if (settled && ownedProcesses.size === 0) resolveExited?.()
+    }
 
     const attach = (proc: ChildProcessWithoutNullStreams) => {
+      ownedProcesses.add(proc)
       this.activeProcesses.add(proc)
       const forgetProcess = () => {
+        const forcedKillTimer = forcedKillTimers.get(proc)
+        if (forcedKillTimer) clearTimeout(forcedKillTimer)
+        forcedKillTimers.delete(proc)
+        ownedProcesses.delete(proc)
         this.activeProcesses.delete(proc)
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
       proc.on('close', (code) => {
         forgetProcess()
-        if (settled) return
+        if (settled) {
+          resolveExitedIfComplete()
+          return
+        }
         settled = true
         handlers.onClose(code)
+        resolveExitedIfComplete()
       })
       proc.on('error', (err) => {
         forgetProcess()
-        if (!startedFallback && this.isSpawnNotFoundError(err)) {
+        if (!cancelled && !startedFallback && this.isSpawnNotFoundError(err)) {
           startedFallback = true
           attach(this.spawnNpxAcpx(args))
           return
         }
-        if (settled) return
+        if (settled) {
+          resolveExitedIfComplete()
+          return
+        }
         settled = true
         handlers.onError(err)
+        resolveExitedIfComplete()
       })
     }
 
     attach(this.spawnAcpx(args))
+    return {
+      cancel: async () => {
+        if (!cancelled) {
+          cancelled = true
+          for (const proc of [...ownedProcesses]) {
+            this.terminateProcessTree(proc, 'SIGTERM')
+            const forcedKillTimer = setTimeout(() => {
+              if (ownedProcesses.has(proc)) this.terminateProcessTree(proc, 'SIGKILL')
+            }, 1_000)
+            forcedKillTimer.unref()
+            forcedKillTimers.set(proc, forcedKillTimer)
+          }
+        }
+
+        resolveExitedIfComplete()
+        await Promise.race([
+          exited,
+          new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+        ])
+      },
+    }
   }
 
   stop(): void {
@@ -368,13 +484,16 @@ export class AcpxClient {
     this.activeProcesses.clear()
   }
 
-  private terminateProcessTree(proc: ChildProcessWithoutNullStreams): void {
+  private terminateProcessTree(
+    proc: ChildProcessWithoutNullStreams,
+    signal: NodeJS.Signals = 'SIGTERM',
+  ): void {
     const pid = proc.pid
     if (!pid) return
 
     if (process.platform !== 'win32') {
       try {
-        process.kill(-pid, 'SIGTERM')
+        process.kill(-pid, signal)
         return
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ESRCH') return
@@ -382,7 +501,7 @@ export class AcpxClient {
     }
 
     try {
-      proc.kill('SIGTERM')
+      proc.kill(signal)
     } catch { /* best-effort cleanup */ }
   }
 
@@ -415,6 +534,61 @@ export class AcpxClient {
       return data.sessionId ?? sessionName
     } catch {
       return sessionName
+    }
+  }
+
+  /**
+   * Start and immediately close a fresh ACP session to verify that the agent
+   * can initialize now. Unlike `sessions ensure`, this cannot be satisfied by
+   * a stale local acpx session record.
+   */
+  async probeAgent(agent: string, options: AcpAgentProbeOptions = {}): Promise<void> {
+    const sessionName = options.sessionName
+      ?? `aamp-readiness-${Date.now()}-${randomUUID().slice(0, 8)}`
+    const timeoutMs = options.timeoutMs ?? 15_000
+
+    try {
+      await this.execWithTimeout(
+        agent,
+        ['sessions', 'new', '--name', sessionName],
+        timeoutMs,
+        `ACP readiness probe timed out after ${timeoutMs}ms`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (/^ACP readiness probe timed out after \d+ms$/.test(message)) {
+        try {
+          await this.execWithTimeout(
+            agent,
+            ['sessions', 'close', sessionName],
+            Math.min(timeoutMs, 5_000),
+            'ACP readiness probe timeout cleanup also timed out',
+          )
+        } catch { /* preserve the original readiness timeout */ }
+      }
+      throw err
+    }
+
+    let cleanupError: unknown
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await this.execWithTimeout(
+          agent,
+          ['sessions', 'close', sessionName],
+          timeoutMs,
+          `ACP readiness probe cleanup timed out after ${timeoutMs}ms`,
+        )
+        cleanupError = undefined
+        break
+      } catch (err) {
+        cleanupError = err
+      }
+    }
+
+    if (cleanupError) {
+      throw new Error('ACP readiness probe could not close its temporary session', {
+        cause: cleanupError,
+      })
     }
   }
 
@@ -580,6 +754,18 @@ export class AcpxClient {
             || sanitizePromptOutput(rawStdout)
             || sanitizePromptOutput(stderr)
 
+          try {
+            throwIfAuthenticationFailure(
+              finalAssistantOutput,
+              rawStdout,
+              stderr,
+              events.filter((event) => event.type === 'error').map((event) => event.error),
+            )
+          } catch (err) {
+            reject(err)
+            return
+          }
+
           if (code !== 0 && !output) {
             reject(new Error(this.formatProcessFailure(
               agent,
@@ -620,6 +806,13 @@ export class AcpxClient {
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
           const output = sanitizePromptOutput(stdout) || sanitizePromptOutput(stderr)
+
+          try {
+            throwIfAuthenticationFailure(stdout, stderr)
+          } catch (err) {
+            reject(err)
+            return
+          }
 
           if (code !== 0 && !output) {
             reject(new Error(this.formatProcessFailure(
@@ -662,13 +855,18 @@ export class AcpxClient {
    * Execute an acpx command and return stdout.
    */
   private exec(agent: string, args: string[]): Promise<string> {
-    return new Promise((resolve, reject) => {
+    return this.startExec(agent, args).promise
+  }
+
+  private startExec(agent: string, args: string[]): AcpxExecution<string> {
+    let processControl: AcpxProcessControl | undefined
+    const promise = new Promise<string>((resolve, reject) => {
       const acpxArgs = this.buildAcpxArgs(agent, args)
 
       let stdout = ''
       let stderr = ''
 
-      this.runAcpx(acpxArgs, {
+      processControl = this.runAcpx(acpxArgs, {
         onStdout: (chunk: Buffer) => { stdout += chunk.toString() },
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
@@ -679,6 +877,43 @@ export class AcpxClient {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}`))
         },
       })
+    })
+
+    return {
+      promise,
+      cancel: async () => { await processControl?.cancel() },
+    }
+  }
+
+  private async execWithTimeout(
+    agent: string,
+    args: string[],
+    timeoutMs: number,
+    timeoutMessage: string,
+  ): Promise<string> {
+    const execution = this.startExec(agent, args)
+    return await new Promise<string>((resolve, reject) => {
+      let settled = false
+      const timeout = setTimeout(() => {
+        if (settled) return
+        settled = true
+        void execution.cancel().finally(() => reject(new Error(timeoutMessage)))
+      }, timeoutMs)
+
+      execution.promise.then(
+        (value) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          resolve(value)
+        },
+        (err) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          reject(err)
+        },
+      )
     })
   }
 }

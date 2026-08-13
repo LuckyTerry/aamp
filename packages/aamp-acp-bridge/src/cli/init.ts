@@ -3,8 +3,13 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
-import type { AgentConfig, BridgeConfig, SenderPolicy } from '../config.js'
-import { defaultAcpCommand, detectKnownAgent } from '../agent-resolver.js'
+import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from '../config.js'
+import {
+  KNOWN_AGENTS,
+  defaultAcpCommand,
+  detectKnownAgent,
+  missingAgentWarning,
+} from '../agent-resolver.js'
 import { getDefaultCredentialsPath } from '../storage.js'
 import {
   createPairingCode,
@@ -12,12 +17,6 @@ import {
   defaultSenderPoliciesFile,
   pairingUrlToWebUrl,
 } from '../pairing.js'
-
-const KNOWN_AGENTS = [
-  'claude', 'codex', 'gemini', 'goose', 'openclaw',
-  'opencode', 'cursor', 'copilot', 'kimi', 'kiro',
-  'hermes',
-]
 
 function ask(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
   if ((rl as unknown as { closed?: boolean }).closed) return Promise.resolve('')
@@ -45,6 +44,12 @@ interface SelectItem<T extends string> {
 }
 
 type ConnectionSetupMethod = 'pairing-code' | 'manual-sender-policy' | 'reuse-sender-policy' | 'later'
+
+interface RunInitOptions {
+  agent?: string
+  aampHost?: string
+  connectionSetup?: ConnectionSetupMethod
+}
 
 async function multiSelect<T extends string>(
   rl: ReturnType<typeof createInterface>,
@@ -475,13 +480,53 @@ export function renderPairingCode(name: string, mailbox: string, pairingFile: st
   console.log(`  Pairing URL: ${pairing.connectUrl}`)
 }
 
-export async function runInit(configPath: string, opts: { agent?: string } = {}): Promise<boolean> {
+export function resolveInitAcpCommand(configPath: string, name: string): string {
+  let previousCommand: string | undefined
+
+  if (existsSync(configPath)) {
+    try {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as { agents?: unknown }
+      if (Array.isArray(raw.agents)) {
+        const previousAgent = raw.agents.find((agent) => (
+          agent !== null
+          && typeof agent === 'object'
+          && (agent as Record<string, unknown>).name === name
+        )) as Record<string, unknown> | undefined
+        const candidate = previousAgent?.acpCommand
+        if (typeof candidate === 'string' && candidate.trim().length > 0) {
+          previousCommand = candidate
+        }
+      }
+    } catch {
+      // A malformed legacy config is not authoritative for command resolution.
+    }
+  }
+
+  return defaultAcpCommand(name, previousCommand)
+}
+
+export function resolveInitScanTargets(agent?: string): string[] {
+  if (!agent) return [...KNOWN_AGENTS]
+  if (!KNOWN_AGENTS.some((name) => name === agent)) {
+    throw new Error(`Unknown ACP agent "${agent}". Known agents: ${KNOWN_AGENTS.join(', ')}`)
+  }
+  return [agent]
+}
+
+export function noAgentsFoundMessage(agent?: string): string {
+  if (agent) return `No ACP agent found. ${missingAgentWarning(agent)}`
+  return 'No ACP agents found. Install an agent first (e.g. npm i -g @anthropic-ai/claude-code).'
+}
+
+export async function runInit(configPath: string, opts: RunInitOptions = {}): Promise<boolean> {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
 
   console.log('\nAAMP ACP Bridge Setup\n')
 
   // 1. AAMP host
-  const aampHostInput = (await ask(rl, '? AAMP Service URL (default: https://meshmail.ai): ')).trim()
+  const aampHostInput = opts.aampHost
+    ? opts.aampHost
+    : (await ask(rl, '? AAMP Service URL (default: https://meshmail.ai): ')).trim()
   const aampHost = aampHostInput || 'https://meshmail.ai'
   if (!aampHost) { rl.close(); throw new Error('AAMP host is required') }
 
@@ -499,12 +544,12 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   }
 
   // 2. Scan for ACP agents
-  const scanTargets = opts.agent
-    ? KNOWN_AGENTS.filter((name) => name === opts.agent)
-    : KNOWN_AGENTS
-  if (opts.agent && scanTargets.length === 0) {
+  let scanTargets: string[]
+  try {
+    scanTargets = resolveInitScanTargets(opts.agent)
+  } catch (error) {
     rl.close()
-    throw new Error(`Unknown ACP agent "${opts.agent}". Known agents: ${KNOWN_AGENTS.join(', ')}`)
+    throw error
   }
 
   console.log(opts.agent ? `? Scanning for ACP agent: ${opts.agent}` : '? Scanning for ACP agents...')
@@ -521,7 +566,7 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   console.log()
 
   if (detected.length === 0) {
-    console.log('No ACP agents found. Install an agent first (e.g. npm i -g @anthropic-ai/claude-code).')
+    console.log(noAgentsFoundMessage(opts.agent))
     rl.close()
     return false
   }
@@ -551,14 +596,19 @@ export async function runInit(configPath: string, opts: { agent?: string } = {})
   const previousSenderPolicies = loadPreviousSenderPolicies(configPath)
 
   for (const name of selected) {
-    const slug = `${name}-bridge`
-    const acpCommand = defaultAcpCommand(name)
+    const slug = defaultAgentSlug(name)
+    const acpCommand = resolveInitAcpCommand(configPath, name)
     const credFile = getDefaultCredentialsPath(name)
     const pairingFile = defaultPairingFile(name)
     const senderPoliciesFile = defaultSenderPoliciesFile(name)
     const previousPolicies = previousSenderPolicies.get(name)
     const canReuseSenderPolicy = getReusableSenderPolicies(name, previousPolicies, previousSenderPolicies).length > 0
-    const connectionSetup = await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    const connectionSetup = opts.connectionSetup
+      ?? await promptConnectionSetupMethod(rl, name, canReuseSenderPolicy)
+    if (connectionSetup === 'reuse-sender-policy' && !canReuseSenderPolicy) {
+      rl.close()
+      throw new Error(`Cannot reuse sender policy for ${name}: no existing sender policies found`)
+    }
     const senderPolicies = connectionSetup === 'manual-sender-policy' || connectionSetup === 'reuse-sender-policy'
       ? await promptSenderPolicies(
           rl,

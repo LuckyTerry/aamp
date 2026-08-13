@@ -149,6 +149,7 @@ function getAampHeader(
 }
 
 const DISPATCH_CONTEXT_KEY_RE = /^[a-z0-9_-]+$/
+const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 
 export function parseDispatchContextHeader(value?: string): Record<string, string> | undefined {
   if (!value) return undefined
@@ -183,6 +184,29 @@ export function serializeDispatchContextHeader(context?: Record<string, string>)
       return `${normalizedKey}=${encodeURIComponent(normalizedValue)}`
     })
   return parts.length ? parts.join('; ') : undefined
+}
+
+function normalizeSessionKey(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function stripInternalDispatchContext(context?: Record<string, string>): Record<string, string> | undefined {
+  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return context
+  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  return Object.keys(publicContext).length ? publicContext : undefined
+}
+
+function normalizePromptRules(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function decodePromptRules(value?: string): string | undefined {
+  return normalizePromptRules(decodeBase64UrlJson<unknown>(value))
+}
+
+function encodePromptRules(value?: string): string | undefined {
+  const normalized = normalizePromptRules(value)
+  return normalized ? encodeBase64UrlJson(normalized) : undefined
 }
 
 function decodeStructuredResult(value?: string): TaskResult['structuredResult'] | undefined {
@@ -255,10 +279,13 @@ export function parseAampHeaders(meta: EmailMetadata): AampMessage | null {
   const decodedSubject = decodeMimeEncodedWords(meta.subject)
 
   if (intent === 'task.dispatch') {
-    const dispatchContext = parseDispatchContextHeader(
+    const rawDispatchContext = parseDispatchContextHeader(
       getAampHeader(headers, AAMP_HEADER.DISPATCH_CONTEXT),
     )
-    const sessionKey = getAampHeader(headers, AAMP_HEADER.SESSION_KEY)
+    const sessionKey = normalizeSessionKey(getAampHeader(headers, AAMP_HEADER.SESSION_KEY))
+      ?? normalizeSessionKey(rawDispatchContext?.[SESSION_KEY_DISPATCH_CONTEXT_KEY])
+    const dispatchContext = stripInternalDispatchContext(rawDispatchContext)
+    const promptRules = decodePromptRules(getAampHeader(headers, AAMP_HEADER.PROMPT_RULES))
 
     const parentTaskId = getAampHeader(headers, AAMP_HEADER.PARENT_TASK_ID)
     const priority = (getAampHeader(headers, AAMP_HEADER.PRIORITY) ?? 'normal') as TaskDispatch['priority']
@@ -273,6 +300,7 @@ export function parseAampHeaders(meta: EmailMetadata): AampMessage | null {
       priority: priority === 'urgent' || priority === 'high' ? priority : 'normal',
       ...(expiresAt ? { expiresAt } : {}),
       ...(dispatchContext ? { dispatchContext } : {}),
+      ...(promptRules ? { promptRules } : {}),
       ...(parentTaskId ? { parentTaskId } : {}),
       from,
       to,
@@ -456,6 +484,7 @@ export function buildDispatchHeaders(params: {
   expiresAt?: string
   sessionKey?: string
   dispatchContext?: Record<string, string>
+  promptRules?: string
   parentTaskId?: string
 }): Record<string, string> {
   const headers: Record<string, string> = {
@@ -467,12 +496,22 @@ export function buildDispatchHeaders(params: {
   if (params.expiresAt) {
     headers[AAMP_HEADER.EXPIRES_AT] = params.expiresAt
   }
-  if (params.sessionKey?.trim()) {
-    headers[AAMP_HEADER.SESSION_KEY] = params.sessionKey.trim()
+  const sessionKey = normalizeSessionKey(params.sessionKey)
+  if (sessionKey) {
+    headers[AAMP_HEADER.SESSION_KEY] = sessionKey
   }
-  const dispatchContext = serializeDispatchContextHeader(params.dispatchContext)
+  const dispatchContextForHeader: Record<string, string> = { ...(params.dispatchContext ?? {}) }
+  delete dispatchContextForHeader[SESSION_KEY_DISPATCH_CONTEXT_KEY]
+  if (sessionKey) {
+    dispatchContextForHeader[SESSION_KEY_DISPATCH_CONTEXT_KEY] = sessionKey
+  }
+  const dispatchContext = serializeDispatchContextHeader(dispatchContextForHeader)
   if (dispatchContext) {
     headers[AAMP_HEADER.DISPATCH_CONTEXT] = dispatchContext
+  }
+  const promptRules = encodePromptRules(params.promptRules)
+  if (promptRules) {
+    headers[AAMP_HEADER.PROMPT_RULES] = promptRules
   }
   if (params.parentTaskId) {
     headers[AAMP_HEADER.PARENT_TASK_ID] = params.parentTaskId

@@ -48,6 +48,10 @@ interface SenderRawEvent {
   }
 }
 
+function getFeishuLarkCliProfile(profile: string | undefined): string | undefined {
+  return profile?.trim() || undefined
+}
+
 interface FeishuCardSession {
   messageId?: string
   cardId?: string
@@ -142,7 +146,7 @@ export class FeishuBridgeRuntime {
     })
     this.channel = (config.feishu.authMode ?? 'app-secret') === 'lark-cli'
       ? new LarkCliChannel({
-        cliBin: config.feishu.cliBin ?? 'lark-cli',
+        cliBin: config.feishu.cliBin?.trim() || process.env.AAMP_LARK_CLI_BIN?.trim() || 'lark-cli',
         profile: config.feishu.cliProfile ?? config.slug,
         logger: this.logger,
       })
@@ -206,6 +210,14 @@ export class FeishuBridgeRuntime {
     this.setConnectivity('aamp', 'disconnected')
     this.setConnectivity('feishu', 'disconnected')
     await this.persistState()
+  }
+
+  registerRawFeishuEventHandlers(handlers: Record<string, (data: unknown) => void>): void {
+    const dispatcher = (this.channel as unknown as { dispatcher?: { register: (handlers: Record<string, (data: unknown) => void>) => unknown } }).dispatcher
+    if (!dispatcher) {
+      throw new Error('Feishu channel does not expose an event dispatcher; task events require app-secret websocket transport.')
+    }
+    dispatcher.register(handlers)
   }
 
   getStateSnapshot(): BridgeState {
@@ -290,6 +302,7 @@ export class FeishuBridgeRuntime {
   private async handleIncomingMessage(message: NormalizedMessage): Promise<void> {
     const botIdentity = this.channel.botIdentity
     if (botIdentity && message.senderId === botIdentity.openId) return
+    if (this.isBridgeAuthoredMessage(message.messageId)) return
     if (!this.shouldAcceptMessage(message, botIdentity)) return
     if (this.isDuplicateMessage(message.messageId)) return
 
@@ -305,6 +318,23 @@ export class FeishuBridgeRuntime {
     }
 
     await this.dispatchUserMessageTask(message, threadKey, conversation?.lastTaskId)
+  }
+
+  private isBridgeAuthoredMessage(messageId: string): boolean {
+    const normalizedMessageId = messageId.trim()
+    if (!normalizedMessageId) return false
+
+    for (const conversation of Object.values(this.state.conversations)) {
+      if (conversation.lastBridgeMessageId === normalizedMessageId) return true
+    }
+
+    for (const task of Object.values(this.state.tasks)) {
+      if (task.bridgeMessageId === normalizedMessageId) return true
+      if (task.helpCardMessageId === normalizedMessageId) return true
+      if (task.dispatchMessageId === normalizedMessageId) return true
+    }
+
+    return false
   }
 
   private async handleCardAction(event: CardActionEvent): Promise<void> {
@@ -677,6 +707,8 @@ export class FeishuBridgeRuntime {
 
   private buildDispatchContext(message: NormalizedMessage): Record<string, string> {
     const raw = (message.raw ?? {}) as SenderRawEvent
+    const cliProfile = getFeishuLarkCliProfile(this.config.feishu.cliProfile)
+    const cliBin = this.config.feishu.cliBin?.trim()
     return {
       source: 'feishu',
       chat_id: message.chatId,
@@ -684,6 +716,8 @@ export class FeishuBridgeRuntime {
       sender_open_id: message.senderId,
       sender_name: message.senderName || '',
       bot_open_id: this.channel.botIdentity?.openId || '',
+      ...(cliProfile ? { feishu_lark_cli_profile: cliProfile } : {}),
+      ...(cliBin ? { feishu_lark_cli_bin: cliBin } : {}),
       is_group_mention: String(message.chatType === 'group'),
       feishu_message_id: message.messageId,
       feishu_reply_to_message_id: message.replyToMessageId || '',
@@ -2624,8 +2658,9 @@ export class FeishuBridgeRuntime {
 
     task.lastStreamEventId = event.id
     task.updatedAt = new Date().toISOString()
+    const eventType = event.type as string
 
-    if (event.type === 'text.delta') {
+    if (eventType === 'text.delta') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'text')
       const text = this.readStreamPayloadText(event.payload)
       this.appendTextDelta(task, text)
@@ -2635,14 +2670,14 @@ export class FeishuBridgeRuntime {
       return
     }
 
-    if (event.type === 'todo') {
+    if (eventType === 'todo') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.statusLabel = this.readStreamPayloadString(event.payload, ['summary', 'label', 'message', 'text']) || '正在回复...'
       await this.updateStreamingCard(taskId, splitCursor)
       return
     }
 
-    if (event.type === 'tool_call') {
+    if (eventType === 'tool_call') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'tool')
       this.appendToolProgress(task, event.payload)
       task.status = 'streaming'
@@ -2651,7 +2686,7 @@ export class FeishuBridgeRuntime {
       return
     }
 
-    if (event.type === 'artifact') {
+    if (eventType === 'artifact') {
       const splitCursor = this.captureStreamCursorForAppend(task, 'status')
       task.progressLabel = this.readStreamPayloadString(event.payload, ['label', 'filename', 'url', 'message'])
       await this.updateStreamingCard(taskId, splitCursor)
