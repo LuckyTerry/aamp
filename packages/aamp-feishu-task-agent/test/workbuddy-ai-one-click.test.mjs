@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const bootstrap = path.resolve(testDir, '../bootstrap/aamp-feishu-task-agent-bootstrap.sh')
@@ -151,7 +152,8 @@ test('bootstrap and controller expose only the canonical workbuddy_ai spelling',
   const bootstrapSource = readFileSync(bootstrap, 'utf8')
   const controllerSource = readFileSync(controller, 'utf8')
   assert.match(bootstrapSource, /codex\|cursor\|coco\|traex\|traecli\|workbuddy\|workbuddy_ai/)
-  assert.match(controllerSource, /const AGENT_TYPES = \[[^\]]*'workbuddy_ai'/)
+  assert.match(controllerSource, /TASK_AGENT_TYPES,\n  resolveTaskAgentMetadata,\n\} from '\.\/agent-metadata\.mjs';/)
+  assert.deepEqual(resolveTaskAgentMetadata('workbuddy_ai'), { executionLocation: 'local' })
   const failureSource = functionRange(
     controllerSource,
     'function agentFailureMessage(',

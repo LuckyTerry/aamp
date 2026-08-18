@@ -1,0 +1,14 @@
+{
+  "type": "unknown",
+  "data": {
+    "eventType": "session.action.tool_call_required",
+    "raw": {
+      "event_id": "evt-help",
+      "event_offset": 9,
+      "timestamp": 108,
+      "event_key": "help",
+      "question": "Which synthetic option should be used?",
+      "options": ["First option", { "label": "Second option" }]
+    }
+  }
+}

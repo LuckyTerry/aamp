@@ -52,6 +52,18 @@ export interface AcpResult {
   streamedAssistantText: boolean
 }
 
+export function selectFinalAssistantOutput(
+  assistantMessages: ReadonlyMap<string, string>,
+  messageOrder: readonly string[],
+  excludedMessageKeys: ReadonlySet<string> = new Set(),
+): string {
+  return [...messageOrder]
+    .reverse()
+    .filter((messageKey) => !excludedMessageKeys.has(messageKey))
+    .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
+    .find((message) => message.length > 0) ?? ''
+}
+
 export interface AcpAgentProbeOptions {
   sessionName?: string
   timeoutMs?: number
@@ -90,6 +102,12 @@ function extractContentText(content: unknown): string {
   if (resource && typeof resource.text === 'string') return resource.text
 
   return ''
+}
+
+function isAimeSourcesEvent(event: AcpEvent): boolean {
+  if (event.messageId !== 'aime-sources') return false
+  const meta = asRecord(event._meta)
+  return meta?.['aime.acp.message_kind'] === 'sources'
 }
 
 function extractToolLocations(value: unknown): Array<{ path: string; line?: number }> | undefined {
@@ -269,6 +287,41 @@ function sanitizePromptOutput(output: string): string {
 
 const AUTHENTICATION_FAILURE_LINE = /^Authentication (?:required|failed)(?:\. Please use \/login command to sign in to your account\.?)?$/i
 
+const AIME_AUTH_REQUIRED_CODE = 'AUTH_REQUIRED'
+const AIME_LOGIN_COMMAND_PATTERN = /\baime-acp auth login --site (cn|i18n-tt)\b/
+
+function findAimeAuthRequiredFailure(value: unknown): string | undefined {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const match = findAimeAuthRequiredFailure(item)
+      if (match) return match
+    }
+    return undefined
+  }
+
+  const record = asRecord(value)
+  if (!record) return undefined
+  const data = asRecord(record.data)
+  const code = typeof record.code === 'string'
+    ? record.code
+    : typeof data?.code === 'string'
+      ? data.code
+      : undefined
+  if (code === AIME_AUTH_REQUIRED_CODE) {
+    const sourceMessage = [record.message, data?.message]
+      .find((item): item is string => typeof item === 'string')
+    const site = sourceMessage ? AIME_LOGIN_COMMAND_PATTERN.exec(sourceMessage)?.[1] : undefined
+    return 'AUTH_REQUIRED: Managed user authentication is required.'
+      + (site ? ' Run `aime-acp auth login --site ' + site + '`.' : '')
+  }
+
+  for (const item of Object.values(record)) {
+    const match = findAimeAuthRequiredFailure(item)
+    if (match) return match
+  }
+  return undefined
+}
+
 function findAuthenticationFailureLine(value: unknown): string | undefined {
   if (typeof value === 'string') {
     return value
@@ -299,6 +352,11 @@ function findAuthenticationFailureLine(value: unknown): string | undefined {
 }
 
 function throwIfAuthenticationFailure(...values: unknown[]): void {
+  const aimeFailure = values
+    .map((value) => findAimeAuthRequiredFailure(value))
+    .find((value): value is string => value !== undefined)
+  if (aimeFailure) throw new Error(aimeFailure)
+
   const failure = findAuthenticationFailureLine(values)
   if (failure) throw new Error(failure)
 }
@@ -309,7 +367,8 @@ function throwIfAuthenticationFailure(...values: unknown[]): void {
  */
 export class AcpxClient {
   private cwd: string
-  private activeProcesses = new Set<ChildProcessWithoutNullStreams>()
+  private activeProcesses = new Map<ChildProcessWithoutNullStreams, Promise<void>>()
+  private stopInFlight: Promise<void> | undefined
 
   constructor(cwd?: string) {
     this.cwd = cwd ?? process.cwd()
@@ -415,19 +474,30 @@ export class AcpxClient {
     }
 
     const attach = (proc: ChildProcessWithoutNullStreams) => {
+      let resolveClosed!: () => void
+      const closed = new Promise<void>((resolve) => { resolveClosed = resolve })
+      let closeObserved = false
+      let processErrored = false
       ownedProcesses.add(proc)
-      this.activeProcesses.add(proc)
+      this.activeProcesses.set(proc, closed)
       const forgetProcess = () => {
+        if (closeObserved) return
+        closeObserved = true
         const forcedKillTimer = forcedKillTimers.get(proc)
         if (forcedKillTimer) clearTimeout(forcedKillTimer)
         forcedKillTimers.delete(proc)
         ownedProcesses.delete(proc)
         this.activeProcesses.delete(proc)
+        resolveClosed()
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
       proc.on('close', (code) => {
         forgetProcess()
+        if (processErrored) {
+          resolveExitedIfComplete()
+          return
+        }
         if (settled) {
           resolveExitedIfComplete()
           return
@@ -437,7 +507,8 @@ export class AcpxClient {
         resolveExitedIfComplete()
       })
       proc.on('error', (err) => {
-        forgetProcess()
+        processErrored = true
+        if (!proc.pid) forgetProcess()
         if (!cancelled && !startedFallback && this.isSpawnNotFoundError(err)) {
           startedFallback = true
           attach(this.spawnNpxAcpx(args))
@@ -477,11 +548,49 @@ export class AcpxClient {
     }
   }
 
-  stop(): void {
-    for (const proc of [...this.activeProcesses]) {
-      this.terminateProcessTree(proc)
+  stop(): Promise<void> {
+    if (this.stopInFlight) return this.stopInFlight
+    let retained!: Promise<void>
+    retained = this.stopActiveProcesses().finally(() => {
+      if (this.stopInFlight === retained) this.stopInFlight = undefined
+    })
+    this.stopInFlight = retained
+    return retained
+  }
+
+  private async stopActiveProcesses(): Promise<void> {
+    for (const proc of this.activeProcesses.keys()) {
+      this.terminateProcessTree(proc, 'SIGTERM')
     }
-    this.activeProcesses.clear()
+    if (await this.waitForActiveProcessesToClose(1_000)) return
+
+    for (const proc of this.activeProcesses.keys()) {
+      this.terminateProcessTree(proc, 'SIGKILL')
+    }
+    if (!(await this.waitForActiveProcessesToClose(1_000))) {
+      throw new Error('acpx child process did not close after SIGKILL')
+    }
+  }
+
+  private async waitForActiveProcessesToClose(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.activeProcesses.size > 0) {
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        const closed = await Promise.race([
+          Promise.all([...this.activeProcesses.values()]).then(() => true),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), remaining)
+          }),
+        ])
+        if (!closed) return false
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    }
+    return true
   }
 
   private terminateProcessTree(
@@ -623,6 +732,7 @@ export class AcpxClient {
     let streamedAssistantText = false
     const assistantMessages = new Map<string, string>()
     const assistantMessageOrder: string[] = []
+    const excludedAssistantMessageKeys = new Set<string>()
     let lastAssistantMessageKey: string | undefined
     let lastThoughtMessageKey: string | undefined
     let thoughtMessageCount = 0
@@ -656,7 +766,10 @@ export class AcpxClient {
           const textChunk = extractContentText(event.content)
           if (textChunk) {
             const explicitMessageId = asString(event.messageId)
-            const messageKey = explicitMessageId
+            const aimeSourcesEvent = isAimeSourcesEvent(event)
+            const messageKey = aimeSourcesEvent
+              ? 'metadata:aime-sources'
+              : explicitMessageId
               ?? (previousEventType === 'agent_message_chunk' && lastAssistantMessageKey
                 ? lastAssistantMessageKey
                 : `anonymous:${assistantMessageOrder.length}`)
@@ -666,13 +779,17 @@ export class AcpxClient {
               assistantMessageOrder.push(messageKey)
             }
 
+            if (aimeSourcesEvent) {
+              excludedAssistantMessageKeys.add(messageKey)
+            }
+
             assistantMessages.set(messageKey, `${assistantMessages.get(messageKey) ?? ''}${textChunk}`)
             lastAssistantMessageKey = messageKey
             streamedAssistantText = true
             handlers?.onTextChunk?.({
               channel: 'assistant',
               text: textChunk,
-              messageId: messageKey,
+              messageId: explicitMessageId ?? messageKey,
             })
           }
           previousEventType = event.type
@@ -746,10 +863,11 @@ export class AcpxClient {
             processLine(stdoutBuffer.replace(/\r$/, ''))
           }
 
-          const finalAssistantOutput = [...assistantMessageOrder]
-            .reverse()
-            .map((messageKey) => assistantMessages.get(messageKey)?.trim() ?? '')
-            .find((message) => message.length > 0) ?? ''
+          const finalAssistantOutput = selectFinalAssistantOutput(
+            assistantMessages,
+            assistantMessageOrder,
+            excludedAssistantMessageKeys,
+          )
           const output = finalAssistantOutput
             || sanitizePromptOutput(rawStdout)
             || sanitizePromptOutput(stderr)

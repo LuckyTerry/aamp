@@ -135,3 +135,39 @@ test('OapiFeishuTaskClient appends task steps with quote through raw REST endpoi
   assert.equal(rawRequests[0]?.data?.task_steps?.[0]?.quote, '输出：{"title":"Read file"}')
   assert.equal(typeof rawRequests[0]?.data?.task_steps?.[0]?.timestamp, 'number')
 })
+
+test('OapiFeishuTaskClient loads the app owner as an open id', async () => {
+  const calls: unknown[] = []
+  const client = new OapiFeishuTaskClient({
+    appId: 'cli_owner',
+    appSecret: 'secret',
+    userIdType: 'open_id',
+    eventNames: ['task.task.update_user_access_v2'],
+  }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    application: {
+      application: {
+        get: async (payload: unknown) => {
+          calls.push(payload)
+          return {
+            data: {
+              app: {
+                owner: { owner_id: 'ou_owner' },
+              },
+            },
+          }
+        },
+      },
+    },
+  }
+
+  const owner = await client.getAppOwner()
+
+  assert.deepEqual(owner, { ownerId: 'ou_owner' })
+  assert.deepEqual(calls, [{
+    path: { app_id: 'cli_owner' },
+    params: { lang: 'zh_cn', user_id_type: 'open_id' },
+  }])
+})

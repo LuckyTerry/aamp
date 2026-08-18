@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import { z } from 'zod'
-import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from './config.js'
+import {
+  defaultAgentSlug,
+  normalizeAgentConfig,
+  type AgentConfigInput,
+  type BridgeConfig,
+  type SenderPolicy,
+} from './config.js'
 import { defaultAcpCommand } from './agent-resolver.js'
 import { createPairingCode, defaultPairingFile, defaultSenderPoliciesFile, pairingUrlToWebUrl, resolvePairingFile } from './pairing.js'
 import { getDefaultCredentialsPath, resolveCredentialsFile } from './storage.js'
@@ -29,6 +35,8 @@ const jsonInitAgentSchema = z.object({
   senderPoliciesFile: z.string().optional(),
   senderPolicies: z.array(senderPolicySchema).optional(),
   taskDispatchConcurrency: z.number().int().positive().optional(),
+  attachmentPolicy: z.enum(['allow', 'reject']).optional(),
+  executionLocation: z.enum(['local', 'remote']).optional(),
   createPairing: z.boolean().optional(),
 })
 
@@ -115,6 +123,12 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       ?? `${requestedAgent.name} via ACP bridge`
     const senderPolicies = normalizeSenderPolicies(requestedAgent.senderPolicies as SenderPolicy[] | undefined)
       ?? previousAgent?.senderPolicies
+    const attachmentPolicy = requestedAgent.attachmentPolicy
+      ?? previousAgent?.attachmentPolicy
+      ?? 'allow'
+    const executionLocation = requestedAgent.executionLocation
+      ?? previousAgent?.executionLocation
+      ?? 'local'
 
     let credentials = loadCredentials(resolvedCredentialsFile)
     let registered = false
@@ -134,7 +148,7 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       registered = true
     }
 
-    const agent: AgentConfig = {
+    const agent: AgentConfigInput = {
       ...(previousAgent ?? {}),
       name: requestedAgent.name,
       acpCommand,
@@ -145,13 +159,19 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       credentialsFile,
       pairingFile,
       senderPoliciesFile,
+      attachmentPolicy,
+      executionLocation,
       ...(senderPolicies ? { senderPolicies } : {}),
       ...(requestedAgent.taskDispatchConcurrency ?? previousAgent?.taskDispatchConcurrency
         ? { taskDispatchConcurrency: requestedAgent.taskDispatchConcurrency ?? previousAgent?.taskDispatchConcurrency }
         : {}),
     }
     delete agent.senderWhitelist
-    nextAgents.set(requestedAgent.name, agent)
+    nextAgents.set(requestedAgent.name, normalizeAgentConfig({
+      ...agent,
+      attachmentPolicy,
+      executionLocation,
+    }))
 
     const pairing = requestedAgent.createPairing
       ? createPairingCode({ mailbox: credentials.email, file: resolvedPairingFile })
@@ -163,8 +183,17 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
       connection: 'acp_bridge',
       email: credentials.email,
       registered,
-      credentialsFile: resolvedCredentialsFile,
-      acpCommand,
+      ...(executionLocation === 'remote'
+        ? {
+            credentialsConfigured: true,
+            acpCommandConfigured: true,
+          }
+        : {
+            credentialsFile: resolvedCredentialsFile,
+            acpCommand,
+          }),
+      attachmentPolicy,
+      executionLocation,
       ...(pairing ? {
         pairing: {
           mailbox: pairing.mailbox,
@@ -172,7 +201,9 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
           expiresAt: pairing.expiresAt,
           connectUrl: pairing.connectUrl,
           webUrl: pairingUrlToWebUrl(pairing.connectUrl),
-          pairingFile: resolvedPairingFile,
+          ...(executionLocation === 'remote'
+            ? { pairingFileConfigured: true }
+            : { pairingFile: resolvedPairingFile }),
         },
       } : {}),
     })
@@ -181,16 +212,21 @@ export async function runJsonInit(configPath: string, rawInput: unknown) {
   const config: BridgeConfig = {
     aampHost,
     rejectUnauthorized,
-    agents: [...nextAgents.values()],
+    agents: [...nextAgents.values()].map((agent) => normalizeAgentConfig({
+      ...agent,
+      attachmentPolicy: agent.attachmentPolicy ?? 'allow',
+      executionLocation: agent.executionLocation ?? 'local',
+    })),
   }
   mkdirSync(dirname(configPath), { recursive: true })
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`)
+  const containsRemoteAgent = config.agents.some((agent) => agent.executionLocation === 'remote')
 
   return {
     schemaVersion: 1,
     type: 'init.completed',
     bridge: 'acp-bridge',
-    configPath,
+    ...(containsRemoteAgent ? { configPathConfigured: true } : { configPath }),
     aampHost,
     agents: results,
   }

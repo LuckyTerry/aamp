@@ -1,4 +1,4 @@
-import type { FeishuTaskDetails, FeishuTaskDispatch, FeishuTaskEvent, FeishuTaskEventKind } from './types.js'
+import type { AgentExecutionLocation, FeishuTaskDetails, FeishuTaskDispatch, FeishuTaskEvent, FeishuTaskEventKind } from './types.js'
 
 const EMPTY_DESCRIPTION = '(empty description)'
 const DISPATCH_SOURCE = 'feishu-task'
@@ -7,7 +7,9 @@ type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
 
 export interface FeishuTaskDispatchOptions {
+  agentExecutionLocation?: AgentExecutionLocation
   feishuAppId?: string
+  feishuAppOwnerId?: string
   feishuBoe?: boolean
   feishuEnvMode?: 'boe' | 'pre' | 'ppe'
   feishuEnv?: string
@@ -32,14 +34,12 @@ export function buildFeishuTaskDispatchContext(
   _event: FeishuTaskEvent,
   _task: FeishuTaskDetails,
   _eventKind: FeishuTaskEventKind,
-  options?: FeishuTaskDispatchOptions,
+  _options?: FeishuTaskDispatchOptions,
 ): Record<string, string> {
-  const cliProfile = options?.feishuLarkCliProfile?.trim()
-  const cliBin = options?.feishuLarkCliBin?.trim()
+  const ownerId = nonEmpty(_options?.feishuAppOwnerId)
   return {
     source: DISPATCH_SOURCE,
-    ...(cliProfile ? { feishu_lark_cli_profile: cliProfile } : {}),
-    ...(cliBin ? { feishu_lark_cli_bin: cliBin } : {}),
+    ...(ownerId ? { sender_open_id: ownerId } : {}),
   }
 }
 
@@ -256,7 +256,80 @@ function buildFinalResultExample(payload: Record<string, unknown>): string {
   })}`
 }
 
-export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions): string {
+function renderInvariantTaskRules(): string[] {
+  return [
+    'Feishu Task invariant rules:',
+    '- Treat the Description section as the complete Feishu task context, including source context, child tasks, comments, and event metadata.',
+    '- Infer intent only from the Feishu Task context and thread context supplied with this dispatch.',
+    '- Only the Feishu Bridge writes the current Task comments, status, and deliveries.',
+    '- Do not create a new top-level Feishu task or write current-task comments, status, steps, or deliveries directly.',
+    '- Always finish with a single AAMP_RESULT_JSON block whose JSON object contains only the output field.',
+    '- The output must start with FEISHU_TASK_RESULT_JSON: followed by a compact JSON object using schema=feishu_task_result.v2.',
+    '- Both outer and inner JSON objects must be parseable by JSON.parse; nested multiline values use escaped JSON newlines.',
+    '- Use status=answered for a direct reply, status=succeeded for supported outputs, status=need_help for missing business input, and status=failed for exceptional execution failures.',
+    '- Emit the final result only after all work for this turn has settled.',
+  ]
+}
+
+function renderRemoteExecutionRules(): string[] {
+  return [
+    'Remote execution rules:',
+    '- You run in a remote sandbox. Caller-local cwd, files, home, binaries, profiles, credentials, MCP servers, and shell environment are unavailable.',
+    '- Use your own remote-native Feishu/Lark capabilities and identity for requested data reads.',
+    '- Only the Feishu Bridge writes the current Task comments, status, and deliveries.',
+    '- Text and HTTP(S) link results are supported. Local FILE references, ACP attachments, and file_delivery are unsupported.',
+    '- Internal remote tool orchestration is allowed, but all work for this turn must settle before the final result envelope.',
+  ]
+}
+
+function renderRemoteResultContractRules(): string[] {
+  const answeredExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'answered',
+    summary: '第一行\n第二行',
+    reply_written: false,
+  })
+  const succeededExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'succeeded',
+    summary: '已生成文本与链接交付。',
+    outputs: [
+      { kind: 'text_delivery', format: 'markdown', title: '摘要', content: '交付内容' },
+      { kind: 'link_delivery', url: 'https://example.com/result' },
+    ],
+  })
+  const helpExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'need_help',
+    summary: '需要用户提供业务输入。',
+    question: '请提供目标群 ID。',
+  })
+  const failedExample = buildFinalResultExample({
+    schema: 'feishu_task_result.v2',
+    status: 'failed',
+    summary: '远程读取失败。',
+    error: '没有权限读取指定群聊。',
+  })
+  return [
+    'Remote result schema:',
+    '- Every terminal FEISHU_TASK_RESULT_JSON payload requires a nonempty summary.',
+    '- status=answered requires a nonempty summary and reply_written=false. Omit outputs; the Feishu Bridge writes summary as the current Task comment.',
+    '- status=succeeded requires a nonempty summary and an outputs array with 1 to 10 supported items.',
+    '- outputs kind=reply_comment requires nonempty content.',
+    '- outputs kind=text_delivery requires format=markdown or plain_text and nonempty content; title is optional.',
+    '- outputs kind=link_delivery requires a valid HTTP(S) url with no username or password.',
+    '- file_delivery, ACP attachments, local FILE references, and other output kinds are unsupported for remote execution.',
+    '- status=need_help requires a nonempty summary and a nonempty question. The Feishu Bridge writes the question and moves the Task to waiting for human.',
+    '- status=failed requires a nonempty summary and a nonempty error. The Feishu Bridge writes the safe failure and settles the Task.',
+    '- Nested JSON escaping: the outer AAMP_RESULT_JSON and inner FEISHU_TASK_RESULT_JSON must both parse. Encode multiline user-visible values as `\\\\n` in the final visible outer JSON so the decoded inner JSON contains `\\n` escapes and decoded fields contain actual LF newlines.',
+    `- Example remote answered: ${answeredExample}`,
+    `- Example remote succeeded: ${succeededExample}`,
+    `- Example remote need_help: ${helpExample}`,
+    `- Example remote failed: ${failedExample}`,
+  ]
+}
+
+function renderLocalExecutionRules(options?: FeishuTaskDispatchOptions): string {
   const replyCommentExample = buildFinalResultExample({
     schema: 'feishu_task_result.v2',
     status: 'succeeded',
@@ -344,6 +417,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     ...renderSourceDocumentGuidance(options?.feishuLarkCliBin),
     '',
     'Feishu Write Contract:',
+    '- Only the Feishu Bridge writes the current Task comments, status, and deliveries.',
     '- Do not write current-task comments, status, steps, or deliverables directly.',
     '- The bridge marks parent and child tasks in progress from stream events.',
     '- The bridge writes reply_comment outputs as Feishu task comments.',
@@ -379,6 +453,7 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
     '- Because FEISHU_TASK_RESULT_JSON is embedded inside AAMP_RESULT_JSON.output, multiline user-visible fields must appear as `\\\\n` in the final visible AAMP_RESULT_JSON text.',
     '- After parsing the outer JSON, the inner FEISHU_TASK_RESULT_JSON must still contain `\\n` escape sequences, not literal LF characters inside JSON strings.',
     '- Before finalizing, validate that JSON.parse(<outer-json>).output starts with `FEISHU_TASK_RESULT_JSON:`, and JSON.parse(output.slice(marker.length)) succeeds.',
+    '- Emit the final result only after all work for this turn has settled.',
     '- Use schema=feishu_task_result.v2.',
     '- Use status=answered when there is no separate deliverable. Include reply_written=true if you already wrote a Feishu comment, or reply_written=false if the bridge should comment summary.',
     '- Use status=succeeded when the task result is ready for the bridge to write.',
@@ -405,11 +480,24 @@ export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions):
   ].join('\n')
 }
 
+export function buildFeishuTaskPromptRules(options?: FeishuTaskDispatchOptions): string {
+  if (options?.agentExecutionLocation === 'remote') {
+    return [
+      ...renderInvariantTaskRules(),
+      '',
+      ...renderRemoteExecutionRules(),
+      '',
+      ...renderRemoteResultContractRules(),
+    ].join('\n')
+  }
+  return renderLocalExecutionRules(options)
+}
+
 export function buildFeishuTaskContext(
   event: FeishuTaskEvent,
   task: FeishuTaskDetails,
   eventKind: FeishuTaskEventKind,
-  options?: Pick<FeishuTaskDispatchOptions, 'feishuAppId'>,
+  options?: Pick<FeishuTaskDispatchOptions, 'agentExecutionLocation' | 'feishuAppId'>,
 ): string {
   const description = nonEmpty(task.description) ?? EMPTY_DESCRIPTION
   const latestComment = getLatestEffectiveComment(task, options?.feishuAppId)
@@ -422,8 +510,7 @@ export function buildFeishuTaskContext(
   return [
     ...renderCriticalFinalResponseProtocol(),
     '',
-    ...renderExecutionOwnershipContract(),
-    '',
+    ...(options?.agentExecutionLocation === 'remote' ? [] : [...renderExecutionOwnershipContract(), '']),
     'Feishu Event:',
     `- normalized_kind: ${eventKind}`,
     `- raw_event_types: ${event.eventTypes.join(',') || '(unknown)'}`,
@@ -450,18 +537,13 @@ export function buildFeishuTaskDispatch(
 ): FeishuTaskDispatch {
   const taskId = buildFeishuTaskId(event)
   const sessionKey = `feishu-task:${task.guid}`
-  const {
-    feishuLarkCliProfile: _feishuLarkCliProfile,
-    feishuLarkCliBin: _feishuLarkCliBin,
-    ...dispatchContextOptions
-  } = options ?? {}
   return {
     taskId,
     sessionKey,
     title: `Feishu Task: ${task.summary || task.guid}`,
     bodyText: buildFeishuTaskContext(event, task, eventKind, options),
     dispatchContext: {
-      ...buildFeishuTaskDispatchContext(event, task, eventKind, dispatchContextOptions),
+      ...buildFeishuTaskDispatchContext(event, task, eventKind, options),
       [SESSION_KEY_DISPATCH_CONTEXT_KEY]: sessionKey,
     },
     promptRules: buildFeishuTaskPromptRules(options),

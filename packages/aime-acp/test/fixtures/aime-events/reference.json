@@ -1,0 +1,19 @@
+{
+  "type": "session.reference",
+  "data": {
+    "event_id": "evt-reference",
+    "event_offset": 5,
+    "timestamp": 104,
+    "event_key": "reference",
+    "session_id": "session-demo",
+    "task_id": "task-demo",
+    "references": [
+      {
+        "id": 1,
+        "title": "Public guide",
+        "uri": "https://example.test/guide",
+        "snippet": "Synthetic source."
+      }
+    ]
+  }
+}

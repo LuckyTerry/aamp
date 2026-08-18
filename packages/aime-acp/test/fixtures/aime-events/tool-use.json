@@ -1,0 +1,16 @@
+{
+  "type": "session.action.use_tool",
+  "data": {
+    "event_id": "evt-tool",
+    "event_offset": 8,
+    "timestamp": 107,
+    "event_key": "tool",
+    "session_id": "session-demo",
+    "tool_call_id": "call-tool-1",
+    "agent_step_id": "tool-agent-1",
+    "step_id": "tool-step-1",
+    "tool_name": "lookup",
+    "status": "running",
+    "summary": "Looking up a public item."
+  }
+}

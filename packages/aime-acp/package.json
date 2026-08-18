@@ -1,0 +1,45 @@
+{
+  "name": "@tengchengwei/aime-acp",
+  "version": "0.1.1-dev.1",
+  "description": "ACP server for the remote AIME agent",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": false,
+  "bin": {
+    "aime-acp": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "registry": "https://bnpm.byted.org"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node postbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint .",
+    "test": "vitest run --exclude 'test/integration/**'",
+    "test:integration": "vitest run --no-file-parallelism --maxWorkers=1 --no-isolate test/integration",
+    "verify:package": "npm run prepack && vitest run --no-file-parallelism --maxWorkers=1 --no-isolate test/integration/clean-install.test.ts test/integration/auth-rpc.test.ts",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+    "prepack": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "0.28.1",
+    "@bytedance-dev/bytedcli": "0.123.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@types/node": "20.19.43",
+    "rolldown": "1.2.4",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

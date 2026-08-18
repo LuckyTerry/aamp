@@ -4,7 +4,7 @@
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.28-dev.21",
+  "version": "0.1.29-dev.0",
   "description": "Bridge ACP-compatible agents (Claude, Codex, Gemini, etc.) into the AAMP email network — zero code, config-driven",
   "type": "module",
   "main": "dist/index.js",
@@ -14,10 +14,12 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "postbuild": "npm run prepare-bin",
     "prepare-bin": "node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
     "prepack": "npm run build && npm run prepare-bin",
     "prepublishOnly": "npm run build && npm run prepare-bin",
-    "test": "tsx --test \"src/**/*.test.ts\" \"test/*.test.ts\"",
+    "test": "tsx --test \"src/**/*.test.ts\" test/agent-resolver.test.ts test/config.test.ts test/discovery.test.ts test/init.test.ts test/json-init.test.ts",
+    "test:aime-packaged": "tsx --test --test-concurrency=1 test/aime-packaged.test.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {

@@ -10,6 +10,10 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import {
+  TASK_AGENT_TYPES,
+  resolveTaskAgentMetadata,
+} from './agent-metadata.mjs';
+import {
   createKeyedSerialExecutor,
   createSerializedRunner,
   runLayeredStarts,
@@ -56,10 +60,10 @@ const NPM_BIN = process.env.AAMP_TASK_NPM_BIN || 'npm';
 const NPM_REGISTRY = process.env.AAMP_TASK_NPM_REGISTRY || 'https://registry.npmjs.org/';
 const FEISHU_API_PROBE_URL = 'https://open.feishu.cn/';
 const NPM_CACHE_DIR = process.env.AAMP_TASK_NPM_CACHE_DIR || path.join(os.tmpdir(), 'aamp-one-click-npm-cache');
-const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@zengxingyuan/aamp-acp-bridge@0.1.28-dev.21';
-const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@zengxingyuan/aamp-feishu-bridge@0.1.51';
+const ACP_PACKAGE = process.env.AAMP_TASK_ACP_BRIDGE_PKG || '@luckyterry/aamp-acp-bridge@0.1.29-dev.0';
+const FEISHU_PACKAGE = process.env.AAMP_TASK_FEISHU_BRIDGE_PKG || '@luckyterry/aamp-feishu-bridge@0.1.52-dev.4';
 const INSTALL_COMMAND = process.env.AAMP_TASK_INSTALL_COMMAND
-  || 'npx -y --package @larktask/aamp-feishu-task-agent@dev feishu-task-agent install';
+  || 'npx -y --package @luckyterry/aamp-feishu-task-agent@dev feishu-task-agent install';
 const DEFAULT_AGENT = process.env.AAMP_TASK_DEFAULT_AGENT || '';
 const DEFAULT_AAMP_HOST = process.env.AAMP_TASK_AAMP_HOST || 'https://meshmail.ai';
 const DEBUG_MODE = process.env.AAMP_TASK_DEBUG_MODE === 'true';
@@ -70,7 +74,6 @@ const NETWORK_PROBE_TIMEOUT_MS = Math.max(1_000, Number(process.env.AAMP_TASK_NE
 const FEISHU_START_CONCURRENCY = 4;
 const CONFIG_SCHEMA = 'aamp.feishu-task-agent.bindings';
 const CONFIG_VERSION = 1;
-const AGENT_TYPES = ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai'];
 const PROFILE_DOMAINS = [
   'base', 'calendar', 'contact', 'docs', 'im', 'mail', 'mindnotes', 'minutes',
   'note', 'sheets', 'slides', 'task', 'vc', 'wiki',
@@ -176,11 +179,256 @@ function addSecret(value) {
 function redact(value) {
   let output = String(value ?? '');
   for (const secret of secrets) output = output.split(secret).join('[REDACTED]');
+  output = output.replace(/\b(Bearer|Basic)\s+[^\s,}]+/gi, '$1 [REDACTED]');
   output = output
     .replace(/([?&]pair_code=)[^&\s"']+/gi, '$1[REDACTED]')
-    .replace(/("?(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|device_code|pairCode)"?\s*[:=]\s*"?)[^",\s}]+/gi, '$1[REDACTED]')
+    .replace(/("?(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|accessToken|refresh_token|refreshToken|id_token|idToken|session_token|sessionToken|device_code|pairCode|api_key|apiKey|api-key|private_key|privateKey|private-key|auth_token|auth-token|password|authorization|cookie|credential|secret|token|session)"?\s*[:=]\s*"?)(?:(?:Bearer|Basic)\s+)?[^",\s}]+/gi, '$1[REDACTED]')
     .replace(/(--app-secret\s+)[^\s]+/gi, '$1[REDACTED]');
   return output;
+}
+
+const REMOTE_EVENT_PATH_PREFIX = 'aamp-runtime:';
+const REMOTE_AGENT_FAILED = 'REMOTE_AGENT_FAILED: Remote Agent execution failed.';
+const REMOTE_AGENT_PREPARATION_FAILED = 'REMOTE_AGENT_PREPARATION_FAILED: Remote Agent preparation failed.';
+const REMOTE_FAILURE_CODES = new Set([
+  'AIME_ACCESS_DENIED',
+  'AIME_EMPTY_RESPONSE',
+  'AIME_MODEL_NOT_FOUND',
+  'AIME_NETWORK_UNREACHABLE',
+  'AIME_PROTOCOL_DRIFT',
+  'AIME_SDK_INCOMPATIBLE',
+  'AIME_SEND_FAILED',
+  'AIME_SESSION_NOT_FOUND',
+  'AIME_STREAM_INTERRUPTED',
+  'AIME_UNSUPPORTED_CONTENT',
+  'AUTH_CONFIGURATION_UNSUPPORTED',
+  'AUTH_IDENTITY_CHANGED',
+  'AUTH_IDENTITY_UNAVAILABLE',
+  'AUTH_REQUIRED',
+  'AUTH_SOURCE_UNSUPPORTED',
+  'REMOTE_AGENT_FAILED',
+  'REMOTE_ARTIFACT_UNSUPPORTED',
+]);
+
+function isRemoteExecution(options) {
+  return options?.executionLocation === 'remote';
+}
+
+function encodeRemoteEventPath(value, options = {}) {
+  const eventPathRoot = options.eventPathRoot;
+  const eventPathHandles = options.eventPathHandles;
+  if (!eventPathRoot || !(eventPathHandles instanceof Map)
+    || typeof value !== 'string' || !path.isAbsolute(value)) return '';
+  const root = path.resolve(eventPathRoot);
+  const resolved = path.resolve(value);
+  if (!isPathInside(root, resolved)) return '';
+  let handle;
+  do {
+    handle = `${REMOTE_EVENT_PATH_PREFIX}${crypto.randomBytes(24).toString('base64url')}`;
+  } while (eventPathHandles.has(handle));
+  eventPathHandles.set(handle, { root, resolved });
+  return handle;
+}
+
+function safeRemoteFailure(value) {
+  const message = redact(value);
+  const candidate = /\b(?:AIME|AUTH|REMOTE)_[A-Z0-9_]+\b/.exec(message)?.[0];
+  const code = candidate && REMOTE_FAILURE_CODES.has(candidate) ? candidate : 'REMOTE_AGENT_FAILED';
+  if (message.trim()) return { code, message };
+  return { code, message: code === 'REMOTE_AGENT_FAILED' ? REMOTE_AGENT_FAILED : `${code}: Remote Agent execution failed.` };
+}
+
+function trustedAgentExecutionLocations(entries = []) {
+  const locations = new Map();
+  const ambiguous = new Set();
+  const values = entries instanceof Map ? entries.entries() : entries;
+  for (const entry of values || []) {
+    if (!Array.isArray(entry) || entry.length < 2) continue;
+    const [name, executionLocation] = entry;
+    if (typeof name !== 'string' || !['local', 'remote'].includes(executionLocation)) continue;
+    if (locations.has(name) || ambiguous.has(name)) {
+      locations.delete(name);
+      ambiguous.add(name);
+      continue;
+    }
+    locations.set(name, executionLocation);
+  }
+  return locations;
+}
+
+function trustedAgentIdentity(value, options, executionLocation) {
+  if (typeof value !== 'string') return '';
+  const actual = options.agentExecutionLocations?.get(value);
+  return actual && (!executionLocation || actual === executionLocation) ? value : '';
+}
+
+function allowedStructuralIdentity(value, allowedValues) {
+  return typeof value === 'string' && new Set(allowedValues || []).has(value) ? value : '';
+}
+
+function safeRemoteDuration(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function projectTrustedLocalAgentEvent(document, options = {}) {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
+  const type = typeof document.type === 'string' ? document.type : '';
+  const agent = trustedAgentIdentity(document.agent, options, 'local');
+  if (!agent || !['agent.starting', 'agent.started', 'agent.identity', 'agent.failed'].includes(type)) {
+    return undefined;
+  }
+  const event = {
+    type,
+    ...(document.bridge === 'acp-bridge' ? { bridge: 'acp-bridge' } : {}),
+    agent,
+  };
+  if (type === 'agent.starting') return event;
+  const durationMs = safeRemoteDuration(document.durationMs);
+  if (type === 'agent.started') {
+    return {
+      ...event,
+      ...(typeof document.email === 'string' ? { email: redact(document.email) } : {}),
+      connected: document.connected === true,
+      pollingFallback: document.pollingFallback === true,
+      ...(durationMs === undefined ? {} : { durationMs }),
+    };
+  }
+  if (type === 'agent.identity') {
+    return {
+      ...event,
+      ...(typeof document.email === 'string' ? { email: redact(document.email) } : {}),
+      ...(typeof document.acpCommand === 'string' ? { acpCommand: redact(document.acpCommand) } : {}),
+    };
+  }
+  return {
+    ...event,
+    message: redact(document.message || `${agent} Agent Bridge 启动失败`),
+    ...(typeof document.code === 'string'
+      ? { code: redact(document.code) }
+      : typeof document.code === 'number' ? { code: document.code } : {}),
+    ...(durationMs === undefined ? {} : { durationMs }),
+  };
+}
+
+function projectRemoteOperationalEvent(document, options = {}) {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return undefined;
+  const type = typeof document.type === 'string' ? document.type : '';
+  if (type === 'bridge.process') {
+    if (!['started', 'exited'].includes(document.status)) return undefined;
+    const event = { type, status: document.status };
+    const durationMs = safeRemoteDuration(document.durationMs);
+    if (durationMs !== undefined) event.durationMs = durationMs;
+    if (document.status === 'exited') {
+      event.code = Number.isInteger(document.code) ? document.code : null;
+      event.signal = typeof document.signal === 'string' && /^SIG[A-Z0-9]+$/.test(document.signal)
+        ? document.signal
+        : null;
+      event.expectedStop = document.expectedStop === true;
+      if (document.error) event.error = REMOTE_AGENT_FAILED;
+    }
+    return event;
+  }
+  if (type === 'bridge.running') {
+    const agents = Array.isArray(document.agents)
+      ? document.agents.flatMap((agent) => {
+          const name = trustedAgentIdentity(agent?.name, options);
+          return name ? [{ name }] : [];
+        })
+      : [];
+    return { type, agentCount: agents.length, agents };
+  }
+  if (type === 'bridge.task_runtime.starting') {
+    const appId = allowedStructuralIdentity(document.appId, options.allowedAppIds);
+    const imConfigDir = encodeRemoteEventPath(document.imConfigDir, options);
+    const taskConfigDir = encodeRemoteEventPath(document.taskConfigDir, options);
+    if (!appId || !imConfigDir || !taskConfigDir) return undefined;
+    return { type, appId, imConfigDir, taskConfigDir };
+  }
+  if (type === 'bridge.task_runtime.running') {
+    return { type };
+  }
+  if (type === 'agent.starting') {
+    const agent = trustedAgentIdentity(document.agent, options, 'remote');
+    return agent ? { type, agent } : undefined;
+  }
+  if (type === 'agent.started') {
+    const agent = trustedAgentIdentity(document.agent, options, 'remote');
+    if (!agent) return undefined;
+    const durationMs = safeRemoteDuration(document.durationMs);
+    return {
+      type,
+      agent,
+      connected: document.connected === true,
+      pollingFallback: document.pollingFallback === true,
+      ...(durationMs === undefined ? {} : { durationMs }),
+    };
+  }
+  if (type === 'agent.identity') {
+    const agent = trustedAgentIdentity(document.agent, options, 'remote');
+    if (!agent) return undefined;
+    return {
+      type,
+      agent,
+      executionLocation: 'remote',
+      acpCommandConfigured: document.acpCommandConfigured === true,
+    };
+  }
+  if (type === 'agent.failed') {
+    const agent = trustedAgentIdentity(document.agent, options, 'remote');
+    if (!agent) return undefined;
+    const failure = safeRemoteFailure(document.message);
+    const durationMs = safeRemoteDuration(document.durationMs);
+    return {
+      type,
+      agent,
+      ...failure,
+      ...(durationMs === undefined ? {} : { durationMs }),
+    };
+  }
+  return undefined;
+}
+
+function safeOperationalLine(line, options = {}) {
+  if (!String(line || '').trim()) return '';
+  const text = String(line).trim();
+  if (!isRemoteExecution(options)) return redact(text);
+  try {
+    const document = JSON.parse(text);
+    const localEvent = projectTrustedLocalAgentEvent(document, options);
+    if (localEvent) return JSON.stringify(localEvent);
+    const projected = projectRemoteOperationalEvent(document, options);
+    return projected ? JSON.stringify(projected) : redact(text);
+  } catch {
+    return redact(text);
+  }
+}
+
+function safeOperationalOutput(value, options = {}) {
+  return String(value ?? '')
+    .split(/\r?\n/)
+    .map((line) => safeOperationalLine(line, options))
+    .join('\n');
+}
+
+function safeCapturedLog(stdout, stderr, options = {}) {
+  const chunks = [stdout, stderr]
+    .map((value) => safeOperationalOutput(value, options).replace(/\n+$/g, ''))
+    .filter(Boolean);
+  return chunks.length ? `${chunks.join('\n')}\n` : '';
+}
+
+function resolveRemoteEventPath(value, record, eventPathRoot) {
+  const isHandle = typeof value === 'string' && value.startsWith(REMOTE_EVENT_PATH_PREFIX);
+  if (!isHandle) {
+    if (record?.eventPathHandles instanceof Map) throw new Error('Feishu Bridge 返回了无效的安全路径');
+    return value;
+  }
+  const entry = record?.eventPathHandles?.get(value);
+  const root = path.resolve(eventPathRoot);
+  if (!entry || entry.root !== root || !isPathInside(root, entry.resolved)) {
+    throw new Error('Feishu Bridge 返回了无效的安全路径');
+  }
+  return entry.resolved;
 }
 
 async function ensurePrivateDir(dir) {
@@ -492,20 +740,55 @@ async function assertNoSymlinkPath(root, candidate) {
   }
 }
 
+async function resolveConfiguredPendingPairingFile(group, agentType) {
+  const configuredAgents = (group?.agents || []).filter((agent) => agent?.name === agentType);
+  if (configuredAgents.length !== 1 || typeof configuredAgents[0].pairingFile !== 'string'
+    || !configuredAgents[0].pairingFile.trim()) {
+    throw new Error('ACP Bridge 私有配对文件配置缺失或 Agent 不唯一');
+  }
+  if (typeof group?.home !== 'string' || !path.isAbsolute(group.home)
+    || !isPathInside(RUNTIME_HOME, group.home)) {
+    throw new Error('ACP Bridge runtime 不属于 Task Agent 私有目录');
+  }
+  if (!path.isAbsolute(configuredAgents[0].pairingFile)
+    || !isPathInside(group.home, configuredAgents[0].pairingFile)) {
+    throw new Error('ACP Bridge 私有配对文件不属于当前 Agent Bridge runtime');
+  }
+  const configuredPairingFile = path.resolve(configuredAgents[0].pairingFile);
+  await assertNoSymlinkPath(RUNTIME_HOME, configuredPairingFile);
+  return configuredPairingFile;
+}
+
+async function resolvePendingPairingFile(group, agentType, pairing) {
+  const configuredPairingFile = await resolveConfiguredPendingPairingFile(group, agentType);
+  const executionLocation = resolveTaskAgentMetadata(agentType).executionLocation;
+  if (executionLocation === 'remote' && pairing?.pairingFileConfigured !== true) {
+    throw new Error('ACP Bridge 未确认远程 Agent 的私有配对文件配置');
+  }
+  if (executionLocation !== 'remote' && (typeof pairing?.pairingFile !== 'string'
+    || path.resolve(pairing.pairingFile) !== configuredPairingFile)) {
+    throw new Error('ACP Bridge 返回的本地配对文件与私有配置不一致');
+  }
+  return configuredPairingFile;
+}
+
 function validateBinding(binding, index) {
   if (!binding || typeof binding !== 'object') throw new Error(`bindings[${index}] 无效`);
   assertString(binding.binding_id, `bindings[${index}].binding_id`);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(binding.binding_id)) {
     throw new Error(`bindings[${index}].binding_id 必须是 UUID`);
   }
-  if (!AGENT_TYPES.includes(binding.agent_type)) {
-    throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy/workbuddy_ai`);
+  if (!TASK_AGENT_TYPES.includes(binding.agent_type)) {
+    throw new Error(`bindings[${index}].agent_type 仅支持 codex/cursor/coco/traex/traecli/workbuddy/workbuddy_ai/aime`);
   }
   assertString(binding.aamp_host, `bindings[${index}].aamp_host`);
   assertString(binding.environment?.name, `bindings[${index}].environment.name`);
   assertString(binding.bot?.app_id, `bindings[${index}].bot.app_id`);
   assertString(binding.bot?.app_secret, `bindings[${index}].bot.app_secret`);
-  assertString(binding.bot?.lark_cli_profile, `bindings[${index}].bot.lark_cli_profile`);
+  const metadata = resolveTaskAgentMetadata(binding.agent_type);
+  if (metadata.executionLocation === 'local') {
+    assertString(binding.bot?.lark_cli_profile, `bindings[${index}].bot.lark_cli_profile`);
+  }
   assertString(binding.feishu_config_dir, `bindings[${index}].feishu_config_dir`);
   const expectedConfigDir = expectedFeishuConfigDir(binding.binding_id);
   if (path.resolve(binding.feishu_config_dir) !== path.resolve(expectedConfigDir)) {
@@ -660,7 +943,7 @@ function startupSummaryLines({ title, plannedCount, running = [], failed = [], c
     lines.push('启动失败：');
     for (const item of failed) {
       lines.push(`- ${bindingLabel(item.binding, item.runtimeAgentType)}`);
-      lines.push(`  原因：${redact(item.reason)}`);
+      lines.push(`  原因：${safeBindingFailureReason(item.binding, item.reason)}`);
     }
   }
   if (cancelled.length) {
@@ -682,7 +965,7 @@ function installHasOnlyCancellations({ cancelled = [], failures = [], selectionF
 }
 
 function agentFailureMessage(agentType, message) {
-  const text = String(message || 'Agent Bridge 启动失败');
+  const text = safeAgentFailureReason(agentType, message || 'Agent Bridge 启动失败');
   if (agentType === 'traecli') {
     return `${text}\n请执行 'traecli doctor --json' 检查 TraeCode CLI，修复后重试。`;
   }
@@ -697,9 +980,32 @@ function agentFailureMessage(agentType, message) {
   return `${text}\n如果尚未登录，请打开 ${productName} 完成登录后重试。`;
 }
 
+function safeAgentFailureReason(agentType, message) {
+  try {
+    if (typeof resolveTaskAgentMetadata === 'function'
+      && resolveTaskAgentMetadata(agentType).executionLocation === 'remote') {
+      return safeRemoteFailure(message).message;
+    }
+  } catch {
+    // Unknown Agent validation remains authoritative at its existing call sites.
+  }
+  return String(message ?? '');
+}
+
+function safeBindingFailureReason(binding, message) {
+  try {
+    if (resolveTaskAgentMetadata(binding?.agent_type).executionLocation === 'remote') {
+      return safeRemoteFailure(message).message;
+    }
+  } catch {
+    // Binding validation remains authoritative at its existing call sites.
+  }
+  return redact(message);
+}
+
 function resolvePreparedAgentBindings(bindings, host, requestedAgentType, preparedAgentType) {
   const runtimeAgentType = preparedAgentType || requestedAgentType;
-  if (!AGENT_TYPES.includes(runtimeAgentType)) {
+  if (!TASK_AGENT_TYPES.includes(runtimeAgentType)) {
     throw new Error(`unexpected prepared Agent type: ${runtimeAgentType}`);
   }
   if (runtimeAgentType === requestedAgentType) {
@@ -775,13 +1081,14 @@ function printBindingCancelled(binding, reason) {
 }
 
 async function recordError(component, message, binding) {
+  const safeMessage = binding ? safeBindingFailureReason(binding, message) : redact(message);
   await errorLogWriter.write(`${JSON.stringify({
     timestamp: nowIso(),
     level: 'error',
     component,
     binding_id: binding?.binding_id,
     app_id: binding?.bot?.app_id,
-    message: redact(message),
+    message: safeMessage,
   })}\n`);
 }
 
@@ -790,13 +1097,16 @@ async function writeManifest() {
 }
 
 async function setBindingStatus(binding, phase, status, reason = '') {
+  const safeReason = status === 'failed'
+    ? safeBindingFailureReason(binding, reason)
+    : redact(reason);
   bindingStatuses.set(binding.binding_id, {
     agent_type: binding.agent_type,
     app_id: binding.bot.app_id,
     bot_name: binding.bot.display_name || binding.bot.app_id,
     phase,
     status,
-    ...(reason ? { reason: redact(reason) } : {}),
+    ...(reason ? { reason: safeReason } : {}),
     updated_at: nowIso(),
   });
   await writeManifest();
@@ -954,10 +1264,28 @@ function helperArgs(action, bindingOrAgent) {
 async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
   if (!BOOTSTRAP) throw new Error('Bootstrap path is unavailable');
   throwIfStopping();
-  const { input } = terminalStreams();
+  const helperAgent = typeof bindingOrAgent === 'object'
+    ? bindingOrAgent?.agent_type
+    : bindingOrAgent;
+  let executionLocation = 'local';
+  if (helperAgent) executionLocation = resolveTaskAgentMetadata(helperAgent).executionLocation;
+  const input = executionLocation === 'remote' && !process.stdin.isTTY
+    ? process.stdin
+    : terminalStreams().input;
   const helperEnv = { ...extraEnv };
   const inputPayload = helperEnv.AAMP_TASK_INTERNAL_BINDING_JSON || '';
   delete helperEnv.AAMP_TASK_INTERNAL_BINDING_JSON;
+  const remoteHelper = executionLocation === 'remote';
+  const helperProcessGroup = remoteHelper && process.platform !== 'win32';
+  // node (v25) aborts at startup when spawned detached with a /dev/tty stdin.
+  // Remote helpers never read stdin (interactive prompts use /dev/tty directly).
+  const helperStdin = remoteHelper ? 'ignore' : input;
+  const helperOutputOptions = {
+    executionLocation,
+    agentExecutionLocations: trustedAgentExecutionLocations(
+      helperAgent ? [[helperAgent, executionLocation]] : [],
+    ),
+  };
   const child = spawn('bash', helperArgs(action, bindingOrAgent), {
     env: {
       ...process.env,
@@ -965,21 +1293,52 @@ async function runBootstrapHelper(action, bindingOrAgent, extraEnv = {}) {
       AAMP_TASK_INTERNAL: 'true',
       AAMP_TASK_INTERNAL_RESULT_FD: '3',
       AAMP_TASK_INTERNAL_INPUT_FD: '4',
+      ...(remoteHelper ? {
+        AAMP_TASK_INTERNAL_EXECUTION_LOCATION: 'remote',
+        ONE_CLICK_LOG: '/dev/null',
+        ERRORS_LOG: '/dev/null',
+      } : {}),
     },
-    stdio: [input, 'inherit', 'inherit', 'pipe', 'pipe'],
+    stdio: [helperStdin, remoteHelper ? 'pipe' : 'inherit', remoteHelper ? 'pipe' : 'inherit', 'pipe', 'pipe'],
+    ...(helperProcessGroup ? { detached: true } : {}),
   });
-  const processRecord = trackTransientProcess(child, `Bootstrap helper ${action}`, false);
+  const processRecord = trackTransientProcess(child, `Bootstrap helper ${action}`, helperProcessGroup);
   let result = '';
+  const relayWrites = [];
+  const remoteDiagnostics = [];
+  const relayRemoteLine = (streamName, line) => {
+    if (!String(line || '').trim()) return;
+    const safeLine = safeOperationalLine(line, helperOutputOptions);
+    remoteDiagnostics.push(safeLine);
+    const target = streamName === 'stderr' ? process.stderr : process.stdout;
+    target.write(`${safeLine}\n`);
+    if (process.env.ONE_CLICK_LOG && process.env.ONE_CLICK_LOG !== '/dev/null') {
+      relayWrites.push(appendPrivate(process.env.ONE_CLICK_LOG, `${safeLine}\n`));
+    }
+  };
+  if (remoteHelper) {
+    createLineReader(child.stdout, (line) => relayRemoteLine('stdout', line));
+    createLineReader(child.stderr, (line) => relayRemoteLine('stderr', line));
+  }
   child.stdio[3].setEncoding('utf8');
   child.stdio[3].on('data', (chunk) => { result += chunk; });
   child.stdio[4].end(inputPayload ? `${inputPayload}\n` : '');
   if (stopRequested) await stopManagedProcess(processRecord);
   const exit = await processRecord.exitPromise;
+  await Promise.allSettled(relayWrites);
   throwIfStopping();
-  if (exit.code !== 0) throw exit.error || new Error(`Bootstrap helper ${action} failed${exit.signal ? ` (${exit.signal})` : ''}`);
+  if (exit.code !== 0) {
+    if (remoteHelper) {
+      throw new Error(remoteDiagnostics.at(-1) || REMOTE_AGENT_PREPARATION_FAILED);
+    }
+    throw exit.error || new Error(`Bootstrap helper ${action} failed${exit.signal ? ` (${exit.signal})` : ''}`);
+  }
   try {
     return JSON.parse(result.trim() || '{}');
   } catch {
+    if (remoteHelper) {
+      throw new Error(remoteDiagnostics.at(-1) || REMOTE_AGENT_PREPARATION_FAILED);
+    }
     throw new Error(`Bootstrap helper ${action} returned invalid result`);
   }
 }
@@ -1011,10 +1370,13 @@ async function runNpmExecCapture(packageSpec, executable, args, options = {}) {
   const exit = await processRecord.exitPromise;
   throwIfStopping();
   if (options.logFile) {
-    await appendPrivate(options.logFile, `${stdout}${stderr ? `\n${stderr}` : ''}`);
+    await appendPrivate(options.logFile, safeCapturedLog(stdout, stderr, options));
   }
   if (exit.code !== 0) {
-    const detail = redact(stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`);
+    const detail = safeOperationalOutput(
+      stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`,
+      options,
+    );
     throw new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`);
   }
   return { stdout, stderr };
@@ -1062,10 +1424,13 @@ async function runCapture(packageSpec, executable, args, options = {}) {
   const exit = await processRecord.exitPromise;
   throwIfStopping();
   if (options.logFile) {
-    await appendPrivate(options.logFile, `${stdout}${stderr ? `\n${stderr}` : ''}`);
+    await appendPrivate(options.logFile, safeCapturedLog(stdout, stderr, options));
   }
   if (exit.code !== 0) {
-    const detail = redact(stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`);
+    const detail = safeOperationalOutput(
+      stderr.trim() || stdout.trim() || exit.error?.message || `exit ${exit.code}`,
+      options,
+    );
     throw new Error(`${executable} failed: ${detail.split('\n').slice(-8).join('\n')}`);
   }
   return { stdout, stderr };
@@ -1133,6 +1498,10 @@ async function startManagedProcess({
   env,
   logFile,
   preparedExecutable,
+  executionLocation = 'local',
+  eventPathRoot,
+  agentExecutionLocations = [],
+  allowedAppIds = [],
 }) {
   await ensurePrivateDir(path.dirname(logFile));
   throwIfStopping();
@@ -1141,7 +1510,12 @@ async function startManagedProcess({
   const executableDescriptor = preparedExecutable || await packageExecutableLauncher.resolve(
     packageSpec,
     executable,
-    { env: env || process.env },
+    {
+      env: env || process.env,
+      executionLocation,
+      eventPathRoot,
+      ...(executionLocation === 'remote' ? { logFile } : {}),
+    },
   );
   throwIfStopping();
   const child = packageExecutableLauncher.launchPrepared({
@@ -1166,11 +1540,19 @@ async function startManagedProcess({
     expectedStop: false,
     processGroup: process.platform !== 'win32',
     outputTail: [],
+    eventPathHandles: executionLocation === 'remote' && eventPathRoot ? new Map() : undefined,
     logWriter,
     logWriteError: undefined,
   };
   managedProcesses.add(record);
-  void logWriter.write(`${JSON.stringify({
+  const outputOptions = {
+    executionLocation,
+    eventPathRoot,
+    eventPathHandles: record.eventPathHandles,
+    agentExecutionLocations: trustedAgentExecutionLocations(agentExecutionLocations),
+    allowedAppIds,
+  };
+  void logWriter.write(`${safeOperationalLine(JSON.stringify({
     timestamp: nowIso(),
     type: 'bridge.process',
     status: 'started',
@@ -1179,17 +1561,21 @@ async function startManagedProcess({
     package: packageSpec,
     pid: child.pid || null,
     node: process.version,
-  })}\n`).catch((error) => {
+  }), outputOptions)}\n`).catch((error) => {
     record.logWriteError ??= error;
   });
   const handleLine = (streamName, line) => {
-    const safeLine = redact(line);
+    const safeLine = safeOperationalLine(line, outputOptions);
     record.outputTail.push(`[${streamName}] ${safeLine}`);
     if (record.outputTail.length > 30) record.outputTail.shift();
     record.emitter.emit('output', safeLine);
-    if (streamName === 'stdout' && line.trim()) {
+    if (streamName === 'stdout' && safeLine.trim()) {
       try {
-        const event = JSON.parse(line.trim());
+        const rawEvent = JSON.parse(String(line).trim());
+        const event = executionLocation === 'remote'
+          ? (projectTrustedLocalAgentEvent(rawEvent, outputOptions)
+            || projectRemoteOperationalEvent(rawEvent, outputOptions))
+          : JSON.parse(safeLine.trim());
         if (event && typeof event.type === 'string') {
           record.events.push(event);
           record.emitter.emit('event', event);
@@ -1198,7 +1584,7 @@ async function startManagedProcess({
         // Feishu task mode can mix human-readable lines with JSON events.
       }
     }
-    void logWriter.write(`${line}\n`).catch((error) => {
+    void logWriter.write(`${safeLine}\n`).catch((error) => {
       record.logWriteError ??= error;
     });
   };
@@ -1209,7 +1595,7 @@ async function startManagedProcess({
     const finish = async (exit) => {
       if (settled) return;
       settled = true;
-      await logWriter.write(`${JSON.stringify({
+      await logWriter.write(`${safeOperationalLine(JSON.stringify({
         timestamp: nowIso(),
         type: 'bridge.process',
         status: 'exited',
@@ -1222,12 +1608,13 @@ async function startManagedProcess({
         signal: exit.signal || null,
         expectedStop: record.expectedStop,
         ...(exit.error ? { error: describeNetworkError(exit.error) } : {}),
-      })}\n`).catch((error) => {
+      }), outputOptions)}\n`).catch((error) => {
         record.logWriteError ??= error;
       });
       await logWriter.flush().catch((error) => {
         record.logWriteError ??= error;
       });
+      record.eventPathHandles?.clear();
       record.exited = true;
       record.exit = {
         ...exit,
@@ -1361,7 +1748,29 @@ async function releaseLease(lease) {
   await lease.release();
 }
 
-async function initializeAgentGroups(bindings) {
+function acpBridgeAgentPolicy(stableAgentType) {
+  const metadata = resolveTaskAgentMetadata(stableAgentType);
+  return {
+    executionLocation: metadata.executionLocation,
+    ...(metadata.attachmentPolicy ? { attachmentPolicy: metadata.attachmentPolicy } : {}),
+    ...(metadata.taskDispatchConcurrency
+      ? { taskDispatchConcurrency: metadata.taskDispatchConcurrency }
+      : {}),
+  };
+}
+
+function agentExecutionLocations(agents) {
+  return new Set((agents || []).map((agent) => (
+    resolveTaskAgentMetadata(agent.name).executionLocation
+  )));
+}
+
+function groupProcessExecutionLocation(agents) {
+  return agentExecutionLocations(agents).has('remote') ? 'remote' : 'local';
+}
+
+async function initializeAgentGroups(bindings, operations = {}) {
+  const prepareAgent = operations.runBootstrapHelper || runBootstrapHelper;
   const byHost = new Map();
   for (const binding of bindings) {
     if (!byHost.has(binding.aamp_host)) byHost.set(binding.aamp_host, new Map());
@@ -1405,8 +1814,9 @@ async function initializeAgentGroups(bindings) {
         const lease = await acquireAgentLease(host, agentType);
         throwIfStopping();
         group.leases.set(agentType, lease);
-        console.log(`[aamp-one-click] 正在检查 ${agentSelectionDisplayName(agentType)} 本地智能体...`);
-        const prepared = await runBootstrapHelper('__prepare-agent', sampleBinding);
+        const metadata = resolveTaskAgentMetadata(agentType);
+        console.log(`[aamp-one-click] 正在检查 ${agentSelectionDisplayName(agentType)} ${metadata.executionLocation === 'remote' ? '远程智能体' : '本地智能体'}...`);
+        const prepared = await prepareAgent('__prepare-agent', sampleBinding);
         throwIfStopping();
         runtimeAgentType = prepared.agent_type || agentType;
         if (prepared.cancelled === true) {
@@ -1430,7 +1840,9 @@ async function initializeAgentGroups(bindings) {
           if (!group.leases.has(stableAgentType)) {
             group.leases.set(stableAgentType, await acquireAgentLease(host, stableAgentType));
           }
-          if (path.resolve(prepared.lark_cli_config_dir || '') !== path.resolve(bridgeEnv.LARKSUITE_CLI_CONFIG_DIR)) {
+          const stableMetadata = resolveTaskAgentMetadata(stableAgentType);
+          if (stableMetadata.executionLocation === 'local'
+            && path.resolve(prepared.lark_cli_config_dir || '') !== path.resolve(bridgeEnv.LARKSUITE_CLI_CONFIG_DIR)) {
             throw new Error(`Agent 使用的 lark-cli 配置目录与 Online 配置不一致：${prepared.lark_cli_config_dir || 'unknown'}`);
           }
           const agentHome = path.join(home, 'agents', stableAgentType);
@@ -1445,6 +1857,7 @@ async function initializeAgentGroups(bindings) {
             pairingFile: path.join(agentHome, 'pairing.json'),
             senderPoliciesFile: path.join(agentHome, 'sender-policies.json'),
             createPairing: false,
+            ...acpBridgeAgentPolicy(stableAgentType),
           };
         });
         if (!stableAgentTypes.includes(agentType)) {
@@ -1465,6 +1878,7 @@ async function initializeAgentGroups(bindings) {
       }
     }
     if (!agents.length) continue;
+    group.executionLocation = groupProcessExecutionLocation(agents);
     try {
       throwIfStopping();
       const initResult = await runNetworkStage(async () => {
@@ -1472,7 +1886,16 @@ async function initializeAgentGroups(bindings) {
           ACP_PACKAGE,
           'aamp-acp-bridge',
           ['init', '--json', '--config', group.configFile, '--input', '-'],
-          { input: JSON.stringify({ aampHost: host, agents }), env: bridgeEnv, logFile },
+          { input: JSON.stringify({ aampHost: host, agents }),
+            env: bridgeEnv,
+            logFile,
+            executionLocation: group.executionLocation,
+            eventPathRoot: group.home,
+            agentExecutionLocations: trustedAgentExecutionLocations(agents.map((agent) => [
+              agent.name,
+              resolveTaskAgentMetadata(agent.name).executionLocation,
+            ])),
+          },
         );
       }, {
         stage: 'acp-init',
@@ -1513,7 +1936,15 @@ async function startAgentGroups(groups) {
       const runtimeAgentNames = agents
         .map((agent) => group.runtimeAgentTypes.get(agent.name) || agent.name)
         .map(agentSelectionDisplayName);
-      console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
+      const executionLocations = agentExecutionLocations(agents);
+      if (executionLocations.size === 1 && executionLocations.has('remote')) {
+        console.log(`[aamp-one-click] 正在启动远程 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
+      } else if (executionLocations.size === 1 && executionLocations.has('local')) {
+        console.log(`[aamp-one-click] 正在启动本地 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
+      } else {
+        console.log(`[aamp-one-click] 正在启动 Agent Bridge (${runtimeAgentNames.join(', ')})...`);
+      }
+      const executionLocation = executionLocations.has('remote') ? 'remote' : 'local';
       const started = await runNetworkStage(async ({ attempt, maxAttempts }) => {
         const process = await startManagedProcess({
           label: `ACP Bridge ${group.host}`,
@@ -1522,6 +1953,12 @@ async function startAgentGroups(groups) {
           args: ['start', '--config', group.configFile, '--json', ...(DEBUG_MODE ? ['--debug'] : [])],
           env: bridgeEnv,
           logFile: group.logFile,
+          executionLocation,
+          eventPathRoot: group.home,
+          agentExecutionLocations: agents.map((agent) => [
+            agent.name,
+            resolveTaskAgentMetadata(agent.name).executionLocation,
+          ]),
         });
         group.process = process;
         try {
@@ -1623,14 +2060,15 @@ async function writeFeishuRuntimeProfile(binding) {
   const instancesDir = path.join(binding.feishu_config_dir, 'task-runtime', 'instances');
   await assertNoSymlinkPath(RUNTIME_HOME, profileFile);
   await assertNoSymlinkPath(RUNTIME_HOME, instancesDir);
+  const metadata = resolveTaskAgentMetadata(binding.agent_type);
   await writeJsonAtomic(profileFile, {
     version: 1,
     profiles: [{
       app_id: binding.bot.app_id,
       app_secret: binding.bot.app_secret,
-      profile: binding.bot.lark_cli_profile,
       display_name: binding.bot.display_name,
-      auth_mode: 'lark-cli',
+      auth_mode: metadata.executionLocation === 'remote' ? 'app-secret' : 'lark-cli',
+      ...(metadata.executionLocation === 'local' ? { profile: binding.bot.lark_cli_profile } : {}),
       capabilities: ['im', 'task'],
       domains: PROFILE_DOMAINS,
       updated_at: nowIso(),
@@ -1668,7 +2106,8 @@ async function probeReadyBindingProfiles(
 ) {
   const probes = new Map();
   for (const binding of bindings) {
-    if (bindingNeedsInitialStart(binding)) continue;
+    if (bindingNeedsInitialStart(binding)
+      || resolveTaskAgentMetadata(binding.agent_type).executionLocation === 'remote') continue;
     operations.throwIfStopping();
     try {
       const profile = await operations.probeBindingProfile(binding);
@@ -1691,6 +2130,7 @@ function prewarmFeishuExecutable(binding) {
 }
 
 function feishuArgs(binding, larkCliBin, target) {
+  const metadata = resolveTaskAgentMetadata(binding.agent_type);
   const targetArgs = target.pairingUrl
     ? ['--pairing-url', target.pairingUrl]
     : ['--target-agent', target.agentTargetEmail];
@@ -1699,12 +2139,15 @@ function feishuArgs(binding, larkCliBin, target) {
     '--config-dir', binding.feishu_config_dir,
     '--aamp-host', binding.aamp_host,
     '--agent', binding.agent_type,
+    '--agent-execution-location', metadata.executionLocation,
     ...targetArgs,
     '--app-id', binding.bot.app_id,
     '--bot-name', binding.bot.display_name || binding.bot.app_id,
-    '--use-feishu-cli',
-    '--feishu-cli-profile', binding.bot.lark_cli_profile,
-    '--feishu-cli-bin', larkCliBin,
+    ...(metadata.executionLocation === 'local' ? [
+      '--use-feishu-cli',
+      '--feishu-cli-profile', binding.bot.lark_cli_profile,
+      '--feishu-cli-bin', larkCliBin,
+    ] : []),
     '--json',
     ...(DEBUG_MODE ? ['--debug'] : []),
   ];
@@ -1728,21 +2171,29 @@ async function prepareFeishuProcess(
   await operations.writeFeishuRuntimeProfile(binding);
   operations.throwIfStopping();
   const environment = operations.onlineEnvironment(binding);
+  const metadata = resolveTaskAgentMetadata(binding.agent_type);
   const probedProfile = profileProbes?.get(binding);
-  const profile = probedProfile?.ready === true
-    && probedProfile.lark_cli_bin
-    && path.resolve(probedProfile.lark_cli_config_dir || '')
-      === path.resolve(environment.LARKSUITE_CLI_CONFIG_DIR || '')
-    ? probedProfile
-    : await operations.ensureBindingProfile(binding);
+  const profile = metadata.executionLocation === 'remote'
+    ? {}
+    : (probedProfile?.ready === true
+      && probedProfile.lark_cli_bin
+      && path.resolve(probedProfile.lark_cli_config_dir || '')
+        === path.resolve(environment.LARKSUITE_CLI_CONFIG_DIR || '')
+      ? probedProfile
+      : await operations.ensureBindingProfile(binding));
   operations.throwIfStopping();
-  if (!profile.lark_cli_bin) throw new Error(`lark-cli profile ${binding.bot.lark_cli_profile} is unavailable`);
+  if (metadata.executionLocation === 'local' && !profile.lark_cli_bin) throw new Error(`lark-cli profile ${binding.bot.lark_cli_profile} is unavailable`);
+  const logFile = path.join(RUN_LOG_DIR, `feishu-bridge-${safeId(binding.binding_id)}-${phase}.jsonl`);
   const preparedExecutable = operations.resolveFeishuExecutable
     ? await operations.resolveFeishuExecutable(environment)
     : await packageExecutableLauncher.resolve(
         FEISHU_PACKAGE,
         'aamp-feishu-bridge',
-        { env: environment },
+        {
+          env: environment,
+          executionLocation: metadata.executionLocation,
+          ...(metadata.executionLocation === 'remote' ? { logFile } : {}),
+        },
       );
   operations.throwIfStopping();
   return {
@@ -1750,7 +2201,7 @@ async function prepareFeishuProcess(
     phase,
     runtimeAgentType,
     larkCliBin: profile.lark_cli_bin,
-    logFile: path.join(RUN_LOG_DIR, `feishu-bridge-${safeId(binding.binding_id)}-${phase}.jsonl`),
+    logFile,
     preparedExecutable,
   };
 }
@@ -1779,6 +2230,13 @@ async function startPreparedFeishuProcess(prepared, target, environment = online
     env: environment,
     logFile,
     preparedExecutable,
+    executionLocation: resolveTaskAgentMetadata(binding.agent_type).executionLocation,
+    eventPathRoot: binding.feishu_config_dir,
+    agentExecutionLocations: [[
+      binding.agent_type,
+      resolveTaskAgentMetadata(binding.agent_type).executionLocation,
+    ]],
+    allowedAppIds: [binding.bot.app_id],
   });
 }
 
@@ -1858,9 +2316,11 @@ async function waitForInitialBinding(record, pairingFile) {
 async function readInitialRuntimeMetadata(binding, record, expectedAgentEmail) {
   const starting = record.events.find((event) => event.type === 'bridge.task_runtime.starting' && event.appId === binding.bot.app_id);
   if (!starting?.imConfigDir || !starting?.taskConfigDir) throw new Error('Feishu Bridge 未返回实例配置目录');
-  const imFile = path.join(starting.imConfigDir, 'config.json');
-  const taskFile = path.join(starting.taskConfigDir, 'config.json');
-  if (!isPathInside(binding.feishu_config_dir, starting.imConfigDir) || !isPathInside(binding.feishu_config_dir, starting.taskConfigDir)) {
+  const imConfigDir = resolveRemoteEventPath(starting.imConfigDir, record, binding.feishu_config_dir);
+  const taskConfigDir = resolveRemoteEventPath(starting.taskConfigDir, record, binding.feishu_config_dir);
+  const imFile = path.join(imConfigDir, 'config.json');
+  const taskFile = path.join(taskConfigDir, 'config.json');
+  if (!isPathInside(binding.feishu_config_dir, imConfigDir) || !isPathInside(binding.feishu_config_dir, taskConfigDir)) {
     throw new Error('Feishu Bridge 返回了新流程 runtime-v1 之外的配置目录');
   }
   await assertNoSymlinkPath(RUNTIME_HOME, imFile);
@@ -1873,8 +2333,8 @@ async function readInitialRuntimeMetadata(binding, record, expectedAgentEmail) {
     throw new Error('Feishu Bridge 实例的 Bot App ID 与本次配对不一致');
   }
   return {
-    im_config_dir: starting.imConfigDir,
-    task_config_dir: starting.taskConfigDir,
+    im_config_dir: imConfigDir,
+    task_config_dir: taskConfigDir,
     feishu_bridge_email: imConfig.mailbox?.email || '',
   };
 }
@@ -1915,6 +2375,8 @@ const bindingStartOperations = Object.freeze({
   readInitialRuntimeMetadata,
   runCapture,
   parseJsonDocument,
+  resolveConfiguredPendingPairingFile,
+  resolvePendingPairingFile,
   setBindingStatus,
   startPreparedFeishuUntilReady,
   stopManagedProcess,
@@ -2011,21 +2473,37 @@ async function executePreparedPendingBindingStart(prepared, operations = binding
   } = prepared;
   let feishu;
   try {
+    const configuredPairingFile = await operations.resolveConfiguredPendingPairingFile(
+      group,
+      originalBinding.agent_type,
+    );
+    operations.throwIfStopping();
     const pairResult = await operations.runCapture(
       ACP_PACKAGE,
       'aamp-acp-bridge',
       ['pair', '--agent', originalBinding.agent_type, '--config', group.configFile, '--json', '--no-start'],
-      { logFile: group.logFile },
+      {
+        logFile: group.logFile,
+        executionLocation: resolveTaskAgentMetadata(originalBinding.agent_type).executionLocation,
+      },
     );
     operations.throwIfStopping();
     const pairing = operations.parseJsonDocument(pairResult.stdout, 'ACP pairing');
-    if (!pairing.connectUrl || !pairing.pairingFile || pairing.mailbox !== email) {
+    if (!pairing.connectUrl || pairing.mailbox !== email) {
       throw new Error('ACP Bridge 返回的配对信息不完整或 mailbox 不一致');
+    }
+    const pairingFile = await operations.resolvePendingPairingFile(
+      group,
+      originalBinding.agent_type,
+      pairing,
+    );
+    if (pairingFile !== configuredPairingFile) {
+      throw new Error('ACP Bridge 私有配对文件在配对过程中发生变化');
     }
     feishu = await operations.startPreparedFeishuUntilReady(
       preparedFeishu,
       { pairingUrl: pairing.connectUrl },
-      { stage: mode === 'install' ? 'feishu-install-bind' : 'feishu-add-bind', pairingFile: pairing.pairingFile },
+      { stage: mode === 'install' ? 'feishu-install-bind' : 'feishu-add-bind', pairingFile },
     );
     operations.throwIfStopping();
     binding.runtime = await operations.readInitialRuntimeMetadata(binding, feishu, email);
@@ -2105,7 +2583,8 @@ async function runPreparedBindingStarts(preparedItems, start = executePreparedBi
 }
 
 function reportBindingFailure(binding, runtimeAgentType, reason, mode) {
-  console.error(`🔴 启动失败：${bindingLabel(binding, runtimeAgentType)}\n   原因：${reason}`);
+  const safeReason = safeBindingFailureReason(binding, reason);
+  console.error(`🔴 启动失败：${bindingLabel(binding, runtimeAgentType)}\n   原因：${safeReason}`);
   if (mode === 'install') {
     console.error('   绑定配置已保存，可稍后运行 feishu-task-agent start 重试。');
   } else {
@@ -2204,7 +2683,7 @@ async function startBindingsWithGroups(
       continue;
     }
     const binding = outcome.item;
-    const reason = redact(outcome.reason?.message || outcome.reason);
+    const reason = safeBindingFailureReason(binding, outcome.reason?.message || outcome.reason);
     const runtimeAgentType = groups.get(binding.aamp_host)?.runtimeAgentTypes?.get(binding.agent_type)
       || binding.agent_type;
     failed.push({ binding, reason, runtimeAgentType });
@@ -2280,7 +2759,7 @@ async function reconcileOverlappedReadyBindings(
       reason = `${bindingLabel(binding, runtimeAgentType)} 的 Feishu Bridge 在进入监督前已退出 (${feishu?.exit?.signal || feishu?.exit?.code || 'unknown'})`;
     }
     if (reason) {
-      const redactedReason = redact(reason);
+      const redactedReason = safeBindingFailureReason(binding, reason);
       if (feishu && !feishu.exited) await operations.stopManagedProcess(feishu);
       await operations.setBindingStatus(binding, 'start', 'failed', redactedReason);
       await operations.recordError('startup', redactedReason, binding);
@@ -2380,7 +2859,7 @@ async function reconcileStartupResults(
 }
 
 async function recordOnlineValidationFailure(binding, error) {
-  const reason = redact(error.message || error);
+  const reason = safeBindingFailureReason(binding, error.message || error);
   await setBindingStatus(binding, 'start', 'failed', reason);
   await recordError('startup', reason, binding);
   console.error(`\n🔴 启动失败：${bindingLabel(binding)}\n   原因：${reason}`);
@@ -2610,18 +3089,20 @@ function displayBindings(bindings) {
 
 async function discoverAgents() {
   const result = await runBootstrapHelper('__discover-agents', '');
-  const agents = (result.agents || []).filter((agent) => AGENT_TYPES.includes(agent));
+  const agents = (result.agents || []).filter((agent) => TASK_AGENT_TYPES.includes(agent));
   if (!agents.length) {
-    throw new Error('暂未检测到本地智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI 后重试。');
+    throw new Error('暂未检测到智能体。请先安装 Codex、Cursor、Trae CLI、TraeCode CLI、WorkBuddy 或 WorkBuddy AI，或连接公司内网使用 AIME。');
   }
   return agents;
 }
 
 async function createDraft(agents, selectedAppIds) {
-  const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的本地智能体：', agents, agentSelectionDisplayName);
+  const agent = DEFAULT_AGENT || await chooseOne('请选择要绑定的智能体：', agents, agentSelectionDisplayName);
   const registered = await runBootstrapHelper('__register-binding', agent);
   addSecret(registered.app_secret);
-  if (!registered.app_id || !registered.app_secret || !registered.lark_cli_profile) {
+  const metadata = resolveTaskAgentMetadata(agent);
+  if (!registered.app_id || !registered.app_secret
+    || (metadata.executionLocation === 'local' && !registered.lark_cli_profile)) {
     throw new Error('飞书应用授权结果不完整');
   }
   if (selectedAppIds.has(registered.app_id)) {
@@ -2637,7 +3118,7 @@ async function createDraft(agents, selectedAppIds) {
       app_id: registered.app_id,
       app_secret: registered.app_secret,
       display_name: registered.display_name || registered.app_id,
-      lark_cli_profile: registered.lark_cli_profile,
+      ...(metadata.executionLocation === 'local' ? { lark_cli_profile: registered.lark_cli_profile } : {}),
     },
     environment: { name: 'online' },
     state: 'pending',
@@ -2708,7 +3189,7 @@ async function runBindingSession(mode) {
       console.error(`🔴 本次选择未完成：${reason}`);
     }
     throwIfStopping();
-    keepGoing = await confirm('是否继续选择本地智能体和 Bot？', false);
+    keepGoing = await confirm('是否继续选择智能体和 Bot？', false);
     throwIfStopping();
   }
 
@@ -2960,6 +3441,7 @@ if (isMainModule) {
 
 export {
   bindingExpectation,
+  acpBridgeAgentPolicy,
   commitPreparedAgentBindings,
   createPromptInterrupter,
   createResourceCleanup,
@@ -2972,11 +3454,16 @@ export {
   orderStartupItems,
   prepareBindingStart,
   prepareFeishuProcess,
+  readInitialRuntimeMetadata,
+  resolveConfiguredPendingPairingFile,
+  resolvePendingPairingFile,
+  feishuArgs,
   prepareAndCommitAgentBindings,
   probeReadyBindingProfiles,
   reconcileStartupResults,
   reconcileOverlappedReadyBindings,
   recordPreparationFailure,
+  recordError,
   recordStableAgentFailure,
   resolvePreparedAgentBindings,
   orchestrateStartupBindings,
@@ -2986,7 +3473,10 @@ export {
   startBindingsWithGroups,
   startAgentGroups,
   startManagedProcess,
+  runBootstrapHelper,
+  setBindingStatus,
   startupSummaryLines,
   cleanupAll,
   upsertBindings,
+  writeManifest,
 };

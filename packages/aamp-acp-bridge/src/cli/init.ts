@@ -3,7 +3,12 @@ import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AampClient } from 'aamp-sdk'
 import * as qrcode from 'qrcode-terminal'
-import { defaultAgentSlug, type AgentConfig, type BridgeConfig, type SenderPolicy } from '../config.js'
+import {
+  defaultAgentSlug,
+  type AgentConfigInput,
+  type BridgeConfigInput,
+  type SenderPolicy,
+} from '../config.js'
 import {
   KNOWN_AGENTS,
   defaultAcpCommand,
@@ -592,7 +597,7 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
 
   // 4. Register AAMP identities
   console.log('\n? Registering AAMP identities...')
-  const agents: AgentConfig[] = []
+  const agents: AgentConfigInput[] = []
   const previousSenderPolicies = loadPreviousSenderPolicies(configPath)
 
   for (const name of selected) {
@@ -630,6 +635,8 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
       agents.push({
         name,
         acpCommand,
+        attachmentPolicy: 'allow',
+        executionLocation: 'local',
         slug,
         credentialsFile: credFile,
         pairingFile,
@@ -662,6 +669,8 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
       agents.push({
         name,
         acpCommand,
+        attachmentPolicy: 'allow',
+        executionLocation: 'local',
         slug,
         credentialsFile: credFile,
         pairingFile,
@@ -681,7 +690,7 @@ export async function runInit(configPath: string, opts: RunInitOptions = {}): Pr
   }
 
   // 5. Write config
-  const config: BridgeConfig = { aampHost, rejectUnauthorized: false, agents }
+  const config: BridgeConfigInput = { aampHost, rejectUnauthorized: false, agents }
   mkdirSync(dirname(configPath), { recursive: true })
   writeFileSync(configPath, JSON.stringify(config, null, 2))
   console.log(`\nConfig written to ${configPath}`)

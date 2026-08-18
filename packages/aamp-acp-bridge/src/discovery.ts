@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import type { AgentConfig, BridgeConfig } from './config.js'
+import type { AgentConfigInput, BridgeConfigInput } from './config.js'
 import { resolveCredentialsFile } from './storage.js'
 import {
   KNOWN_AGENTS,
@@ -9,19 +9,33 @@ import {
   missingAgentWarning,
 } from './agent-resolver.js'
 
-export interface AcpBridgeAgentCandidate {
+interface AcpBridgeAgentCandidateBase {
   id: string
   displayName: string
   connection: 'acp_bridge'
   detected: boolean
   configured: boolean
   confidence: 'high' | 'medium' | 'low'
-  command: string
-  acpCommand: string
-  version?: string
   email?: string
   warnings: string[]
 }
+
+export interface AcpBridgeLocalAgentCandidate extends AcpBridgeAgentCandidateBase {
+  command: string
+  acpCommand: string
+  version?: string
+}
+
+export interface AcpBridgeRemoteAgentCandidate extends AcpBridgeAgentCandidateBase {
+  executionLocation: 'remote'
+  commandConfigured: true
+  acpCommandConfigured: true
+  versionDetected?: true
+}
+
+export type AcpBridgeAgentCandidate =
+  | AcpBridgeLocalAgentCandidate
+  | AcpBridgeRemoteAgentCandidate
 
 export interface AcpBridgeDiscovery {
   schemaVersion: 1
@@ -29,24 +43,24 @@ export interface AcpBridgeDiscovery {
   candidates: AcpBridgeAgentCandidate[]
 }
 
-function loadPreviousConfig(configPath: string): BridgeConfig | undefined {
+function loadPreviousConfig(configPath: string): BridgeConfigInput | undefined {
   if (!existsSync(configPath)) return undefined
 
   try {
-    const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<BridgeConfig>
+    const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as Partial<BridgeConfigInput>
     if (!raw || !Array.isArray(raw.agents)) return undefined
 
     return {
       aampHost: typeof raw.aampHost === 'string' ? raw.aampHost : 'https://meshmail.ai',
       rejectUnauthorized: raw.rejectUnauthorized === true,
       agents: raw.agents,
-    } as BridgeConfig
+    } as BridgeConfigInput
   } catch {
     return undefined
   }
 }
 
-function loadConfiguredEmail(agent: AgentConfig): string | undefined {
+function loadConfiguredEmail(agent: AgentConfigInput): string | undefined {
   try {
     const credFile = resolveCredentialsFile(agent.credentialsFile, agent.name)
     const creds = JSON.parse(readFileSync(credFile, 'utf-8')) as { email?: string }
@@ -70,20 +84,39 @@ export function discoverAcpBridgeAgents(configPath: string): AcpBridgeDiscovery 
     const command = resolution?.command ?? defaultAgentCommand(name)
     const detected = Boolean(resolution)
     const configured = Boolean(existingAgent)
-    const warnings = detected ? [] : [missingAgentWarning(name)]
+    const remote = existingAgent?.executionLocation === 'remote'
+    const warnings = detected
+      ? []
+      : remote
+        ? ['Remote Agent adapter was not detected.']
+        : [missingAgentWarning(name)]
 
-    return {
+    const common: AcpBridgeAgentCandidateBase = {
       id: name,
       displayName: name,
       connection: 'acp_bridge',
       detected,
       configured,
       confidence: detected ? 'high' : configured ? 'medium' : 'low',
+      ...(existingAgent ? { email: loadConfiguredEmail(existingAgent) } : {}),
+      warnings,
+    }
+
+    if (remote) {
+      return {
+        ...common,
+        executionLocation: 'remote',
+        commandConfigured: true,
+        acpCommandConfigured: true,
+        ...(resolution?.version ? { versionDetected: true as const } : {}),
+      }
+    }
+
+    return {
+      ...common,
       command,
       acpCommand: defaultAcpCommand(name, existingAgent?.acpCommand),
       ...(resolution?.version ? { version: resolution.version } : {}),
-      ...(existingAgent ? { email: loadConfiguredEmail(existingAgent) } : {}),
-      warnings,
     }
   })
 

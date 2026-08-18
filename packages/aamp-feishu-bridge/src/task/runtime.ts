@@ -26,6 +26,7 @@ import { buildFeishuTaskDispatch, buildFeishuTaskId } from './dispatch.js'
 import { classifyFeishuTaskEvent } from './events.js'
 import { isRetryableFeishuError, OapiFeishuTaskClient } from './feishu.js'
 import type {
+  AgentExecutionLocation,
   BridgeConfig,
   FeishuAgentRegistrationState,
   FeishuAppOwnerState,
@@ -83,6 +84,7 @@ const APP_OWNER_CACHE_TTL_MS = 60 * 60 * 1000
 const PERMISSION_DENIED_COMMENT_NOTICE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_PERMISSION_DENIED_COMMENT_NOTICE_KEYS = 1000
 const PERMISSION_DENIED_COMMENT_REPLY = '你没有权限通过评论触发此任务继续执行。当前仅应用 Owner 可以触发任务流转，请联系应用 Owner 处理。'
+const REMOTE_ATTACHMENTS_UNSUPPORTED_HELP = 'REMOTE_ATTACHMENTS_UNSUPPORTED：远程智能体当前不支持读取飞书任务附件。请移除父任务、子任务及任务交付附件后重试。'
 
 type StreamStepKind = 'status' | 'text' | 'todo' | 'tool'
 type ToolStepStatus = 'completed' | 'failed' | 'pending' | 'running'
@@ -102,7 +104,7 @@ type PostPromptFeishuFailureAction =
   | 'complete_status'
   | 'feishu_write'
 
-type TaskResultFailureReason = 'agent_failed' | 'bridge_output_write' | 'final_contract'
+export type FeishuTaskResultFailureReason = 'agent_failed' | 'bridge_output_write' | 'final_contract'
 
 function getFeishuLarkCliProfile(profile: string | undefined): string | undefined {
   return profile?.trim() || undefined
@@ -114,6 +116,7 @@ interface PendingStreamStep {
   kind: StreamStepKind
   toolName?: string
   toolStatus?: ToolStepStatus
+  messageId?: string
   normalized: string
 }
 
@@ -121,6 +124,7 @@ interface StreamTaskStep extends FeishuTaskStepInput {
   kind: StreamStepKind
   toolName?: string
   toolStatus?: ToolStepStatus
+  messageId?: string
 }
 
 interface StreamStepBuffer {
@@ -216,6 +220,27 @@ function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+export function sanitizeTaskVisibleFailureReason(
+  error: unknown,
+  _executionLocation: AgentExecutionLocation,
+): string {
+  return truncateForShortFailureReason(error)
+}
+
+function sanitizeTaskVisibleHelpText(
+  value: string,
+  _executionLocation: AgentExecutionLocation,
+): string {
+  return value.trim()
+}
+
+function formatRuntimeFailure(
+  error: unknown,
+  _executionLocation: AgentExecutionLocation,
+): string {
+  return formatUnknownError(error)
+}
+
 function truncateForShortFailureReason(error: unknown): string {
   const normalized = formatUnknownError(error).replace(/\s+/g, ' ').trim()
   const characters = Array.from(normalized || '未知错误')
@@ -248,11 +273,12 @@ function buildPromptDispatchFailureComment(
   action: PromptDispatchFailureAction,
   error: unknown,
   aampTaskId?: string,
+  executionLocation: AgentExecutionLocation = 'local',
 ): string {
   const lead = [
     `${getPromptDispatchLeadText(eventKind)}，但暂时无法转交智能体处理。`,
     `${describePromptDispatchFailureAction(action)}。`,
-    `原因：${truncateForShortFailureReason(error)}`,
+    `原因：${sanitizeTaskVisibleFailureReason(error, executionLocation)}`,
   ].join('')
   if (!aampTaskId) return lead
   return [
@@ -261,7 +287,7 @@ function buildPromptDispatchFailureComment(
   ].join('\n')
 }
 
-function describeTaskResultFailure(disposition: Extract<TaskResultDisposition, { kind: 'failure' }>): string {
+function describeTaskResultFailure(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>): string {
   if (disposition.reason === 'agent_failed') {
     return '智能体处理失败，本次任务已结束。任务将流转为已完成。'
   }
@@ -271,7 +297,7 @@ function describeTaskResultFailure(disposition: Extract<TaskResultDisposition, {
   return '智能体返回的结果格式不符合任务协议，本次处理已结束。任务将流转为已完成。'
 }
 
-function buildTaskResultFailureComment(disposition: Extract<TaskResultDisposition, { kind: 'failure' }>): string {
+function buildTaskResultFailureComment(disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>): string {
   return `${describeTaskResultFailure(disposition)}原因：${truncateForShortFailureReason(disposition.message)}`
 }
 
@@ -306,8 +332,9 @@ function buildFeishuWriteFailureNotice(
   error: unknown,
   completionError?: unknown,
 ): string {
+  const errorReason = truncateForShortFailureReason(error)
   const lines = [
-    `${describePostPromptFeishuFailure(action, completionError)}原因：${truncateForShortFailureReason(error)}`,
+    `${describePostPromptFeishuFailure(action, completionError)}原因：${errorReason}`,
   ]
   if (completionError) {
     lines.push(`已完成流转错误：${truncateForFeishuWriteFailureNotice(formatUnknownError(completionError))}`)
@@ -488,6 +515,7 @@ function buildFeishuTaskDispatchOptions(config: BridgeConfig): FeishuTaskDispatc
           : undefined
     : undefined
   return {
+    agentExecutionLocation: config.agent?.executionLocation ?? 'local',
     ...(feishuEnv ? { feishuEnv } : {}),
     ...(feishuEnvMode ? { feishuEnvMode } : {}),
     ...(getFeishuLarkCliProfile(config.feishu.cliProfile) ? { feishuLarkCliProfile: getFeishuLarkCliProfile(config.feishu.cliProfile) } : {}),
@@ -583,13 +611,20 @@ function describeFeishuTaskSubscription(
   ].join(' ')
 }
 
-type TaskResultDisposition =
+export type FeishuTaskResultDisposition =
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
   | { kind: 'answered'; summary?: string; replyWritten?: boolean }
-  | { kind: 'failure'; reason: TaskResultFailureReason; summary?: string; message: string; diagnosticSnippet?: string }
+  | {
+    kind: 'failure'
+    reason: FeishuTaskResultFailureReason
+    summary?: string
+    message: string
+    diagnosticCategory?: 'malformed_result_json'
+    diagnosticSnippet?: string
+  }
   | { kind: 'help_needed'; message: string }
 
-type FeishuTaskResultOutput =
+export type FeishuTaskResultOutput =
   | { kind: 'reply_comment'; content: string }
   | { kind: 'link_delivery'; url: string }
   | { kind: 'file_delivery'; path: string }
@@ -636,6 +671,22 @@ function sanitizeDeliveryFileName(value: string): string {
     || 'text-delivery'
 }
 
+function validateHttpLinkDeliveryUrl(value: string, index: number): string | undefined {
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    return `outputs[${index}].url 必须是有效的 HTTP(S) URL。`
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `outputs[${index}].url 仅支持 HTTP(S) 协议。`
+  }
+  if (parsed.username || parsed.password) {
+    return `outputs[${index}].url 不允许包含用户名或密码。`
+  }
+  return undefined
+}
+
 function parseResultOutput(value: unknown, index: number): FeishuTaskResultOutput | string {
   const output = asRecord(value)
   if (!output) return `outputs[${index}] 必须是对象。`
@@ -647,7 +698,9 @@ function parseResultOutput(value: unknown, index: number): FeishuTaskResultOutpu
   }
   if (kind === 'link_delivery') {
     const url = getString(output.url) ?? getString(output.doc_url)
-    return url ? { kind, url } : `outputs[${index}].url 不能为空。`
+    if (!url) return `outputs[${index}].url 不能为空。`
+    const validationError = validateHttpLinkDeliveryUrl(url, index)
+    return validationError ?? { kind, url }
   }
   if (kind === 'file_delivery') {
     const filePath = getString(output.path)
@@ -686,6 +739,17 @@ function parsePayloadDeliveryOutputs(payload: Record<string, unknown>): FeishuTa
   if (payload.outputs != null) return parseResultOutputs(payload.outputs, 'outputs')
   if (payload.deliverables != null) return parseResultOutputs(payload.deliverables, 'deliverables')
   return undefined
+}
+
+function payloadHasResultOutputKind(payload: Record<string, unknown>, expectedKind: string): boolean {
+  for (const value of [payload.outputs, payload.deliverables]) {
+    if (!Array.isArray(value)) continue
+    if (value.some((item) => {
+      const output = asRecord(item)
+      return output && (getString(output.kind) ?? getString(output.mode)) === expectedKind
+    })) return true
+  }
+  return false
 }
 
 function getFirstQuestionText(value: unknown): string | undefined {
@@ -838,7 +902,10 @@ function getReplyCommentOutputApplyKey(outputs: Extract<FeishuTaskResultOutput, 
   return `reply_comment:${hashResultOutput(outputs)}`
 }
 
-function classifyTaskResult(result: TaskResult): TaskResultDisposition {
+function classifyTaskResultUnredacted(
+  result: TaskResult,
+  executionLocation: AgentExecutionLocation,
+): FeishuTaskResultDisposition {
   const output = result.output.trim()
   if (result.status === 'rejected') {
     return {
@@ -870,9 +937,28 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
     if (schema !== 'feishu_task_result.v2') {
       return { kind: 'failure', reason: 'final_contract', message: `FEISHU_TASK_RESULT_JSON.schema 必须是 feishu_task_result.v2，实际为：${schema ?? '(missing)'}` }
     }
+    if (executionLocation === 'remote' && !summary) {
+      return { kind: 'failure', reason: 'final_contract', message: `status=${status ?? '(missing)'} 时 summary 不能为空。` }
+    }
+    if (
+      executionLocation === 'remote'
+      && payloadHasResultOutputKind(payload, 'file_delivery')
+    ) {
+      return {
+        kind: 'failure',
+        reason: 'agent_failed',
+        message: 'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.',
+      }
+    }
 
     const replyWritten = getBoolean(payload.reply_written)
     if (status === 'answered') {
+      if (executionLocation === 'remote' && replyWritten !== false) {
+        return { kind: 'failure', reason: 'final_contract', message: '远端 status=answered 时 reply_written 必须是 false。' }
+      }
+      if (executionLocation === 'remote' && (payload.outputs != null || payload.deliverables != null)) {
+        return { kind: 'failure', reason: 'final_contract', message: '远端 status=answered 不允许包含 outputs 或 deliverables。' }
+      }
       const outputs = parsePayloadDeliveryOutputs(payload)
       if (outputs) {
         if (typeof outputs === 'string') return { kind: 'failure', reason: 'final_contract', message: outputs }
@@ -892,9 +978,15 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
       return { kind: 'succeeded', summary: summary ?? '已完成任务。', outputs }
     }
     if (status === 'need_help' || status === 'needs_input') {
+      if (executionLocation === 'remote' && !question) {
+        return { kind: 'failure', reason: 'final_contract', message: '远端 status=need_help 时 question 不能为空。' }
+      }
       return { kind: 'help_needed', message: question ?? firstQuestion ?? summary ?? error ?? '智能体需要更多信息才能继续处理该任务。' }
     }
     if (status === 'failed') {
+      if (executionLocation === 'remote' && !error) {
+        return { kind: 'failure', reason: 'final_contract', message: '远端 status=failed 时 error 不能为空。' }
+      }
       return {
         kind: 'failure',
         reason: 'agent_failed',
@@ -916,6 +1008,46 @@ function classifyTaskResult(result: TaskResult): TaskResultDisposition {
       ? `智能体返回了非预期结果，未按 FEISHU_TASK_RESULT_JSON 协议收尾：${output}`
       : '智能体返回了空结果，未按 FEISHU_TASK_RESULT_JSON 协议收尾。',
   }
+}
+
+export function classifyFeishuTaskResult(
+  result: TaskResult,
+  executionLocation: AgentExecutionLocation = 'local',
+): FeishuTaskResultDisposition {
+  const disposition = classifyTaskResultUnredacted(result, executionLocation)
+  if (
+    executionLocation === 'remote'
+    && disposition.kind === 'succeeded'
+    && disposition.outputs.some((output) => output.kind === 'file_delivery')
+  ) {
+    return {
+      kind: 'failure',
+      reason: 'agent_failed',
+      message: 'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.',
+    }
+  }
+  if (disposition.kind === 'failure') {
+    const message = sanitizeTaskVisibleFailureReason(disposition.message, executionLocation)
+    const diagnosticCategory = disposition.diagnosticSnippet
+      ? { diagnosticCategory: 'malformed_result_json' as const }
+      : {}
+    if (executionLocation === 'remote') {
+      const { diagnosticSnippet: _diagnosticSnippet, ...safeDisposition } = disposition
+      return { ...safeDisposition, ...diagnosticCategory, message }
+    }
+    return {
+      ...disposition,
+      ...diagnosticCategory,
+      message,
+    }
+  }
+  if (disposition.kind === 'help_needed' && executionLocation === 'remote') {
+    return {
+      ...disposition,
+      message: sanitizeTaskVisibleHelpText(disposition.message, executionLocation),
+    }
+  }
+  return disposition
 }
 
 function getTaskCreateIgnoreReason(eventKind: FeishuTaskEventKind, task: FeishuTaskDetails): FeishuTaskEventIgnoreReason | undefined {
@@ -1031,6 +1163,14 @@ function normalizeStepText(content: string): string {
   return content.trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
+function normalizeIgnoredStreamStepText(content: string): string {
+  return content
+    .trim()
+    .replace(/^\s*\[(?:thinking|thought|analysis|reasoning)\]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+}
+
 const IGNORED_STREAM_STEP_TEXTS = new Set([
   'ACP task started',
   'Prompt sent to ACP agent',
@@ -1047,6 +1187,10 @@ const IGNORED_STREAM_STEP_TEXTS = new Set([
   'Tool completed: tool',
   'Tool running: Editing files',
   'Tool failed: tool',
+  'AIME is preparing.',
+  'AIME is thinking.',
+  'AIME is executing.',
+  'AIME is waiting for your next message.',
 ].map(normalizeStepText))
 
 const STREAM_EXECUTION_START_IGNORED_TEXTS = new Set([
@@ -1227,7 +1371,10 @@ function buildTextDeltaTaskStep(payload: Record<string, unknown>): StreamTaskSte
     'message',
     'output',
   ])
-  return content ? { kind: 'text', content } : undefined
+  const messageId = getString(payload.messageId) ?? getString(payload.message_id)
+  return content
+    ? { kind: 'text', content, ...(messageId ? { messageId } : {}) }
+    : undefined
 }
 
 function buildToolTaskStep(payload: Record<string, unknown>): StreamTaskStep | undefined {
@@ -1264,7 +1411,9 @@ function buildToolTaskStep(payload: Record<string, unknown>): StreamTaskStep | u
 function streamEventToTaskSteps(event: AampStreamEvent): StreamTaskStep[] {
   const eventType = String(event.type)
   if (eventType === 'text.delta' || eventType === 'text_delta' || eventType === 'delta') {
-    return uniqueTaskSteps([buildTextDeltaTaskStep(event.payload)])
+    const step = buildTextDeltaTaskStep(event.payload)
+    if (step && IGNORED_STREAM_STEP_TEXTS.has(normalizeIgnoredStreamStepText(step.content))) return []
+    return uniqueTaskSteps([step])
   }
   if (eventType === 'status') {
     const label = getPayloadText(event.payload, ['label', 'title', 'summary', 'message', 'text'])
@@ -1387,6 +1536,12 @@ function aggregateStreamStepsForFlush(steps: PendingStreamStep[]): FeishuTaskSte
   for (const step of steps) {
     if (step.kind === 'text') {
       flushToolGroup()
+      if (
+        textGroup.length > 0
+        && textGroup[textGroup.length - 1].messageId !== step.messageId
+      ) {
+        flushTextGroup()
+      }
       textGroup.push(step)
       continue
     }
@@ -1596,12 +1751,16 @@ export class FeishuTaskBridgeRuntime {
     })
     this.aamp.on('disconnected', (reason) => {
       this.setConnectivity('aamp', 'disconnected')
-      this.logger.log(`[aamp] disconnected${reason ? ` reason=${reason}` : ''}`)
+      const safeReason = reason
+        ? formatRuntimeFailure(reason, this.config.agent?.executionLocation ?? 'local')
+        : undefined
+      this.logger.log(`[aamp] disconnected${safeReason ? ` reason=${safeReason}` : ''}`)
       this.trackBackgroundTask(this.persistState())
     })
     this.aamp.on('error', (error) => {
-      this.state.lastError = error.message
-      this.logger.error(`[aamp] ${error.message}`)
+      const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+      this.state.lastError = message
+      this.logger.error(`[aamp] ${message}`)
       this.trackBackgroundTask(this.persistState())
     })
     this.aamp.on('task.ack', (ack) => {
@@ -1622,8 +1781,9 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampAckTaskId = ack.taskId
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} ack received aamp_task=${ack.taskId} from=${ack.from}`, { taskId: ack.taskId })
       this.trackBackgroundTask(this.handleTaskAck(ack).catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp ack ${ack.taskId}] ${error.message}`, { taskId: ack.taskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp ack ${ack.taskId}] ${message}`, { taskId: ack.taskId })
         await this.persistState()
       }))
     })
@@ -1635,8 +1795,9 @@ export class FeishuTaskBridgeRuntime {
         this.logger.log(`[aamp stream] ignored reason=unknown_task task=${stream.taskId} stream=${stream.streamId} from=${stream.from}`, { taskId: stream.taskId })
       }
       this.trackBackgroundTask(this.handleTaskStreamOpened(stream).catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp stream ${stream.taskId}] ${error.message}`, { taskId: stream.taskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp stream ${stream.taskId}] ${message}`, { taskId: stream.taskId })
         await this.persistState()
       }))
     })
@@ -1645,8 +1806,9 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampHelpTaskId = help.taskId
       this.logger.log(`[aamp help] received task=${help.taskId} from=${help.from}`, { taskId: help.taskId })
       this.trackBackgroundTask(this.handleTaskHelp(help).catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp help ${help.taskId}] ${error.message}`, { taskId: help.taskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp help ${help.taskId}] ${message}`, { taskId: help.taskId })
         await this.persistState()
       }))
     })
@@ -1660,8 +1822,9 @@ export class FeishuTaskBridgeRuntime {
       this.state.lastAampResultTaskId = result.taskId
       this.logger.log(`${formatTaskLogPrefix(taskState.taskGuid)} result received aamp_task=${result.taskId} from=${result.from} status=${result.status}`, { taskId: result.taskId })
       this.trackBackgroundTask(this.handleTaskResult(result).catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp result ${result.taskId}] ${error.message}`, { taskId: result.taskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp result ${result.taskId}] ${message}`, { taskId: result.taskId })
         await this.persistState()
       }))
     })
@@ -1670,8 +1833,9 @@ export class FeishuTaskBridgeRuntime {
   private trackBackgroundTask(task: Promise<void>): void {
     const tracked = task
       .catch((error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[bridge] ${error.message}`)
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[bridge] ${message}`)
       })
       .finally(() => {
         this.backgroundTasks.delete(tracked)
@@ -1825,12 +1989,19 @@ export class FeishuTaskBridgeRuntime {
     error: unknown,
     aampTaskId?: string,
   ): Promise<void> {
-    const comment = buildPromptDispatchFailureComment(eventKind, action, error, aampTaskId)
+    const comment = buildPromptDispatchFailureComment(
+      eventKind,
+      action,
+      error,
+      aampTaskId,
+      this.config.agent?.executionLocation ?? 'local',
+    )
     try {
       await this.feishu.commentTask(event.taskGuid, comment)
       this.logger.log(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} dispatch failure commented action=${action}`, aampTaskId ? { taskId: aampTaskId } : undefined)
     } catch (caughtError) {
-      this.logger.error(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} dispatch failure comment_error action=${action} error=${formatUnknownError(caughtError)}`, aampTaskId ? { taskId: aampTaskId } : undefined)
+      const message = formatRuntimeFailure(caughtError, this.config.agent?.executionLocation ?? 'local')
+      this.logger.error(`${formatTaskLogPrefix(event.taskGuid, event.eventId)} dispatch failure comment_error action=${action} error=${message}`, aampTaskId ? { taskId: aampTaskId } : undefined)
     }
   }
 
@@ -2002,9 +2173,62 @@ export class FeishuTaskBridgeRuntime {
         await this.ignoreFeishuTaskEvent(event, ignoreReason ?? 'event_type_not_allowlisted')
         return
       }
+      const attachmentRefs = this.collectFeishuTaskAttachmentRefs(task)
+      if (
+        this.config.agent?.executionLocation === 'remote'
+        && attachmentRefs.length > 0
+      ) {
+        const now = new Date().toISOString()
+        const existingTaskState = this.state.tasks[aampTaskId]
+        const childTaskGuids = new Set([
+          ...(existingTaskState?.childTaskGuids ?? []),
+          ...(task.subtasks ?? []).map((subtask) => subtask.guid),
+        ])
+        taskState = {
+          ...existingTaskState,
+          taskGuid: task.guid,
+          aampTaskId,
+          feishuEventId: event.eventId,
+          feishuEventKind: eventKind,
+          ...(task.taskId ? { feishuTaskId: task.taskId } : existingTaskState?.feishuTaskId ? { feishuTaskId: existingTaskState.feishuTaskId } : {}),
+          ...(childTaskGuids.size ? { childTaskGuids: [...childTaskGuids] } : {}),
+          status: 'help_needed',
+          lastError: undefined,
+          createdAt: existingTaskState?.createdAt ?? now,
+          updatedAt: now,
+        }
+        this.state.tasks[aampTaskId] = taskState
+        await this.persistState()
+        if (!(taskState.helpCommentedTaskIds ?? []).includes(aampTaskId)) {
+          await this.feishu.commentTask(task.guid, REMOTE_ATTACHMENTS_UNSUPPORTED_HELP)
+          const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
+          taskState = {
+            ...latestTaskState,
+            helpCommentedTaskIds: [...new Set([...(latestTaskState.helpCommentedTaskIds ?? []), aampTaskId])],
+            updatedAt: new Date().toISOString(),
+          }
+          this.state.tasks[aampTaskId] = taskState
+          await this.persistState()
+        } else {
+          this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} remote attachment help comment already recorded`, { taskId: aampTaskId })
+        }
+        await this.markFeishuTasksBlockedOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState)
+        this.state.tasks[aampTaskId] = {
+          ...(this.state.tasks[aampTaskId] ?? taskState),
+          status: 'help_needed',
+          lastError: undefined,
+          updatedAt: new Date().toISOString(),
+        }
+        this.rememberEvent(event, semanticEventKey)
+        await this.persistState()
+        this.logger.log(`${formatTaskLogPrefix(task.guid, event.eventId)} remote attachments blocked category=input_attachment count=${attachmentRefs.length}`, { taskId: aampTaskId })
+        return
+      }
       const preparedAttachments = await this.prepareFeishuTaskAttachments(task, aampTaskId)
+      const appOwnerId = await this.getAppOwnerId()
       const dispatch = buildFeishuTaskDispatch(event, task, eventKind, {
         feishuAppId: this.config.feishu.appId,
+        feishuAppOwnerId: appOwnerId,
         ...buildFeishuTaskDispatchOptions(this.config),
       })
       if (dispatch.taskId !== aampTaskId) {
@@ -2067,11 +2291,15 @@ export class FeishuTaskBridgeRuntime {
       if (promptFailure) {
         await this.commentPromptDispatchFailure(event, eventKind, promptFailure.action, promptFailure.originalError, taskState?.aampTaskId ?? aampTaskId)
       }
-      const message = formatUnknownError(promptFailure?.originalError ?? error)
+      const message = sanitizeTaskVisibleFailureReason(
+        promptFailure?.originalError ?? error,
+        this.config.agent?.executionLocation ?? 'local',
+      )
       this.state.lastError = message
       if (taskState) {
+        const latestTaskState = this.state.tasks[taskState.aampTaskId] ?? taskState
         this.state.tasks[taskState.aampTaskId] = {
-          ...taskState,
+          ...latestTaskState,
           status: 'failed',
           lastError: message,
           updatedAt: new Date().toISOString(),
@@ -2110,8 +2338,9 @@ export class FeishuTaskBridgeRuntime {
           this.enqueueStreamEvent(aampTaskId, event)
         },
         onError: (error) => {
-          this.state.lastError = error.message
-          this.logger.error(`[aamp stream ${aampTaskId}] ${error.message}`, { taskId: aampTaskId })
+          const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+          this.state.lastError = message
+          this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
           void this.persistState()
         },
       },
@@ -2126,8 +2355,9 @@ export class FeishuTaskBridgeRuntime {
       .catch(() => {})
       .then(() => this.handleStreamEvent(aampTaskId, event))
       .catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp stream ${aampTaskId}] ${error.message}`, { taskId: aampTaskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
         await this.persistState()
       })
     this.streamEventQueues.set(aampTaskId, next)
@@ -2238,8 +2468,9 @@ export class FeishuTaskBridgeRuntime {
       .catch(() => {})
       .then(() => this.flushStreamStepBuffer(aampTaskId))
       .catch(async (error: Error) => {
-        this.state.lastError = error.message
-        this.logger.error(`[aamp stream ${aampTaskId}] ${error.message}`, { taskId: aampTaskId })
+        const message = formatRuntimeFailure(error, this.config.agent?.executionLocation ?? 'local')
+        this.state.lastError = message
+        this.logger.error(`[aamp stream ${aampTaskId}] ${message}`, { taskId: aampTaskId })
         this.scheduleStreamStepFlush(aampTaskId)
         await this.persistState()
       })
@@ -2379,8 +2610,11 @@ export class FeishuTaskBridgeRuntime {
         return
       }
 
-      const comment = (help.question ?? '').trim()
-        || (help.blockedReason ?? '').trim()
+      const executionLocation = this.config.agent?.executionLocation ?? 'local'
+      const question = sanitizeTaskVisibleHelpText(help.question ?? '', executionLocation)
+      const blockedReason = sanitizeTaskVisibleHelpText(help.blockedReason ?? '', executionLocation)
+      const comment = question
+        || blockedReason
         || '智能体需要更多信息才能继续处理该任务。'
       this.debugLog(`[aamp help ${help.taskId}] commenting on Feishu task ${latestTaskState.taskGuid}`, { taskId: help.taskId })
       await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment')
@@ -2422,7 +2656,8 @@ export class FeishuTaskBridgeRuntime {
         return
       }
 
-      const disposition = classifyTaskResult(result)
+      const executionLocation = this.config.agent?.executionLocation ?? 'local'
+      const disposition = classifyFeishuTaskResult(result, executionLocation)
       try {
         if (disposition.kind === 'answered') {
           if (disposition.replyWritten === false && disposition.summary) {
@@ -2476,7 +2711,7 @@ export class FeishuTaskBridgeRuntime {
               kind: 'failure',
               reason: 'bridge_output_write',
               summary: disposition.summary,
-              message: formatUnknownError(originalError),
+              message: sanitizeTaskVisibleFailureReason(originalError, executionLocation),
             })
             return
           }
@@ -2523,7 +2758,8 @@ export class FeishuTaskBridgeRuntime {
     error: unknown,
     action: PostPromptFeishuFailureAction,
   ): Promise<void> {
-    const message = formatUnknownError(error)
+    const executionLocation = this.config.agent?.executionLocation ?? 'local'
+    const message = sanitizeTaskVisibleFailureReason(error, executionLocation)
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
 
     let completionError: unknown
@@ -2531,7 +2767,10 @@ export class FeishuTaskBridgeRuntime {
       await this.completeFeishuTasksOnce(aampTaskId, latestTaskState)
     } catch (caughtError) {
       completionError = caughtError
-      this.logger.error(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure complete_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`, { taskId: aampTaskId })
+      const log = executionLocation === 'remote'
+        ? `${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure action=${action} category=complete_status aamp_task=${aampTaskId} error=${sanitizeTaskVisibleFailureReason(caughtError, executionLocation)}`
+        : `${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure complete_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`
+      this.logger.error(log, { taskId: aampTaskId })
     }
 
     let commentError: unknown
@@ -2542,7 +2781,10 @@ export class FeishuTaskBridgeRuntime {
       )
     } catch (caughtError) {
       commentError = caughtError
-      this.logger.error(`${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure notice_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`, { taskId: aampTaskId })
+      const log = executionLocation === 'remote'
+        ? `${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure action=${action} category=result_notice aamp_task=${aampTaskId} error=${sanitizeTaskVisibleFailureReason(caughtError, executionLocation)}`
+        : `${formatTaskLogPrefix(latestTaskState.taskGuid)} result feishu write failure notice_error aamp_task=${aampTaskId} error=${formatUnknownError(caughtError)}`
+      this.logger.error(log, { taskId: aampTaskId })
     }
 
     const finalTaskState = this.state.tasks[aampTaskId] ?? latestTaskState
@@ -2550,8 +2792,8 @@ export class FeishuTaskBridgeRuntime {
     resultHandledTaskIds.add(aampTaskId)
     const lastError = [
       message,
-      completionError ? `已完成流转失败：${formatUnknownError(completionError)}` : '',
-      commentError ? `说明评论失败：${formatUnknownError(commentError)}` : '',
+      completionError ? `已完成流转失败：${sanitizeTaskVisibleFailureReason(completionError, executionLocation)}` : '',
+      commentError ? `说明评论失败：${sanitizeTaskVisibleFailureReason(commentError, executionLocation)}` : '',
     ].filter(Boolean).join(' | ')
     this.state.lastError = lastError
     this.state.tasks[aampTaskId] = {
@@ -2562,16 +2804,23 @@ export class FeishuTaskBridgeRuntime {
       updatedAt: new Date().toISOString(),
     }
     await this.persistState()
-    this.logger.error(`${formatTaskLogPrefix(finalTaskState.taskGuid)} result feishu write failure moved_to_completed aamp_task=${aampTaskId} error=${message}`, { taskId: aampTaskId })
+    const log = executionLocation === 'remote'
+      ? `${formatTaskLogPrefix(finalTaskState.taskGuid)} result feishu write failure action=${action} category=finalized aamp_task=${aampTaskId} error=${message}`
+      : `${formatTaskLogPrefix(finalTaskState.taskGuid)} result feishu write failure moved_to_completed aamp_task=${aampTaskId} error=${message}`
+    this.logger.error(log, { taskId: aampTaskId })
   }
 
   private async closeTaskResultAsFailure(
     aampTaskId: string,
     taskState: BridgeTaskState,
-    disposition: Extract<TaskResultDisposition, { kind: 'failure' }>,
+    disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>,
   ): Promise<void> {
-    if (disposition.diagnosticSnippet) {
-      this.logger.error(formatTaskLogPrefix(taskState.taskGuid) + ' result invalid FEISHU_TASK_RESULT_JSON snippet=' + JSON.stringify(disposition.diagnosticSnippet), { taskId: aampTaskId })
+    if (disposition.diagnosticCategory === 'malformed_result_json') {
+      if (this.config.agent?.executionLocation === 'remote') {
+        this.logger.error(`${formatTaskLogPrefix(taskState.taskGuid)} result invalid FEISHU_TASK_RESULT_JSON category=final_contract snippet_logged=false`, { taskId: aampTaskId })
+      } else if (disposition.diagnosticSnippet) {
+        this.logger.error(formatTaskLogPrefix(taskState.taskGuid) + ' result invalid FEISHU_TASK_RESULT_JSON snippet=' + JSON.stringify(disposition.diagnosticSnippet), { taskId: aampTaskId })
+      }
     }
     await withPostPromptFeishuFailure('result_comment', () => this.commentTaskResultOnce(aampTaskId, taskState, disposition))
     await withPostPromptFeishuFailure('complete_status', () => this.completeFeishuTasksOnce(aampTaskId, this.state.tasks[aampTaskId] ?? taskState))
@@ -2595,6 +2844,12 @@ export class FeishuTaskBridgeRuntime {
     taskState: BridgeTaskState,
     outputs: FeishuTaskResultOutput[],
   ): Promise<void> {
+    if (
+      this.config.agent?.executionLocation === 'remote'
+      && outputs.some((output) => output.kind === 'file_delivery')
+    ) {
+      throw new Error('REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.')
+    }
     if (outputs.length === 0) return
 
     for (let index = 0; index < outputs.length; index += 1) {
@@ -2801,7 +3056,7 @@ export class FeishuTaskBridgeRuntime {
   private async commentTaskResultOnce(
     aampTaskId: string,
     taskState: BridgeTaskState,
-    disposition: Extract<TaskResultDisposition, { kind: 'failure' }>,
+    disposition: Extract<FeishuTaskResultDisposition, { kind: 'failure' }>,
   ): Promise<void> {
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     if ((latestTaskState.resultCommentedTaskIds ?? []).includes(aampTaskId)) {

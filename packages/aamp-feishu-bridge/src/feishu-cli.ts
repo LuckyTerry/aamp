@@ -50,6 +50,10 @@ export interface LarkCliProfileCredentials {
   profile?: string
 }
 
+export interface FeishuAppOwner {
+  ownerId: string
+}
+
 function larkCliConfigPath(): string {
   return path.join(os.homedir(), '.lark-cli', 'config.json')
 }
@@ -242,6 +246,40 @@ export function resolveLarkCliProfileCredentialsFromDisk(
 ): LarkCliProfileCredentials {
   const raw = readFileSync(larkCliConfigPath(), 'utf8')
   return resolveLarkCliProfileCredentials(JSON.parse(raw) as LarkCliConfig, request)
+}
+
+export function parseLarkCliAppOwnerResponse(value: unknown): FeishuAppOwner | undefined {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+  const data = record?.data && typeof record.data === 'object' ? record.data as Record<string, unknown> : undefined
+  const app = data?.app && typeof data.app === 'object' ? data.app as Record<string, unknown> : undefined
+  const owner = app?.owner && typeof app.owner === 'object' ? app.owner as Record<string, unknown> : undefined
+  const ownerId = typeof owner?.owner_id === 'string' ? owner.owner_id.trim() : ''
+  return ownerId ? { ownerId } : undefined
+}
+
+export async function getLarkCliAppOwner(options: {
+  cliBin?: string
+  profile?: string
+  appId: string
+}): Promise<FeishuAppOwner> {
+  const cliBin = options.cliBin?.trim() || process.env.AAMP_LARK_CLI_BIN?.trim() || 'lark-cli'
+  const profile = options.profile?.trim()
+  const args = [
+    'api',
+    'GET',
+    `/open-apis/application/v6/applications/${encodeURIComponent(options.appId.trim())}`,
+    '--as',
+    'bot',
+    ...(profile ? ['--profile', profile] : []),
+    '--params',
+    JSON.stringify({ lang: 'zh_cn', user_id_type: 'open_id' }),
+    '--format',
+    'json',
+  ]
+  const stdout = await runLarkCliJson(cliBin, args)
+  const owner = parseLarkCliAppOwnerResponse(JSON.parse(stdout) as unknown)
+  if (!owner) throw new Error(`Feishu app ${options.appId} owner not found`)
+  return owner
 }
 
 export async function resolveFeishuCliCredentials(

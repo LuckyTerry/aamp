@@ -47,6 +47,7 @@ Use this order:
 | `traecli` (TraeCode CLI) | `aamp-acp-bridge` with native `traecli acp serve` | no CLI Bridge fallback |
 | `workbuddy` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
 | `workbuddy_ai` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
+| `aime` | `aamp-acp-bridge` with fixed `aime-acp@0.1.0` | no local-workspace fallback |
 | `openclaw` | `aamp-openclaw-plugin` | `aamp-acp-bridge`, then `aamp-cli-bridge` |
 | known ACP-compatible agent | `aamp-acp-bridge` | `aamp-cli-bridge` |
 | custom ACP-compatible agent | `aamp-acp-bridge` with explicit `acpCommand` | `aamp-cli-bridge` |
@@ -76,6 +77,7 @@ Known ACP agent names:
 | `traecli` | `traecli acp serve` |
 | `workbuddy` | macOS WorkBuddy app embedded `codebuddy --acp` |
 | `workbuddy_ai` | macOS WorkBuddy AI app embedded `'codebuddy' --acp` |
+| `aime` | isolated absolute `aime-acp --site cn` command; internal ping gate |
 
 For Trae CLI Next（内部版）, use the canonical agent name `traex`. ACP Bridge does not
 auto-discover the historical internal `trae` or `coco` names. The generated
@@ -101,6 +103,16 @@ WorkBuddy AI is a separate canonical Agent, `workbuddy_ai`, detected only at:
 Because the application path contains a space, its generated ACP command quotes
 the executable path before appending `--acp`. It does not fall back to
 `WorkBuddy.app`, `codebuddy`, or `cbc` on `PATH`.
+
+AIME is a ByteDance-internal remote Agent. The one-click menu includes `aime`
+only when `ping aime.bytedance.net` succeeds, and explicit selection fails
+before AIME setup when that probe fails. The launcher installs exactly
+`aime-acp@0.1.0` from BNPM into its isolated npm prefix and uses the absolute
+binary path. It then requires standalone AIME auth and
+`doctor --site cn --json`; ping success by itself is not readiness evidence. AIME bindings set
+`attachmentPolicy: reject` and `taskDispatchConcurrency: 1`, so attachments
+are not materialized for this remote Agent and its tasks are dispatched
+serially.
 
 Built-in CLI Bridge profiles:
 

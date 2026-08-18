@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { AgentBridge, type AgentBridgeDependencies } from './agent-bridge.js'
 import { AampAcpBridge, type AgentBridgeHandle } from './bridge.js'
-import type { AgentConfig, BridgeConfig } from './config.js'
+import type { AgentConfig, BridgeConfigInput } from './config.js'
 
 function deferred() {
   let resolve!: () => void
@@ -17,7 +18,7 @@ async function until(predicate: () => boolean): Promise<void> {
   assert.fail('condition was not reached')
 }
 
-function config(names: string[]): BridgeConfig {
+function config(names: string[]): BridgeConfigInput {
   return {
     aampHost: 'https://meshmail.ai',
     rejectUnauthorized: false,
@@ -103,6 +104,154 @@ test('one failed agent is cleaned without blocking successful agents', async () 
     events.find((event) => event.type === 'bridge.running')?.agents,
     [{ name: 'good', email: 'good@meshmail.ai' }],
   )
+})
+
+test('remote agent.failed runtime events redact raw startup diagnostics', async () => {
+  const events: Array<Record<string, unknown>> = []
+  const bridge = new AampAcpBridge({
+    aampHost: 'https://meshmail.ai',
+    rejectUnauthorized: false,
+    agents: [
+      {
+        name: 'aime',
+        acpCommand: "'/Users/private/REMOTE_FAILED_COMMAND_SENTINEL' --acp",
+        executionLocation: 'remote',
+        attachmentPolicy: 'reject',
+      },
+      {
+        name: 'local',
+        acpCommand: 'local acp',
+      },
+    ],
+  }, {
+    createAgentBridge(agent): AgentBridgeHandle {
+      return {
+        email: `${agent.name}@meshmail.ai`,
+        isConnected: true,
+        isUsingPollingFallback: false,
+        isBusy: false,
+        async start() {
+          if (agent.name === 'aime') {
+            throw new Error('startup failed at /Users/private/REMOTE_FAILED_ERROR_SENTINEL')
+          }
+        },
+        async stop() {},
+      }
+    },
+  })
+
+  const originalError = console.error
+  console.error = () => undefined
+  try {
+    await bridge.start({ quiet: true, onEvent: (event) => events.push(event) })
+  } finally {
+    console.error = originalError
+  }
+
+  const failed = events.find((event) => event.type === 'agent.failed')
+  assert.deepEqual(failed, {
+    type: 'agent.failed',
+    bridge: 'acp-bridge',
+    agent: 'aime',
+    message: 'startup failed at /Users/private/REMOTE_FAILED_ERROR_SENTINEL',
+    durationMs: failed?.durationMs,
+  })
+  assert.match(JSON.stringify(failed), /REMOTE_FAILED_ERROR_SENTINEL|Users\/private/)
+  await bridge.stop()
+})
+
+test('remote WorkBuddy probe failures stay redacted in agent.failed JSON events', async () => {
+  const remoteCommands = {
+    workbuddy: "'/Users/private/WORKBUDDY_COMMAND_SENTINEL' --acp",
+    workbuddy_ai: "'/Users/private/WORKBUDDY_AI_COMMAND_SENTINEL' --acp",
+  }
+  const probeErrors = {
+    workbuddy: 'probe failed at /Users/private/WORKBUDDY_PROBE_SENTINEL --secret-token',
+    workbuddy_ai: 'probe failed at /Users/private/WORKBUDDY_AI_PROBE_SENTINEL --secret-token',
+  }
+  const events: Array<Record<string, unknown>> = []
+  const bridge = new AampAcpBridge({
+    aampHost: 'https://meshmail.ai',
+    rejectUnauthorized: false,
+    agents: [
+      {
+        name: 'workbuddy',
+        acpCommand: remoteCommands.workbuddy,
+        executionLocation: 'remote',
+        attachmentPolicy: 'reject',
+      },
+      {
+        name: 'workbuddy_ai',
+        acpCommand: remoteCommands.workbuddy_ai,
+        executionLocation: 'remote',
+        attachmentPolicy: 'reject',
+      },
+      {
+        name: 'local',
+        acpCommand: 'local acp',
+      },
+    ],
+  }, {
+    createAgentBridge(agent): AgentBridgeHandle {
+      if (agent.executionLocation === 'local') {
+        return {
+          email: 'local@meshmail.ai',
+          isConnected: true,
+          isUsingPollingFallback: false,
+          isBusy: false,
+          async start() {},
+          async stop() {},
+        }
+      }
+
+      const name = agent.name as keyof typeof probeErrors
+      const dependencies = {
+        createClient: () => { throw new Error('AAMP client must not be created after probe failure') },
+        createAcpx: () => ({
+          async probeAgent() { throw new Error(probeErrors[name]) },
+          async stop() {},
+        }),
+        resolveIdentity: async () => { throw new Error('identity must not resolve after probe failure') },
+      } as unknown as AgentBridgeDependencies
+      return new AgentBridge(
+        agent,
+        'https://meshmail.ai',
+        false,
+        dependencies,
+      )
+    },
+  })
+
+  const originalError = console.error
+  const originalLog = console.log
+  console.error = () => undefined
+  console.log = () => undefined
+  try {
+    await bridge.start({ quiet: true, onEvent: (event) => events.push(event) })
+  } finally {
+    console.error = originalError
+    console.log = originalLog
+  }
+
+  const failed = events.filter((event) => event.type === 'agent.failed')
+  assert.deepEqual(failed
+    .map((event) => ({ agent: event.agent, message: event.message }))
+    .sort((left, right) => String(left.agent).localeCompare(String(right.agent))), [
+    {
+      agent: 'workbuddy',
+      message: 'WorkBuddy ACP readiness check failed: probe failed at /Users/private/WORKBUDDY_PROBE_SENTINEL --secret-token',
+    },
+    {
+      agent: 'workbuddy_ai',
+      message: 'WorkBuddy AI ACP readiness check failed: probe failed at /Users/private/WORKBUDDY_AI_PROBE_SENTINEL --secret-token',
+    },
+  ])
+  const publicStdout = events.map((event) => JSON.stringify({
+    timestamp: '2026-08-14T00:00:00.000Z',
+    ...event,
+  })).join('\n')
+  assert.match(publicStdout, /WORKBUDDY_PROBE_SENTINEL|WORKBUDDY_AI_PROBE_SENTINEL|Users\/private|secret-token/)
+  await bridge.stop()
 })
 
 test('all failures reject without bridge.running and all partial bridges are stopped', async () => {

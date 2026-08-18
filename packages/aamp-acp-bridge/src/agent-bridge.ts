@@ -15,7 +15,14 @@ import {
   type AcpToolUpdate,
 } from './acpx-client.js'
 import { buildPrompt, parseResponse, type ResultAttachmentRef } from './prompt-builder.js'
-import { defaultAgentSlug, type AgentConfig } from './config.js'
+import {
+  defaultAgentSlug,
+  normalizeAgentConfig,
+  type AgentConfig,
+  type AgentConfigInput,
+  type AgentExecutionLocation,
+} from './config.js'
+import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -40,11 +47,126 @@ const IDENTITY_AUTH_RETRY_COUNT = 5
 const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
 const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 const ACP_AUTH_FAILURE_PATTERN = /authentication (?:required|failed)/i
+const TASK_LIFECYCLE_HISTORY_LIMIT = 256
 
 export interface AgentIdentity {
   email: string
   mailboxToken: string
   smtpPassword: string
+}
+
+type AgentBridgeAcpxClient = Pick<
+  AcpxClient,
+  'probeAgent' | 'ensureSession' | 'prompt' | 'cancel' | 'close' | 'stop'
+>
+
+type TaskTerminalOutcome = 'completed' | 'help_needed' | 'rejected'
+
+interface ActiveTaskSession {
+  readonly agent: string
+  readonly sessionName: string
+  readonly sessionWaitController: AbortController
+  phase: 'active' | 'cancelled' | 'terminal'
+  terminalOutcome?: TaskTerminalOutcome
+  promptStarted: boolean
+  cancelForwarded: boolean
+  clearPendingText?: () => void
+}
+
+class BoundedStringMap<Value> {
+  private readonly values = new Map<string, Value>()
+
+  constructor(private readonly limit: number) {}
+
+  get(key: string): Value | undefined {
+    const value = this.values.get(key)
+    if (value === undefined) return undefined
+    this.values.delete(key)
+    this.values.set(key, value)
+    return value
+  }
+
+  take(key: string): Value | undefined {
+    const value = this.values.get(key)
+    if (value !== undefined) this.values.delete(key)
+    return value
+  }
+
+  set(key: string, value: Value): void {
+    this.values.delete(key)
+    this.values.set(key, value)
+    while (this.values.size > this.limit) {
+      const oldest = this.values.keys().next()
+      if (oldest.done) return
+      this.values.delete(oldest.value)
+    }
+  }
+}
+
+type SessionMutexRelease = () => void
+interface SessionMutexWaiter {
+  readonly resolve: (release: SessionMutexRelease | null) => void
+  readonly signal: AbortSignal
+  readonly onAbort: () => void
+}
+
+class FairKeyedMutex {
+  private readonly waiters = new Map<string, SessionMutexWaiter[]>()
+
+  acquire(key: string, signal: AbortSignal): Promise<SessionMutexRelease | null> {
+    if (signal.aborted) return Promise.resolve(null)
+
+    return new Promise((resolve) => {
+      const queue = this.waiters.get(key)
+      if (queue) {
+        const waiter = {
+          resolve,
+          signal,
+          onAbort: () => {
+            const currentQueue = this.waiters.get(key)
+            const index = currentQueue?.indexOf(waiter) ?? -1
+            if (index >= 0) currentQueue?.splice(index, 1)
+            signal.removeEventListener('abort', waiter.onAbort)
+            resolve(null)
+          },
+        } satisfies SessionMutexWaiter
+        signal.addEventListener('abort', waiter.onAbort, { once: true })
+        queue.push(waiter)
+        return
+      }
+
+      this.waiters.set(key, [])
+      resolve(this.createRelease(key))
+    })
+  }
+
+  private createRelease(key: string): SessionMutexRelease {
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+
+      const queue = this.waiters.get(key)
+      const next = queue?.shift()
+      if (next) {
+        next.signal.removeEventListener('abort', next.onAbort)
+        next.resolve(this.createRelease(key))
+        return
+      }
+      this.waiters.delete(key)
+    }
+  }
+}
+
+export interface AgentBridgeDependencies {
+  readonly createClient: typeof AampClient.fromMailboxIdentity
+  readonly createAcpx: () => AgentBridgeAcpxClient
+  readonly resolveIdentity?: () => Promise<AgentIdentity>
+}
+
+const defaultDependencies: AgentBridgeDependencies = {
+  createClient: (config) => AampClient.fromMailboxIdentity(config),
+  createAcpx: () => new AcpxClient(),
 }
 
 function matchSenderPolicy(
@@ -180,13 +302,42 @@ export function formatAgentReadinessError(agentName: string, error: unknown): st
   return message
 }
 
-export function formatTaskAgentError(agentName: string, error: unknown): string {
+export function formatTaskAgentError(
+  agentName: string,
+  error: unknown,
+  executionLocation: AgentExecutionLocation = 'local',
+): string {
   const message = error instanceof Error ? error.message : String(error)
+  if (executionLocation === 'remote') {
+    const diagnostic = redactRemoteDiagnostic(message)
+    const safeCode = /\b(?:REMOTE_ARTIFACT_UNSUPPORTED|(?:AIME|AUTH)_[A-Z0-9_]+)\b/.exec(message)?.[0]
+    if (safeCode === 'REMOTE_ARTIFACT_UNSUPPORTED') {
+      return 'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.'
+    }
+    if (safeCode === 'AUTH_REQUIRED') {
+      const site = /\baime-acp auth login --site (cn|i18n-tt)\b/.exec(diagnostic)?.[1]
+      return 'AUTH_REQUIRED: Remote Agent authentication is required.'
+        + (site ? ' Run `aime-acp auth login --site ' + site + '`.' : '')
+    }
+    if (safeCode === 'AUTH_IDENTITY_CHANGED') {
+      return 'AUTH_IDENTITY_CHANGED: Restart the binding after verifying the remote account.'
+    }
+    if (diagnostic.trim()) return diagnostic
+    return safeCode ? `${safeCode}: Remote Agent execution failed.` : 'REMOTE_AGENT_FAILED: Remote Agent execution failed.'
+  }
   const productName = workbuddyProductName(agentName)
   if (productName && ACP_AUTH_FAILURE_PATTERN.test(message)) {
     return `${productName} login expired. Open ${productName} and sign in, then retry the task.`
   }
   return message
+}
+
+function redactRemoteDiagnostic(message: string): string {
+  return message
+    .replace(/\b(Bearer|Basic)\s+[^\s,}]+/gi, '$1 [REDACTED]')
+    .replace(/(\b(?:Authorization|Proxy-Authorization)\s*:\s*)(?:Bearer|Basic)\s+[^\s,}]+/gi, '$1[REDACTED]')
+    .replace(/(\b(?:app_secret|appSecret|smtpPassword|mailboxToken|access_token|accessToken|refresh_token|refreshToken|id_token|idToken|session_token|sessionToken|device_code|pairCode|api_key|apiKey|private_key|privateKey|password|authorization|cookie|credential|secret|token)\b\s*[:=]\s*"?)(?:(?:Bearer|Basic)\s+)?[^,\s}"]+/gi, '$1[REDACTED]')
+    .replace(/(--(?:app-secret|password|secret-token|token)\s+)\S+/gi, '$1[REDACTED]')
 }
 
 export function formatDebugPromptLog(options: {
@@ -195,12 +346,22 @@ export function formatDebugPromptLog(options: {
   sessionName: string
   prompt: string
 }): string {
-  return [
-    `[${options.agentName}] ACP prompt debug task=${options.taskId} session=${options.sessionName}`,
-    '--- BEGIN ACP PROMPT ---',
-    options.prompt,
-    '--- END ACP PROMPT ---',
-  ].join('\n')
+  const digest = createHash('sha256').update(options.prompt).digest('hex')
+  return `[${options.agentName}] ACP prompt debug task=${options.taskId} session=${options.sessionName} prompt_chars=${options.prompt.length} prompt_sha256=${digest} content_logged=false`
+}
+
+export function assertSupportedResultArtifacts(
+  parsed: ReturnType<typeof parseResponse>,
+  executionLocation: AgentExecutionLocation,
+): void {
+  const hasArtifact = parsed.files.length > 0
+    || Boolean(parsed.attachments?.length)
+    || Boolean(parsed.structuredResult?.some(isRemoteStructuredArtifactField))
+  if (executionLocation === 'remote' && hasArtifact) {
+    throw new UserFacingBridgeError(
+      'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.',
+    )
+  }
 }
 
 interface HandleEventOptions {
@@ -211,6 +372,11 @@ interface StreamTextRenderState {
   currentChannel?: AcpTextChunk['channel']
   currentMessageId?: string
   hasContent: boolean
+}
+
+interface MaterializedIncomingAttachments {
+  promptLines: string[]
+  directory?: string
 }
 
 function buildPhaseStatusLabel(channel: AcpTextChunk['channel']): string {
@@ -431,8 +597,58 @@ function mergeAttachmentRefs(files: string[], attachmentRefs?: ResultAttachmentR
   return [...byKey.values()]
 }
 
+function identifierTokens(value: string): string[] {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+}
+
+function hasArtifactIdentifierToken(value: string): boolean {
+  return identifierTokens(value).some((token) => (
+    token === 'attachment'
+    || token === 'attachments'
+    || token === 'file'
+    || token === 'files'
+  ))
+}
+
 function isAttachmentStructuredField(field: { fieldTypeKey?: string }): boolean {
-  return /(attachment|file)/i.test(field.fieldTypeKey ?? '')
+  return hasArtifactIdentifierToken(field.fieldTypeKey ?? '')
+}
+
+function isFileReferenceString(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) return false
+  return /^file\s*:/i.test(trimmed)
+    || /^~(?:[\\/]|$)/.test(trimmed)
+    || /^[a-z]:[\\/].+/i.test(trimmed)
+    || /^\\\\[^\\/\s]+[\\/].+/.test(trimmed)
+    || /^\/(?!\/).+/.test(trimmed)
+}
+
+function containsStructuredFileReference(value: unknown): boolean {
+  if (typeof value === 'string') return isFileReferenceString(value)
+  if (Array.isArray(value)) return value.some(containsStructuredFileReference)
+  if (!value || typeof value !== 'object') return false
+
+  return Object.entries(value as Record<string, unknown>).some(([key, nestedValue]) => (
+    identifierTokens(key).some((token) => (
+      token === 'path'
+      || token === 'file'
+      || token === 'files'
+      || token === 'attachment'
+      || token === 'attachments'
+    ))
+    || containsStructuredFileReference(nestedValue)
+  ))
+}
+
+function isRemoteStructuredArtifactField(field: StructuredResultField): boolean {
+  return isAttachmentStructuredField(field)
+    || Object.prototype.hasOwnProperty.call(field, 'attachmentFilenames')
+    || containsStructuredFileReference(field.value)
 }
 
 function fillStructuredResultAttachmentFilenames(
@@ -488,29 +704,37 @@ function releaseTaskExecutionLock(lockDir: string | null): void {
  * Manages AAMP identity, ACP session, and task routing.
  */
 export class AgentBridge {
+  private readonly agentConfig: AgentConfig
   private client: AampClient | null = null
-  private acpx: AcpxClient
+  private acpx: AgentBridgeAcpxClient
   private identity: AgentIdentity | null = null
   private sessionName: string
   private sessionNames = new Set<string>()
+  private readonly sessionEstablishments = new Set<Promise<void>>()
+  private stopPromise: Promise<void> | undefined
   private activeTaskCount = 0
   private pollingFallback = false
   private transportMode: 'connecting' | 'websocket' | 'polling' | 'disconnected' = 'connecting'
-  private cancelledTaskIds = new Set<string>()
   private senderPolicies: SenderPolicy[] = []
-  private activeTaskIds = new Set<string>()
+  private readonly activeTaskSessions = new Map<string, ActiveTaskSession>()
+  private readonly earlyCancelledTaskIds = new BoundedStringMap<true>(TASK_LIFECYCLE_HISTORY_LIMIT)
+  private readonly settledTaskLifecycles = new BoundedStringMap<string>(TASK_LIFECYCLE_HISTORY_LIMIT)
+  private readonly sessionMutex = new FairKeyedMutex()
+  private stopping = false
+  private stopped = false
   private isHistoricalReconcile = false
   private onEvent: ((event: BridgeRuntimeEvent) => void) | undefined
   private debugPrompt = false
 
   constructor(
-    private readonly agentConfig: AgentConfig,
+    agentConfig: AgentConfigInput,
     private readonly aampHost: string,
     private readonly rejectUnauthorized: boolean,
+    private readonly dependencies: AgentBridgeDependencies = defaultDependencies,
   ) {
-    this.acpx = new AcpxClient()
-    this.sessionName = `aamp-${agentConfig.name}`
-    this.sessionNames.add(this.sessionName)
+    this.agentConfig = normalizeAgentConfig(agentConfig)
+    this.acpx = this.dependencies.createAcpx()
+    this.sessionName = `aamp-${this.agentConfig.name}`
   }
 
   get name(): string { return this.agentConfig.name }
@@ -575,6 +799,10 @@ export class AgentBridge {
    * Start the bridge: resolve identity → connect AAMP → ensure ACP session.
    */
   async start(options: AgentBridgeStartOptions = {}): Promise<void> {
+    if (this.stopped) {
+      throw new Error('AgentBridge cannot be restarted after stop; create a new bridge instance')
+    }
+    this.stopping = false
     this.onEvent = options.onEvent
     let quietStartup = options.quiet === true
     this.debugPrompt = options.debug === true
@@ -588,7 +816,9 @@ export class AgentBridge {
     }
 
     // 1. Resolve AAMP identity
-    this.identity = await this.resolveIdentity()
+    this.identity = this.dependencies.resolveIdentity
+      ? await this.dependencies.resolveIdentity()
+      : await this.resolveIdentity()
     if (!quietStartup) {
       console.log(`[${this.name}] AAMP identity: ${this.identity.email}`)
     }
@@ -597,15 +827,21 @@ export class AgentBridge {
       bridge: 'acp-bridge',
       agent: this.name,
       email: this.identity.email,
-      acpCommand: this.agentConfig.acpCommand,
+      ...(this.agentConfig.executionLocation === 'remote'
+        ? {
+            executionLocation: 'remote' as const,
+            acpCommandConfigured: true as const,
+          }
+        : { acpCommand: this.agentConfig.acpCommand }),
     })
 
     // 2. Create AAMP client
-    this.client = AampClient.fromMailboxIdentity({
+    this.client = this.dependencies.createClient({
       email: this.identity.email,
       smtpPassword: this.identity.smtpPassword,
       baseUrl: this.aampHost,
       rejectUnauthorized: this.rejectUnauthorized,
+      taskDispatchConcurrency: this.agentConfig.taskDispatchConcurrency,
     })
     const client = this.client
     this.senderPolicies = loadSenderPolicies(
@@ -620,9 +856,11 @@ export class AgentBridge {
       })
     })
 
-    client.on('task.cancel', (task: TaskCancel) => {
-      this.handleCancel(task)
-    })
+    client.on('task.cancel', (task: TaskCancel) => this.handleCancel(task).catch((err) => {
+      console.warn(
+        `[${this.name}] Failed to forward task.cancel ${task.taskId}: ${(err as Error).message}`,
+      )
+    }))
 
     ;(client as unknown as {
       on(event: 'pair.request', handler: (request: PairRequest) => void): void
@@ -681,7 +919,11 @@ export class AgentBridge {
           bridge: 'acp-bridge',
           agent: this.name,
           email: this.email,
-          reason,
+          reason: formatTaskAgentError(
+            this.name,
+            reason,
+            this.agentConfig.executionLocation,
+          ),
           pollingFallback: false,
         })
         console.warn(`[${this.name}] AAMP disconnected: ${reason}`)
@@ -702,7 +944,11 @@ export class AgentBridge {
           bridge: 'acp-bridge',
           agent: this.name,
           email: this.email,
-          message: err.message,
+          message: formatTaskAgentError(
+            this.name,
+            err,
+            this.agentConfig.executionLocation,
+          ),
         })
         return
       }
@@ -718,7 +964,11 @@ export class AgentBridge {
         bridge: 'acp-bridge',
         agent: this.name,
         email: this.email,
-        message: err.message,
+        message: formatTaskAgentError(
+          this.name,
+          err,
+          this.agentConfig.executionLocation,
+        ),
       })
       console.error(`[${this.name}] AAMP error: ${err.message}`)
     })
@@ -754,8 +1004,8 @@ export class AgentBridge {
 
     // 5. Ensure ACP session
     try {
-      this.sessionNames.add(this.sessionName)
-      await this.acpx.ensureSession(this.agentConfig.acpCommand, this.sessionName)
+      await this.ensureAcpSession(this.sessionName)
+      if (this.stopping) return
       if (!quietStartup) {
         console.log(`[${this.name}] ACP session ready: ${this.sessionName}`)
       }
@@ -767,6 +1017,7 @@ export class AgentBridge {
         sessionName: this.sessionName,
       })
     } catch (err) {
+      if (this.stopping) return
       if (!quietStartup) {
         console.warn(`[${this.name}] ACP session setup deferred: ${(err as Error).message}`)
       }
@@ -775,7 +1026,11 @@ export class AgentBridge {
         bridge: 'acp-bridge',
         agent: this.name,
         email: this.email,
-        message: (err as Error).message,
+        message: formatTaskAgentError(
+          this.name,
+          err,
+          this.agentConfig.executionLocation,
+        ),
       })
     }
     quietStartup = false
@@ -784,14 +1039,64 @@ export class AgentBridge {
   /**
    * Stop the bridge.
    */
-  async stop(): Promise<void> {
-    this.acpx.stop()
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise
+    this.stopping = true
+    this.stopped = true
+    for (const active of this.activeTaskSessions.values()) {
+      if (active.phase === 'active') {
+        active.phase = 'cancelled'
+      }
+      active.clearPendingText?.()
+      active.sessionWaitController.abort()
+    }
     this.client?.disconnect()
     this.client = null
 
-    await Promise.all([...this.sessionNames].reverse().map((sessionName) => this.closeAcpSession(sessionName)))
+    let retained!: Promise<void>
+    retained = this.performStop().catch((error) => {
+      if (this.stopPromise === retained) this.stopPromise = undefined
+      throw error
+    })
+    this.stopPromise = retained
+    return retained
+  }
 
-    this.acpx.stop()
+  private async performStop(): Promise<void> {
+    await this.acpx.stop()
+    await this.waitForSessionEstablishments()
+
+    await Promise.all([...this.sessionNames].reverse().map(async (sessionName) => {
+      try {
+        await this.closeAcpSession(sessionName)
+      } finally {
+        this.sessionNames.delete(sessionName)
+      }
+    }))
+
+    await this.acpx.stop()
+  }
+
+  private async ensureAcpSession(sessionName: string): Promise<string> {
+    if (this.stopping) throw new Error('AgentBridge is stopping')
+
+    let resolveSettled!: () => void
+    const settled = new Promise<void>((resolve) => { resolveSettled = resolve })
+    this.sessionEstablishments.add(settled)
+    try {
+      const sessionId = await this.acpx.ensureSession(this.agentConfig.acpCommand, sessionName)
+      this.sessionNames.add(sessionName)
+      return sessionId
+    } finally {
+      this.sessionEstablishments.delete(settled)
+      resolveSettled()
+    }
+  }
+
+  private async waitForSessionEstablishments(): Promise<void> {
+    while (this.sessionEstablishments.size > 0) {
+      await Promise.all([...this.sessionEstablishments])
+    }
   }
 
   private async closeAcpSession(sessionName: string): Promise<void> {
@@ -815,7 +1120,31 @@ export class AgentBridge {
    * Handle an incoming AAMP task by forwarding to the ACP agent.
    */
   private async handleTask(task: TaskDispatch, options: HandleEventOptions = {}): Promise<void> {
-    if (!this.client) return
+    if (!this.client || this.stopping) return
+
+    const settledMessageId = this.settledTaskLifecycles.get(task.taskId)
+    if (settledMessageId !== undefined) {
+      const duplicateKind = settledMessageId === task.messageId ? 'exact replay' : 'reused task id'
+      console.warn(`[${this.name}] Ignoring ${duplicateKind} for settled task ${task.taskId}`)
+      return
+    }
+
+    if (this.activeTaskSessions.has(task.taskId)) {
+      console.warn(`[${this.name}] Ignoring duplicate active task ${task.taskId}`)
+      return
+    }
+
+    if (this.earlyCancelledTaskIds.take(task.taskId)) {
+      this.settledTaskLifecycles.set(task.taskId, task.messageId)
+      console.warn(`[${this.name}] Dropping first delivery for early-cancelled task ${task.taskId}`)
+      return
+    }
+
+    if (task.expiresAt && new Date(task.expiresAt).getTime() <= Date.now()) {
+      this.settledTaskLifecycles.set(task.taskId, task.messageId)
+      console.warn(`[${this.name}] Skipping expired task ${task.taskId}`)
+      return
+    }
 
     const shouldLogTask = !options.historical
     if (shouldLogTask) {
@@ -831,89 +1160,112 @@ export class AgentBridge {
       })
     }
 
-    if (task.expiresAt && new Date(task.expiresAt).getTime() <= Date.now()) {
-      console.warn(`[${this.name}] Skipping expired task ${task.taskId}`)
-      return
+    const taskSessionName = this.resolveTaskSessionName(task)
+    const activeTaskSession: ActiveTaskSession = {
+      agent: this.agentConfig.acpCommand,
+      sessionName: taskSessionName,
+      sessionWaitController: new AbortController(),
+      phase: 'active',
+      promptStarted: false,
+      cancelForwarded: false,
     }
-
-    if (this.cancelledTaskIds.has(task.taskId)) {
-      console.warn(`[${this.name}] Ignoring cancelled task ${task.taskId}`)
-      return
+    this.activeTaskSessions.set(task.taskId, activeTaskSession)
+    const claimTerminal = (outcome: TaskTerminalOutcome): boolean => {
+      if (activeTaskSession.phase !== 'active') return false
+      activeTaskSession.phase = 'terminal'
+      activeTaskSession.terminalOutcome = outcome
+      activeTaskSession.promptStarted = false
+      return true
     }
+    const isCancelled = (): boolean => activeTaskSession.phase === 'cancelled'
+    const isBridgeStopping = (): boolean => this.stopping || this.client === null
+    const shouldStopTask = (): boolean => isBridgeStopping() || isCancelled()
+    let taskLockDir: string | null = null
+    let releaseSessionMutex: SessionMutexRelease | undefined
+    let activeTaskCounted = false
+    let incomingAttachmentDirectory: string | undefined
 
-    if (this.activeTaskIds.has(task.taskId)) {
-      console.warn(`[${this.name}] Ignoring duplicate active task ${task.taskId}`)
-      return
-    }
+    try {
+      const hydratedTask = await this.client.hydrateTaskDispatch(task).catch((err) => {
+        if (!options.historical) {
+          console.warn(`[${this.name}] Failed to load thread history for ${task.taskId}: ${(err as Error).message}`)
+        }
+        if (options.historical) return null
+        return {
+          ...task,
+          threadHistory: [],
+          threadContextText: '',
+        }
+      })
 
-    const hydratedTask = await this.client.hydrateTaskDispatch(task).catch((err) => {
-      if (!options.historical) {
-        console.warn(`[${this.name}] Failed to load thread history for ${task.taskId}: ${(err as Error).message}`)
+      if (!hydratedTask || shouldStopTask()) {
+        return
       }
-      if (options.historical) return null
-      return {
-        ...task,
-        threadHistory: [],
-        threadContextText: '',
+
+      if (threadAlreadyTerminal(hydratedTask.threadHistory)) {
+        if (shouldLogTask) {
+          console.log(`[${this.name}] Skipping task ${task.taskId} because the thread already reached a terminal state`)
+        }
+        return
       }
-    })
+      const publicTask = stripAampInternalDispatchContext(task)
+      const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
 
-    if (!hydratedTask) {
-      return
-    }
-
-    if (threadAlreadyTerminal(hydratedTask.threadHistory)) {
-      if (shouldLogTask) {
-        console.log(`[${this.name}] Skipping task ${task.taskId} because the thread already reached a terminal state`)
-      }
-      return
-    }
-    const publicTask = stripAampInternalDispatchContext(task)
-    const publicHydratedTask = stripAampInternalDispatchContext(hydratedTask)
-
-    this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
-      this.agentConfig.senderPoliciesFile,
-      this.agentConfig.name,
-    ))
-    const senderDecision = matchCombinedSenderPolicy(
-      publicTask,
-      this.agentConfig.senderPolicies,
-      this.senderPolicies,
-    )
-    if (!senderDecision.allowed) {
-      if (options.historical) return
-      console.warn(
-        `[${this.name}] Rejecting task ${task.taskId}: ${senderDecision.reason ?? 'sender policy rejected the task'}`,
+      this.senderPolicies = loadSenderPolicies(resolveSenderPoliciesFile(
+        this.agentConfig.senderPoliciesFile,
+        this.agentConfig.name,
+      ))
+      const senderDecision = matchCombinedSenderPolicy(
+        publicTask,
+        this.agentConfig.senderPolicies,
+        this.senderPolicies,
       )
-      this.emit({
-        type: 'task.rejected',
-        bridge: 'acp-bridge',
-        agent: this.name,
-        email: this.email,
-        taskId: task.taskId,
-        reason: senderDecision.reason ?? 'sender policy rejected the task',
-      })
-      await this.client.sendResult({
-        to: task.from,
-        taskId: task.taskId,
-        status: 'rejected',
-        output: '',
-        errorMsg: `Unauthorized sender policy: ${senderDecision.reason ?? 'task does not match senderPolicies.'}`,
-        inReplyTo: task.messageId,
-      })
-      return
-    }
+      if (!senderDecision.allowed) {
+        if (options.historical || !claimTerminal('rejected')) return
+        console.warn(
+          `[${this.name}] Rejecting task ${task.taskId}: ${senderDecision.reason ?? 'sender policy rejected the task'}`,
+        )
+        this.emit({
+          type: 'task.rejected',
+          bridge: 'acp-bridge',
+          agent: this.name,
+          email: this.email,
+          taskId: task.taskId,
+          reason: senderDecision.reason ?? 'sender policy rejected the task',
+        })
+        await this.client.sendResult({
+          to: task.from,
+          taskId: task.taskId,
+          status: 'rejected',
+          output: '',
+          errorMsg: `Unauthorized sender policy: ${senderDecision.reason ?? 'task does not match senderPolicies.'}`,
+          inReplyTo: task.messageId,
+        })
+        return
+      }
 
-    const taskLockDir = acquireTaskExecutionLock(task.taskId)
-    if (!taskLockDir) {
-      console.warn(`[${this.name}] Ignoring duplicate locked task ${task.taskId}`)
-      return
-    }
+      const shouldRejectAttachments = this.agentConfig.attachmentPolicy === 'reject'
+        && Boolean(publicHydratedTask.attachments?.length)
+      if (shouldRejectAttachments) {
+        if (!claimTerminal('help_needed')) return
+        await this.rejectAttachmentsIfRequired(publicHydratedTask)
+        return
+      }
 
-    this.activeTaskIds.add(task.taskId)
-    this.activeTaskCount += 1
-    const taskSessionName = this.resolveTaskSessionName(hydratedTask)
-    this.sessionNames.add(taskSessionName)
+      taskLockDir = acquireTaskExecutionLock(task.taskId)
+      if (!taskLockDir) {
+        console.warn(`[${this.name}] Ignoring duplicate locked task ${task.taskId}`)
+        return
+      }
+
+      releaseSessionMutex = await this.sessionMutex.acquire(
+        taskSessionName,
+        activeTaskSession.sessionWaitController.signal,
+      ) ?? undefined
+      if (!releaseSessionMutex || shouldStopTask()) return
+
+      this.activeTaskCount += 1
+      activeTaskCounted = true
     let activeStream: Awaited<ReturnType<AampClient['createStream']>> | null = null
     const pendingStreamWrites = new Set<Promise<void>>()
     let streamClosed = false
@@ -930,11 +1282,12 @@ export class AgentBridge {
       type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
-      if (!this.client || !activeStream || streamClosed) return
+      const client = this.client
+      if (!client || this.stopping || !activeStream || streamClosed) return
       const streamId = activeStream.streamId
 
       let write: Promise<void>
-      write = this.client.appendStreamEvent({
+      write = client.appendStreamEvent({
         streamId,
         type: type as never,
         payload,
@@ -962,7 +1315,16 @@ export class AgentBridge {
       }
     }
 
+    activeTaskSession.clearPendingText = () => {
+      clearPendingTextDeltaTimer()
+      pendingTextDelta = null
+    }
+
     const flushPendingTextDelta = () => {
+      if (isBridgeStopping()) {
+        activeTaskSession.clearPendingText?.()
+        return
+      }
       if (!pendingTextDelta?.text) {
         clearPendingTextDeltaTimer()
         pendingTextDelta = null
@@ -979,13 +1341,14 @@ export class AgentBridge {
     }
 
     const schedulePendingTextDeltaFlush = () => {
-      if (!pendingTextDelta || pendingTextDelta.timer) return
+      if (isBridgeStopping() || !pendingTextDelta || pendingTextDelta.timer) return
       pendingTextDelta.timer = setTimeout(() => {
         flushPendingTextDelta()
       }, TEXT_DELTA_FLUSH_MS)
     }
 
     const queueTextDelta = (payload: Record<string, unknown>) => {
+      if (isBridgeStopping()) return
       const text = typeof payload.text === 'string' ? payload.text : ''
       if (!text) return
 
@@ -1031,11 +1394,13 @@ export class AgentBridge {
       type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
-      if (!this.client || !activeStream || streamClosed) return
+      if (shouldStopTask() || !activeStream || streamClosed) return
       flushPendingTextDelta()
       await flushStreamWrites()
+      const client = this.client
+      if (!client || shouldStopTask() || !activeStream || streamClosed) return
       try {
-        await this.client.appendStreamEvent({
+        await client.appendStreamEvent({
           streamId: activeStream.streamId,
           type: type as never,
           payload,
@@ -1050,13 +1415,29 @@ export class AgentBridge {
     }
 
     const closeStream = async (payload: Record<string, unknown>) => {
-      if (!this.client || !activeStream || streamClosed) return
+      if (isBridgeStopping() || !activeStream || streamClosed) return
       await flushStreamWrites()
-      await this.client.closeStream({
+      const client = this.client
+      if (!client || isBridgeStopping() || !activeStream || streamClosed) return
+      await client.closeStream({
         streamId: activeStream.streamId,
         payload,
       })
       streamClosed = true
+    }
+
+    const finishCancelledTask = (): Promise<void> | null => {
+      if (!shouldStopTask()) return null
+      if (isBridgeStopping()) {
+        console.warn(`[${this.name}] Dropping task ${task.taskId} because the bridge is stopping`)
+        return Promise.resolve()
+      }
+      console.warn(`[${this.name}] Dropping task ${task.taskId} because the task was cancelled`)
+      return closeStream({ reason: 'task.cancelled', status: 'cancelled' }).catch((err) => {
+        console.warn(
+          `[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(err as Error).message}`,
+        )
+      })
     }
 
     const queuePhaseStatus = (channel: AcpTextChunk['channel']) => {
@@ -1071,17 +1452,36 @@ export class AgentBridge {
 
     try {
       try {
-        activeStream = await this.client.createStream({
+        const streamClient = this.client
+        if (!streamClient || shouldStopTask()) return
+        activeStream = await streamClient.createStream({
           taskId: task.taskId,
           peerEmail: task.from,
         })
-        await this.client.sendStreamOpened({
+        const cancellationAfterStreamCreate = finishCancelledTask()
+        if (cancellationAfterStreamCreate) {
+          await cancellationAfterStreamCreate
+          return
+        }
+        const openedClient = this.client
+        if (!openedClient) return
+        await openedClient.sendStreamOpened({
           to: task.from,
           taskId: task.taskId,
           streamId: activeStream.streamId,
           inReplyTo: task.messageId,
         })
+        const cancellationAfterStreamOpened = finishCancelledTask()
+        if (cancellationAfterStreamOpened) {
+          await cancellationAfterStreamOpened
+          return
+        }
         await appendStreamEvent('status', { state: 'running', label: 'ACP task started' })
+        const cancellationAfterStreamStatus = finishCancelledTask()
+        if (cancellationAfterStreamStatus) {
+          await cancellationAfterStreamStatus
+          return
+        }
       } catch (err) {
         if (!isStreamServiceUnavailableError(err)) throw err
         activeStream = null
@@ -1091,7 +1491,22 @@ export class AgentBridge {
         )
       }
 
-      const attachmentPromptLines = await this.materializeIncomingAttachments(publicHydratedTask)
+      const cancellationBeforeAttachments = finishCancelledTask()
+      if (cancellationBeforeAttachments) {
+        await cancellationBeforeAttachments
+        return
+      }
+      const materializedAttachments = await this.materializeIncomingAttachments(
+        publicHydratedTask,
+        shouldStopTask,
+      )
+      const attachmentPromptLines = materializedAttachments.promptLines
+      incomingAttachmentDirectory = materializedAttachments.directory
+      const cancellationAfterAttachments = finishCancelledTask()
+      if (cancellationAfterAttachments) {
+        await cancellationAfterAttachments
+        return
+      }
       const promptTask = attachmentPromptLines.length > 0
         ? {
             ...publicHydratedTask,
@@ -1105,7 +1520,10 @@ export class AgentBridge {
             ].filter((line) => line != null).join('\n'),
           }
         : publicHydratedTask
-      const prompt = buildPrompt(promptTask, publicHydratedTask.threadContextText, this.name)
+      const prompt = buildPrompt(promptTask, publicHydratedTask.threadContextText, {
+        agentName: this.name,
+        executionLocation: this.agentConfig.executionLocation,
+      })
       if (this.debugPrompt) {
         console.log(formatDebugPromptLog({
           agentName: this.name,
@@ -1114,45 +1532,78 @@ export class AgentBridge {
           prompt,
         }))
       }
-      await this.acpx.ensureSession(this.agentConfig.acpCommand, taskSessionName)
+      const cancellationBeforeSession = finishCancelledTask()
+      if (cancellationBeforeSession) {
+        await cancellationBeforeSession
+        return
+      }
+      await this.ensureAcpSession(taskSessionName)
+      const cancellationAfterSession = finishCancelledTask()
+      if (cancellationAfterSession) {
+        await cancellationAfterSession
+        return
+      }
       await appendStreamEvent('todo', {
         items: [{ id: 'acp-prompt', content: 'Prompt sent to ACP agent', status: 'completed' }],
         summary: 'Prompt sent to ACP agent',
       })
-      const result = await this.acpx.prompt(this.agentConfig.acpCommand, taskSessionName, prompt, {
-        onTextChunk: (chunk) => {
-          queuePhaseStatus(chunk.channel)
-          const rendered = renderTextChunk(chunk, streamTextState)
-          if (!rendered) return
-          queueTextDelta({
-            text: rendered,
-            ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
-          })
-        },
-        onToolUpdate: (update) => {
-          flushPendingTextDelta()
-          queueStreamAppend('tool_call', {
-            toolCallId: update.toolCallId ?? update.title ?? buildToolProgressLabel(update),
-            label: buildToolProgressLabel(update),
-            status: normalizeToolCallStatus(update.status),
-            ...(buildToolProgressDetail(update) ? { output: buildToolProgressDetail(update) } : {}),
-          })
-        },
-        onPlanUpdate: (entries) => {
-          flushPendingTextDelta()
-          queueStreamAppend('todo', buildTodoPayloadFromPlan(entries))
-        },
-      })
-      if (this.cancelledTaskIds.has(task.taskId)) {
-        console.warn(`[${this.name}] Dropping task ${task.taskId} result because the task was cancelled`)
+      const cancellationBeforePrompt = finishCancelledTask()
+      if (cancellationBeforePrompt) {
+        await cancellationBeforePrompt
+        return
+      }
+      let result: Awaited<ReturnType<AgentBridgeAcpxClient['prompt']>>
+      activeTaskSession.promptStarted = true
+      try {
+        result = await this.acpx.prompt(this.agentConfig.acpCommand, taskSessionName, prompt, {
+          onTextChunk: (chunk) => {
+            queuePhaseStatus(chunk.channel)
+            const rendered = renderTextChunk(chunk, streamTextState)
+            if (!rendered) return
+            queueTextDelta({
+              text: rendered,
+              ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+            })
+          },
+          onToolUpdate: (update) => {
+            flushPendingTextDelta()
+            queueStreamAppend('tool_call', {
+              toolCallId: update.toolCallId ?? update.title ?? buildToolProgressLabel(update),
+              label: buildToolProgressLabel(update),
+              status: normalizeToolCallStatus(update.status),
+              ...(buildToolProgressDetail(update) ? { output: buildToolProgressDetail(update) } : {}),
+            })
+          },
+          onPlanUpdate: (entries) => {
+            flushPendingTextDelta()
+            queueStreamAppend('todo', buildTodoPayloadFromPlan(entries))
+          },
+        })
+      } finally {
+        activeTaskSession.promptStarted = false
+      }
+      const cancellationAfterPrompt = finishCancelledTask()
+      if (cancellationAfterPrompt) {
+        await cancellationAfterPrompt
         return
       }
       await flushStreamWrites()
+      const cancellationAfterResponseFlush = finishCancelledTask()
+      if (cancellationAfterResponseFlush) {
+        await cancellationAfterResponseFlush
+        return
+      }
       await appendStreamEvent('todo', {
         items: [{ id: 'acp-response', content: 'ACP response received', status: 'completed' }],
         summary: 'ACP response received',
       })
+      const cancellationBeforeTerminalResult = finishCancelledTask()
+      if (cancellationBeforeTerminalResult) {
+        await cancellationBeforeTerminalResult
+        return
+      }
       const parsed = parseResponse(result.output)
+      assertSupportedResultArtifacts(parsed, this.agentConfig.executionLocation)
       if (!parsed.isHelp
         && !parsed.output
         && parsed.files.length === 0
@@ -1172,9 +1623,26 @@ export class AgentBridge {
             ),
           })
           await flushStreamWrites()
+          const cancellationAfterHelpFlush = finishCancelledTask()
+          if (cancellationAfterHelpFlush) {
+            await cancellationAfterHelpFlush
+            return
+          }
+        }
+        if (!claimTerminal('help_needed')) {
+          const cancellationBeforeHelpClose = finishCancelledTask()
+          if (cancellationBeforeHelpClose) await cancellationBeforeHelpClose
+          return
         }
         await closeStream({ reason: 'task.help_needed' })
-        await this.client.sendHelp({
+        const cancellationAfterHelpClose = finishCancelledTask()
+        if (cancellationAfterHelpClose) {
+          await cancellationAfterHelpClose
+          return
+        }
+        const helpClient = this.client
+        if (!helpClient) return
+        await helpClient.sendHelp({
           to: task.from,
           taskId: task.taskId,
           question: parsed.question ?? 'Agent needs more information',
@@ -1226,9 +1694,26 @@ export class AgentBridge {
             ),
           })
           await flushStreamWrites()
+          const cancellationAfterResultFlush = finishCancelledTask()
+          if (cancellationAfterResultFlush) {
+            await cancellationAfterResultFlush
+            return
+          }
+        }
+        if (!claimTerminal('completed')) {
+          const cancellationBeforeResultClose = finishCancelledTask()
+          if (cancellationBeforeResultClose) await cancellationBeforeResultClose
+          return
         }
         await closeStream({ reason: 'task.result', status: 'completed' })
-        await this.client.sendResult({
+        const cancellationAfterResultClose = finishCancelledTask()
+        if (cancellationAfterResultClose) {
+          await cancellationAfterResultClose
+          return
+        }
+        const resultClient = this.client
+        if (!resultClient) return
+        await resultClient.sendResult({
           to: task.from,
           taskId: task.taskId,
           status: 'completed',
@@ -1248,14 +1733,38 @@ export class AgentBridge {
         })
       }
     } catch (err) {
-      const errorMsg = formatTaskAgentError(this.name, err)
+      if (activeTaskSession.phase === 'terminal') {
+        console.error(
+          `[${this.name}] Task ${task.taskId} ${activeTaskSession.terminalOutcome ?? 'terminal'} delivery failed: ${(err as Error).message}`,
+        )
+        return
+      }
+      const cancellationAfterError = finishCancelledTask()
+      if (cancellationAfterError) {
+        await cancellationAfterError
+        return
+      }
+      const errorMsg = formatTaskAgentError(this.name, err, this.agentConfig.executionLocation)
       console.error(`[${this.name}] Task ${task.taskId} error: ${errorMsg}`)
+      if (!claimTerminal('rejected')) return
       try {
         await flushStreamWrites()
+        const cancellationAfterRejectedFlush = finishCancelledTask()
+        if (cancellationAfterRejectedFlush) {
+          await cancellationAfterRejectedFlush
+          return
+        }
         if (activeStream) {
           await closeStream({ reason: 'task.result', status: 'rejected', error: errorMsg })
+          const cancellationAfterRejectedClose = finishCancelledTask()
+          if (cancellationAfterRejectedClose) {
+            await cancellationAfterRejectedClose
+            return
+          }
         }
-        await this.client.sendResult({
+        const rejectedClient = this.client
+        if (!rejectedClient) return
+        await rejectedClient.sendResult({
           to: task.from,
           taskId: task.taskId,
           status: 'rejected',
@@ -1263,7 +1772,12 @@ export class AgentBridge {
           errorMsg: `ACP agent error: ${errorMsg}`,
           inReplyTo: task.messageId,
         })
-      } catch { /* best effort */ }
+      } catch (deliveryError) {
+        console.error(
+          `[${this.name}] Task ${task.taskId} rejected delivery failed: ${(deliveryError as Error).message}`,
+        )
+        return
+      }
       this.emit({
         type: 'task.completed',
         bridge: 'acp-bridge',
@@ -1273,42 +1787,108 @@ export class AgentBridge {
         status: 'rejected',
       })
     } finally {
-      this.activeTaskCount = Math.max(0, this.activeTaskCount - 1)
-      this.activeTaskIds.delete(task.taskId)
-      releaseTaskExecutionLock(taskLockDir)
+      activeTaskSession.clearPendingText?.()
+      activeTaskSession.clearPendingText = undefined
+    }
+    } finally {
+      if (activeTaskCounted) {
+        this.activeTaskCount = Math.max(0, this.activeTaskCount - 1)
+      }
+      this.activeTaskSessions.delete(task.taskId)
+      this.settledTaskLifecycles.set(task.taskId, task.messageId)
+      try {
+        if (incomingAttachmentDirectory) {
+          rmSync(incomingAttachmentDirectory, { recursive: true, force: true })
+        }
+      } finally {
+        try {
+          releaseTaskExecutionLock(taskLockDir)
+        } finally {
+          releaseSessionMutex?.()
+        }
+      }
     }
   }
 
-  private handleCancel(task: TaskCancel): void {
-    this.cancelledTaskIds.add(task.taskId)
+  private async handleCancel(task: TaskCancel): Promise<void> {
+    const active = this.activeTaskSessions.get(task.taskId)
+    if (active?.phase === 'terminal') return
+
     console.warn(`[${this.name}] <- task.cancel  ${task.taskId}  from=${task.from}`)
+    if (active) {
+      if (active.phase === 'cancelled') return
+      active.phase = 'cancelled'
+      active.sessionWaitController.abort()
+      if (!active.promptStarted || active.cancelForwarded) return
+      active.cancelForwarded = true
+      await this.acpx.cancel(active.agent, active.sessionName)
+      return
+    }
+
+    if (this.settledTaskLifecycles.get(task.taskId) !== undefined) return
+    this.earlyCancelledTaskIds.set(task.taskId, true)
   }
 
-  private async materializeIncomingAttachments(task: TaskDispatch): Promise<string[]> {
+  private async rejectAttachmentsIfRequired(task: TaskDispatch): Promise<boolean> {
+    if (this.agentConfig.attachmentPolicy !== 'reject' || !task.attachments?.length || !this.client) {
+      return false
+    }
+
+    await this.client.sendHelp({
+      to: task.from,
+      taskId: task.taskId,
+      question: 'The attachment was not downloaded. Please paste the relevant text into the task or share an HTTP(S) URL that the agent can access.',
+      blockedReason: 'This ACP agent does not accept attachments',
+      suggestedOptions: [
+        'Paste the relevant text into the task',
+        'Share an HTTP(S) link that AIME can access',
+      ],
+      inReplyTo: task.messageId,
+    })
+    console.log(`[${this.name}] -> task.help_needed  ${task.taskId}`)
+    this.emit({
+      type: 'task.completed',
+      bridge: 'acp-bridge',
+      agent: this.name,
+      email: this.email,
+      taskId: task.taskId,
+      status: 'help_needed',
+    })
+    return true
+  }
+
+  private async materializeIncomingAttachments(
+    task: TaskDispatch,
+    shouldStop: () => boolean = () => false,
+  ): Promise<MaterializedIncomingAttachments> {
     const attachments = task.attachments ?? []
-    if (!attachments.length || !this.client) return []
+    const client = this.client
+    if (!attachments.length || !client || shouldStop()) return { promptLines: [] }
 
     const attachmentDir = mkdtempSync(join(tmpdir(), `aamp-acp-${sanitizePathToken(task.taskId)}-`))
     const usedNames = new Set<string>()
     const lines: string[] = []
 
     for (const [index, attachment] of attachments.entries()) {
+      if (shouldStop()) break
       const baseName = sanitizeIncomingAttachmentFilename(attachment.filename, index)
       const filename = usedNames.has(baseName) ? `${index + 1}-${baseName}` : baseName
       usedNames.add(filename)
       const filePath = join(attachmentDir, filename)
 
       try {
-        const content = await this.client.downloadBlob(attachment.blobId, attachment.filename)
+        const content = await client.downloadBlob(attachment.blobId, attachment.filename)
+        if (shouldStop()) break
         writeFileSync(filePath, content)
         lines.push(`- ${describeIncomingAttachment(attachment)}: ${filePath}`)
       } catch (err) {
+        if (shouldStop()) break
         const message = err instanceof Error ? err.message : String(err)
         lines.push(`- ${describeIncomingAttachment(attachment)}: download failed: ${message}`)
       }
     }
 
-    return lines
+    return { promptLines: lines, directory: attachmentDir }
   }
 
   private async sendPairResponse(request: PairRequest, success: boolean, reason?: string): Promise<boolean> {

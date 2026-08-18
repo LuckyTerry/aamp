@@ -3,13 +3,21 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { defaultAgentSlug, loadConfig } from '../src/config.js'
+import { defaultAgentSlug, loadConfig, normalizeAgentConfig } from '../src/config.js'
 
 function configWithCommand(acpCommand: string) {
   return {
     aampHost: 'https://meshmail.ai',
     rejectUnauthorized: false,
     agents: [{ name: 'trae', acpCommand }],
+  }
+}
+
+function configWithAgent(agent: Record<string, unknown>) {
+  return {
+    aampHost: 'https://meshmail.ai',
+    rejectUnauthorized: false,
+    agents: [{ name: 'remote-agent', acpCommand: 'remote-agent --acp', ...agent }],
   }
 }
 
@@ -51,4 +59,48 @@ test('default Agent slug rejects names without ASCII alphanumeric content', () =
     () => defaultAgentSlug('___ --- 你好'),
     /Cannot derive a valid default Agent slug/,
   )
+})
+
+test('bridge config normalizes attachment policy to an explicit allow or reject value', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'aamp-config-test-'))
+  const configPath = join(directory, 'bridge.json')
+
+  try {
+    writeFileSync(configPath, JSON.stringify(configWithAgent({ attachmentPolicy: 'reject' })))
+    assert.equal(loadConfig(configPath).agents[0].attachmentPolicy, 'reject')
+
+    writeFileSync(configPath, JSON.stringify(configWithAgent({})))
+    assert.equal(loadConfig(configPath).agents[0].attachmentPolicy, 'allow')
+
+    writeFileSync(configPath, JSON.stringify(configWithAgent({ attachmentPolicy: 'drop' })))
+    assert.throws(() => loadConfig(configPath))
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test('programmatic agent config input normalizes to an explicit runtime policy', () => {
+  const normalized = normalizeAgentConfig({
+    name: 'remote-agent',
+    acpCommand: 'remote-agent --acp',
+  })
+
+  assert.equal(normalized.attachmentPolicy, 'allow')
+  assert.equal(normalized.executionLocation, 'local')
+})
+
+test('remote Agents require rejected attachments', () => {
+  assert.equal(normalizeAgentConfig({
+    name: 'aime',
+    acpCommand: 'aime-acp',
+    executionLocation: 'remote',
+    attachmentPolicy: 'reject',
+  }).executionLocation, 'remote')
+
+  assert.throws(() => normalizeAgentConfig({
+    name: 'unsafe-remote',
+    acpCommand: 'unsafe-remote-acp',
+    executionLocation: 'remote',
+    attachmentPolicy: 'allow',
+  }), /remote Agent requires attachmentPolicy=reject/)
 })

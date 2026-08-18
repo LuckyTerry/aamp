@@ -210,7 +210,17 @@ test('declining a replacement returns to the continue-selection prompt', () => {
   assert.ok(duplicateStart < acceptedStart, 'replacement decision must precede accepting the binding')
   const duplicateBranch = session.slice(duplicateStart, acceptedStart)
   assert.doesNotMatch(duplicateBranch, /continue;/)
-  assert.match(session, /keepGoing = await confirm\('是否继续选择本地智能体和 Bot？', false\)/)
+  assert.match(session, /keepGoing = await confirm\('是否继续选择智能体和 Bot？', false\)/)
+})
+
+test('selection copy allows both local and remote agents', () => {
+  const source = readFileSync(controllerPath, 'utf8')
+  const create = functionRange(source, 'async function createDraft(', 'async function runBindingSession(')
+  const discover = functionRange(source, 'async function discoverAgents()', 'async function createDraft(')
+
+  assert.match(create, /请选择要绑定的智能体：/)
+  assert.match(discover, /暂未检测到智能体/)
+  assert.doesNotMatch(create, /请选择要绑定的本地智能体：/)
 })
 
 test('install saves draft intents then launches all accepted bindings in selection order', () => {

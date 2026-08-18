@@ -1,5 +1,5 @@
-import { AgentBridge, type AgentBridgeStartOptions } from './agent-bridge.js'
-import type { AgentConfig, BridgeConfig } from './config.js'
+import { AgentBridge, formatTaskAgentError, type AgentBridgeStartOptions } from './agent-bridge.js'
+import { normalizeAgentConfig, type AgentConfig, type BridgeConfig, type BridgeConfigInput } from './config.js'
 import { describeBridgeError, describeBridgeEventError } from './errors.js'
 
 export interface BridgeStartOptions {
@@ -17,6 +17,7 @@ export type BridgeRuntimeEvent =
   | { type: 'agent.failed'; bridge: 'acp-bridge'; agent: string; message: string; durationMs: number }
   | { type: 'agent.stopping'; bridge: 'acp-bridge'; agent: string }
   | { type: 'agent.identity'; bridge: 'acp-bridge'; agent: string; email: string; acpCommand: string }
+  | { type: 'agent.identity'; bridge: 'acp-bridge'; agent: string; email: string; executionLocation: 'remote'; acpCommandConfigured: true }
   | { type: 'agent.connected'; bridge: 'acp-bridge'; agent: string; email: string; pollingFallback: boolean }
   | { type: 'agent.disconnected'; bridge: 'acp-bridge'; agent: string; email: string; reason: string; pollingFallback: boolean }
   | { type: 'agent.error'; bridge: 'acp-bridge'; agent: string; email: string; message: string }
@@ -92,8 +93,12 @@ export class AampAcpBridge {
   private stopPromise: Promise<void> | undefined
   private stopRequested = false
 
-  constructor(config: BridgeConfig, options: AampAcpBridgeOptions = {}) {
-    this.config = config
+  constructor(config: BridgeConfigInput, options: AampAcpBridgeOptions = {}) {
+    this.config = {
+      aampHost: config.aampHost,
+      rejectUnauthorized: config.rejectUnauthorized ?? false,
+      agents: config.agents.map(normalizeAgentConfig),
+    }
     this.maxAgentConcurrency = options.maxAgentConcurrency ?? 4
     this.createAgentBridge = options.createAgentBridge
       ?? ((agent, host, rejectUnauthorized) => new AgentBridge(agent, host, rejectUnauthorized))
@@ -191,7 +196,9 @@ export class AampAcpBridge {
           type: 'agent.failed',
           bridge: 'acp-bridge',
           agent: agentConfig.name,
-          message: describeBridgeEventError(error),
+          message: agentConfig.executionLocation === 'remote'
+            ? formatTaskAgentError(agentConfig.name, error, agentConfig.executionLocation)
+            : describeBridgeEventError(error),
           durationMs: this.durationSince(agentStartedAt),
         })
         if (callbackError !== undefined) throw callbackError

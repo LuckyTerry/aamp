@@ -1,0 +1,11 @@
+{
+  "type": "session.think.tips",
+  "data": {
+    "event_id": "evt-think",
+    "event_offset": 4,
+    "timestamp": 103,
+    "event_key": "think",
+    "session_id": "session-demo",
+    "tips": ["Checking the request.", "Preparing a response."]
+  }
+}

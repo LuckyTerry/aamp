@@ -1,4 +1,5 @@
 import type { StructuredResultField, TaskDispatch } from 'aamp-sdk'
+import type { AgentExecutionLocation } from './config.js'
 
 const STRUCTURED_RESULT_MARKER = 'AAMP_RESULT_JSON:'
 
@@ -18,7 +19,25 @@ function isCliTranscriptHeader(line: string): boolean {
   return /^\[(acpx|client|tool|done|error|warning)\](?:\s|$)/i.test(line)
 }
 
-function buildStructuredResultInstructions(): string {
+function buildStructuredResultInstructions(
+  executionLocation: AgentExecutionLocation,
+): string {
+  if (executionLocation === 'remote') {
+    return [
+      `Structured result handoff:`,
+      `- If the task asks for structuredResult, field backfill, Meego field output, or aamp_send_result, include a final ${STRUCTURED_RESULT_MARKER} block.`,
+      `- The block must be valid JSON and may include only output and non-file structuredResult fields.`,
+      `- Do not include attachments, file paths, attachmentFilenames, FILE references, or any other local artifact delivery fields.`,
+      `- This final handoff policy is authoritative and overrides earlier attachment or local-file instructions.`,
+      `- Use this shape:`,
+      `${STRUCTURED_RESULT_MARKER}`,
+      '```json',
+      '{"output":"Human-readable summary.","structuredResult":[{"fieldKey":"<fieldKey>","fieldTypeKey":"<fieldTypeKey>","value":"<field value>"}]}',
+      '```',
+      `- The bridge strips this block from the visible reply and sends structuredResult as X-AAMP-StructuredResult.`,
+    ].join('\n')
+  }
+
   return [
     `Structured result handoff:`,
     `- If the task asks for structuredResult, field backfill, Meego field output, attachments, or aamp_send_result, include a final ${STRUCTURED_RESULT_MARKER} block.`,
@@ -352,16 +371,30 @@ function displayAgentName(task: TaskDispatch, agentName?: string): string {
   return task.to.split('@')[0] || 'the connected agent'
 }
 
-function renderTaskPromptRules(promptRules: string | undefined): string[] {
-  const override = promptRules?.trim()
-  if (override) return [override]
+const REMOTE_EXECUTION_RULES = [
+  'Execution rules:',
+  '- This Agent runs in a remote sandbox.',
+  '- The caller local working directory, files, home directory, binaries, profiles, credentials, MCP servers, and shell environment are unavailable.',
+  '- Use your own remote-native capabilities and identity when the request requires remote data access.',
+  '- Do not claim that a caller-local command or path is available.',
+  '- Text and HTTP(S) links are supported; local FILE references and file delivery are unsupported.',
+  '- Finish all remote tool work before emitting the final result.',
+]
 
-  return [
-    `Execution rules:`,
+function renderTaskPromptRules(
+  promptRules: string | undefined,
+  executionLocation: AgentExecutionLocation,
+): string[] {
+  const override = promptRules?.trim()
+  if (override) {
+    return executionLocation === 'remote'
+      ? [...REMOTE_EXECUTION_RULES, override, ``, buildStructuredResultInstructions(executionLocation)]
+      : [override]
+  }
+
+  const commonRules = [
     `- Treat the Description section and any prior thread context below as the only task context you were given.`,
     `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct the task from local files, account state, or remote services.`,
-    `- Do not search outside the current working directory unless the task explicitly asks you to inspect a specific external path.`,
-    `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to figure out what the task probably meant.`,
     `- For simple chat messages that are fully present in the prompt, answer them directly without workspace exploration.`,
     ``,
     `Please complete this task and output your result directly.`,
@@ -369,7 +402,16 @@ function renderTaskPromptRules(promptRules: string | undefined): string[] {
     `Do not include planning notes, thought process, tool logs, or intermediate progress updates in the final reply.`,
     `If you cannot complete the task and need more information, start your response with "HELP:" followed by your question.`,
     ``,
-    buildStructuredResultInstructions(),
+    buildStructuredResultInstructions(executionLocation),
+  ]
+
+  if (executionLocation === 'remote') return [...REMOTE_EXECUTION_RULES, ...commonRules]
+
+  return [
+    `Execution rules:`,
+    `- Do not search outside the current working directory unless the task explicitly asks you to inspect a specific external path.`,
+    `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to figure out what the task probably meant.`,
+    ...commonRules,
     ``,
     `If you create any files as part of this task, list each file path at the end of your response in this exact format:`,
     `FILE:/absolute/path/to/file`,
@@ -400,13 +442,55 @@ function renderLarkCliProfileRules(task: TaskDispatch): string[] {
   ]
 }
 
+function renderConversationalExecutionRules(
+  task: TaskDispatch,
+  executionLocation: AgentExecutionLocation,
+): string[] {
+  const commonRules = [
+    `- Treat the Latest user message section and any prior thread context below as the only conversation context you were given.`,
+    `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct intent from local files, account state, or remote services.`,
+    `- For simple chat messages that are fully present in the prompt, answer them directly without workspace exploration.`,
+    ``,
+    `Keep your final reply limited to the final user-facing message.`,
+    `Do not include planning notes, thought process, tool logs, or intermediate progress updates in the final reply.`,
+    ``,
+    buildStructuredResultInstructions(executionLocation),
+  ]
+
+  if (executionLocation === 'remote') return [...REMOTE_EXECUTION_RULES, ...commonRules]
+
+  return [
+    `Execution rules:`,
+    ...renderLarkCliProfileRules(task),
+    ...commonRules.slice(0, 2),
+    `- Do not search outside the current working directory unless the user message explicitly asks you to inspect a specific external path.`,
+    `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to guess what the user probably meant.`,
+    ...commonRules.slice(2),
+    ``,
+    `If you create any files as part of this task, list each file path at the end of your response in this exact format:`,
+    `FILE:/absolute/path/to/file`,
+  ]
+}
+
+export interface PromptBuildOptions {
+  agentName?: string
+  executionLocation?: AgentExecutionLocation
+}
+
 /**
  * Convert an AAMP TaskDispatch into a prompt string for an ACP agent.
  */
-export function buildPrompt(task: TaskDispatch, threadContextText?: string, agentName?: string): string {
-  const agentDisplayName = displayAgentName(task, agentName)
-  const dispatchContextLines = task.dispatchContext && Object.keys(task.dispatchContext).length > 0
-    ? `Dispatch Context:\n${Object.entries(task.dispatchContext).map(([key, value]) => `  - ${key}: ${value}`).join('\n')}`
+export function buildPrompt(
+  task: TaskDispatch,
+  threadContextText?: string,
+  options: PromptBuildOptions = {},
+): string {
+  const executionLocation = options.executionLocation ?? 'local'
+  const agentDisplayName = displayAgentName(task, options.agentName)
+  const dispatchContextEntries = Object.entries(task.dispatchContext ?? {})
+    .filter(([key]) => executionLocation === 'local' || key === 'source')
+  const dispatchContextLines = dispatchContextEntries.length > 0
+    ? `Dispatch Context:\n${dispatchContextEntries.map(([key, value]) => `  - ${key}: ${value}`).join('\n')}`
     : ''
 
   const parts = isConversationalTask(task)
@@ -438,21 +522,7 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ``,
-        `Execution rules:`,
-        ...renderLarkCliProfileRules(task),
-        `- Treat the Latest user message section and any prior thread context below as the only conversation context you were given.`,
-        `- If that context does not contain the actual user request or is otherwise insufficient, respond with HELP instead of trying to reconstruct intent from local files, account state, or remote services.`,
-        `- Do not search outside the current working directory unless the user message explicitly asks you to inspect a specific external path.`,
-        `- Do not inspect the filesystem, credentials, mailbox state, home directory, or network just to guess what the user probably meant.`,
-        `- For simple chat messages that are fully present in the prompt, answer them directly without workspace exploration.`,
-        ``,
-        `Keep your final reply limited to the final user-facing message.`,
-        `Do not include planning notes, thought process, tool logs, or intermediate progress updates in the final reply.`,
-        ``,
-        buildStructuredResultInstructions(),
-        ``,
-        `If you create any files as part of this task, list each file path at the end of your response in this exact format:`,
-        `FILE:/absolute/path/to/file`,
+        ...renderConversationalExecutionRules(task, executionLocation),
       ]
     : [
         `## AAMP Task`,
@@ -471,8 +541,8 @@ export function buildPrompt(task: TaskDispatch, threadContextText?: string, agen
         threadContextText?.trim() ? threadContextText : '',
         task.expiresAt ? `Expires At: ${task.expiresAt}` : '',
         ` `,
-        ...renderLarkCliProfileRules(task),
-        ...renderTaskPromptRules(task.promptRules),
+        ...(executionLocation === 'local' ? renderLarkCliProfileRules(task) : []),
+        ...renderTaskPromptRules(task.promptRules, executionLocation),
       ]
   return parts.filter(Boolean).join('\n')
 }

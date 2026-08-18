@@ -448,13 +448,13 @@ function runControllerListFixture({ agent_type }) {
 function controllerBindingContract() {
   const source = readFileSync(controller, 'utf8')
   const helpers = functionRange(source, 'function agentFailureMessage(', 'function bindingCancellationReason(')
-  return new Function('AGENT_TYPES', `${helpers}\nreturn {
+  return new Function('TASK_AGENT_TYPES', `${helpers}\nreturn {
     resolvePreparedAgentBindings,
     commitPreparedAgentBindings,
     prepareAndCommitAgentBindings,
     recordPreparationFailure,
     recordStableAgentFailure,
-  };`)(['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy'])
+  };`)(['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'aime'])
 }
 
 test('Trae-family discovery is traex, then coco, then external traecli', () => {
@@ -742,8 +742,8 @@ test('Task Agent bootstrap and ACP README use only the approved Trae Next label'
 test('raw runtime types are used for ready Coco bindings', () => {
   const source = readFileSync(controller, 'utf8')
   const helpers = functionRange(source, 'function agentSelectionDisplayName(', 'function bindingCancellationReason(')
-  const values = new Function('AGENT_TYPES', `${helpers}\nreturn { bindingLabel, resolvePreparedAgentBindings };`)(
-    ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy'],
+  const values = new Function('TASK_AGENT_TYPES', `${helpers}\nreturn { bindingLabel, resolvePreparedAgentBindings };`)(
+    ['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'aime'],
   )
   const binding = {
     agent_type: 'coco',

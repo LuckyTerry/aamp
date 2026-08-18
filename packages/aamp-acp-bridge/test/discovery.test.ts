@@ -138,6 +138,71 @@ test('preserves an explicitly configured legacy Trae command for saved bindings'
   })
 })
 
+test('redacts configured remote discovery commands into structural booleans', () => {
+  withFakePath([], (directory) => {
+    const configPath = join(directory, 'remote-bridge.json')
+    const credentialsFile = join(directory, 'REMOTE_DISCOVERY_CREDENTIAL_SENTINEL.json')
+    writeFileSync(credentialsFile, JSON.stringify({
+      email: 'aime@example.com',
+      smtpPassword: 'fixture-password',
+    }))
+    writeFileSync(configPath, JSON.stringify({
+      aampHost: 'https://meshmail.ai',
+      rejectUnauthorized: false,
+      agents: [{
+        name: 'aime',
+        acpCommand: "'/Users/private/REMOTE_DISCOVERY_COMMAND_SENTINEL' --acp",
+        credentialsFile,
+        attachmentPolicy: 'reject',
+        executionLocation: 'remote',
+      }],
+    }))
+
+    assert.deepEqual(findCandidate(configPath, 'aime'), {
+      id: 'aime',
+      displayName: 'aime',
+      connection: 'acp_bridge',
+      detected: false,
+      configured: true,
+      confidence: 'medium',
+      executionLocation: 'remote',
+      commandConfigured: true,
+      acpCommandConfigured: true,
+      email: 'aime@example.com',
+      warnings: ['Remote Agent adapter was not detected.'],
+    })
+  })
+})
+
+test('remote discovery omits generated command, version, and warning paths', () => {
+  withFakePath([], (directory) => {
+    const configPath = join(directory, 'remote-workbuddy-ai.json')
+    writeFileSync(configPath, JSON.stringify({
+      aampHost: 'https://meshmail.ai',
+      rejectUnauthorized: false,
+      agents: [{
+        name: 'workbuddy_ai',
+        acpCommand: "env CODEBUDDY_CONFIG_DIR='/Users/private/REMOTE_CONFIG_DIR_SENTINEL' '/Applications/WorkBuddy AI.app/REMOTE_APP_SENTINEL' --acp",
+        credentialsFile: join(directory, 'missing-credentials.json'),
+        attachmentPolicy: 'reject',
+        executionLocation: 'remote',
+      }],
+    }))
+
+    const candidate = findCandidate(configPath, 'workbuddy_ai') as unknown as Record<string, unknown>
+    assert.equal(candidate.executionLocation, 'remote')
+    assert.equal(candidate.commandConfigured, true)
+    assert.equal(candidate.acpCommandConfigured, true)
+    assert.equal('command' in candidate, false)
+    assert.equal('acpCommand' in candidate, false)
+    assert.equal('version' in candidate, false)
+    assert.doesNotMatch(
+      JSON.stringify(candidate),
+      /REMOTE_CONFIG_DIR_SENTINEL|REMOTE_APP_SENTINEL|Applications|\.workbuddy|Users\/private/,
+    )
+  })
+})
+
 test('exposes both WorkBuddy products as distinct native candidates', () => {
   const ids = discoverAcpBridgeAgents('/definitely/missing/config.json')
     .candidates.map((candidate) => candidate.id)

@@ -146,7 +146,51 @@ Minimal example:
 Legacy `senderWhitelist` configs still load and are normalized into `senderPolicies`.
 When editing the `senderPoliciesFile` directly, `pairedAt` is optional; the bridge accepts manually added records with just `sender` and optional `dispatchContextRules`.
 `credentialsFile` is optional. If omitted, the bridge uses `~/.aamp/acp-bridge/credentials/<agent>.json`.
-`taskDispatchConcurrency` is optional and defaults to `10`.
+`taskDispatchConcurrency` is optional and defaults to `10`. Agents default to
+`executionLocation: "local"`; declare a remote Agent explicitly so its prompt
+and artifact boundary are fail-closed.
+
+### AIME
+
+AIME is a remote agent and does not access the caller's local workspace. Use
+the following conservative v0.1 binding so attachments are rejected before
+the bridge materializes them locally:
+
+```json
+{
+  "name": "aime",
+  "acpCommand": "aime-acp",
+  "executionLocation": "remote",
+  "attachmentPolicy": "reject",
+  "taskDispatchConcurrency": 1
+}
+```
+
+This setting admits one AAMP dispatch at a time. Independently, `aime-acp`
+enforces one active turn per remote session. AIME uses its own remote-native
+Feishu/Lark capabilities and identity for requested reads; it does not receive
+the caller's local workspace, `lark-cli` profile, OAuth state, credentials, or
+shell environment. The local Feishu Bridge remains the only component that
+writes the current Task's comments, status, and deliveries. Paste required text
+into the task or provide an HTTP(S) URL that the remote agent can access.
+
+Remote incoming attachments and local `file_delivery` are unsupported. Return
+text or HTTP(S) links instead. `aamp-feishu-task-bridge` is deprecated and is
+not an AIME implementation target. A successful AIME `auth` or `doctor` check
+only proves adapter readiness; it does not prove access to a particular Feishu
+group.
+
+The opt-in packaged verification can be run from this package with:
+
+```bash
+npm run test:aime-packaged
+```
+
+It runs a real `npm pack` of the current `@tengchengwei/aime-acp` source version, installs that tarball with
+`acpx@0.11.2` in a clean project, and exercises the installed executable
+through the real `AcpxClient` and `AgentBridge`. AIME and AAMP are replaced
+only at their external test boundaries with deterministic fakes. This is a
+packaged generic-bridge proof, not live Feishu or live AIME acceptance.
 
 ### Hermes
 

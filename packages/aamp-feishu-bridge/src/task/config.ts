@@ -6,6 +6,7 @@ import path from 'node:path'
 import readline from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
+import { writePrivateJsonAtomic } from '../private-json.js'
 import type { BridgeConfig, BridgeState } from './types.js'
 
 const CONFIG_FILENAME = 'config.json'
@@ -59,7 +60,7 @@ export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig
 }
 
 export async function saveBridgeConfig(config: BridgeConfig, customDir?: string): Promise<void> {
-  await writeJsonAtomic(getConfigPath(customDir), config)
+  await writePrivateJsonAtomic(getConfigPath(customDir), config)
 }
 
 export function createDefaultBridgeState(): BridgeState {
@@ -237,18 +238,36 @@ function normalizeConfiguredEventNames(values: string[] | undefined): string[] {
     : normalized
 }
 
-function normalizeBridgeConfig(config: Partial<BridgeConfig>): BridgeConfig {
+export function normalizeBridgeConfig(
+  config: Partial<BridgeConfig>,
+  fallbackAgentType = 'agent',
+): BridgeConfig {
   if (!config.aampHost || !config.targetAgentEmail || !config.slug || !config.feishu || !config.mailbox) {
-    throw new Error('Bridge config is incomplete. Run "aamp-feishu-task-bridge init" again.')
+    throw new Error('Bridge config is incomplete. Run "aamp-feishu-bridge start --enable-task" again.')
+  }
+  const executionLocation = config.agent?.executionLocation ?? 'local'
+  if (executionLocation !== 'local' && executionLocation !== 'remote') {
+    throw new Error('Agent execution location must be local or remote.')
+  }
+  const agentType = config.agent?.type?.trim() || fallbackAgentType.trim() || 'agent'
+  const appSecret = config.feishu.appSecret?.trim() || undefined
+  if (executionLocation === 'remote' && !appSecret) {
+    throw new Error('Feishu App Secret is required for remote Task execution.')
   }
   return {
     version: 1,
     aampHost: config.aampHost,
     targetAgentEmail: config.targetAgentEmail,
     slug: config.slug,
+    agent: { type: agentType, executionLocation },
     feishu: {
       appId: config.feishu.appId,
-      appSecret: config.feishu.appSecret,
+      ...(appSecret ? { appSecret } : {}),
+      authMode: executionLocation === 'remote' ? 'app-secret' : (config.feishu.authMode ?? 'lark-cli'),
+      ...(executionLocation === 'local' && config.feishu.cliProfile?.trim() ? { cliProfile: config.feishu.cliProfile.trim() } : {}),
+      ...(executionLocation === 'local' && config.feishu.cliBin?.trim() ? { cliBin: config.feishu.cliBin.trim() } : {}),
+      ...(config.feishu.domain?.trim() ? { domain: config.feishu.domain.trim() } : {}),
+      ...(config.feishu.headers ? { headers: config.feishu.headers } : {}),
       userIdType: config.feishu.userIdType ?? 'open_id',
       eventNames: normalizeConfiguredEventNames(config.feishu.eventNames),
     },
@@ -317,6 +336,7 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
     aampHost,
     targetAgentEmail,
     slug,
+    agent: existing?.agent ?? { type: 'agent', executionLocation: 'local' },
     feishu: {
       appId,
       appSecret,

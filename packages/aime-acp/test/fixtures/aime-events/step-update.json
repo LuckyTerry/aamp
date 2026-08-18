@@ -1,0 +1,16 @@
+{
+  "type": "session.step.update",
+  "data": {
+    "event_id": "evt-step",
+    "event_offset": 7,
+    "timestamp": 106,
+    "event_key": "step",
+    "session_id": "session-demo",
+    "agent_step_id": "step-agent-1",
+    "plan_id": "plan-1",
+    "step_id": "step-1",
+    "status": "running",
+    "title": "Review synthetic data",
+    "summary": "Synthetic summary."
+  }
+}

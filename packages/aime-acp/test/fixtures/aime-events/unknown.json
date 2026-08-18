@@ -1,0 +1,7 @@
+{
+  "type": "unknown",
+  "data": {
+    "eventType": "session.future.notice",
+    "raw": { "state": "ignored" }
+  }
+}

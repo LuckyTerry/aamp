@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -30,19 +30,23 @@ test('global Task Agent installation requires the TraeCode readiness helper', ()
   assert.match(completeness, /bin\/traecode-readiness\.mjs/)
 })
 
-test('task agent package uses the larktask npm scope consistently', () => {
-  const expectedPackage = '@larktask/aamp-feishu-task-agent'
+test('task agent source keeps canonical package metadata and records the last successful release pins', () => {
+  const canonicalPackage = '@larktask/aamp-feishu-task-agent'
+  const releasedTaskAgent = '@luckyterry/aamp-feishu-task-agent'
+  const releasedAcpBridge = '@luckyterry/aamp-acp-bridge@0.1.29-dev.0'
   const source = readFileSync(bootstrap, 'utf8')
   const controller = readFileSync(path.resolve(__dirname, '../bin/feishu-task-agent-controller.mjs'), 'utf8')
   const readme = readFileSync(path.resolve(__dirname, '../README.md'), 'utf8')
   const packageLock = JSON.parse(readFileSync(path.resolve(__dirname, '../package-lock.json'), 'utf8'))
 
-  assert.equal(packageJson.name, expectedPackage)
-  assert.equal(packageLock.name, expectedPackage)
-  assert.equal(packageLock.packages[''].name, expectedPackage)
-  assert.match(source, /AAMP_TASK_AGENT_NAME="\$\{AAMP_TASK_AGENT_NAME:-@larktask\/aamp-feishu-task-agent\}"/)
-  assert.match(controller, /npx -y --package @larktask\/aamp-feishu-task-agent@dev feishu-task-agent install/)
-  assert.match(readme, /npx -y --package @larktask\/aamp-feishu-task-agent@dev/)
+  assert.equal(packageJson.name, canonicalPackage)
+  assert.equal(packageLock.name, canonicalPackage)
+  assert.equal(packageLock.packages[''].name, canonicalPackage)
+  assert.match(source, new RegExp(`ACP_BRIDGE_PKG=\"\\$\\{ACP_BRIDGE_PKG:-${releasedAcpBridge.replace('/', '\\/')}\\}\"`))
+  assert.match(controller, new RegExp(`'${releasedAcpBridge.replace('/', '\\/')}'`))
+  assert.match(source, new RegExp(`AAMP_TASK_AGENT_NAME=\"\\$\\{AAMP_TASK_AGENT_NAME:-${releasedTaskAgent.replace('/', '\\/')}\\}\"`))
+  assert.match(controller, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev feishu-task-agent install`))
+  assert.match(readme, new RegExp(`npx -y --package ${releasedTaskAgent.replace('/', '\\/')}@dev`))
 })
 
 test('bootstrap embedded version matches the published package version', () => {
@@ -84,6 +88,9 @@ test('internal profile probe reports hit or miss without profile mutation, auth 
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-profile-probe-'))
   const fakeCli = path.join(root, 'lark-cli')
   const callsFile = path.join(root, 'calls.log')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  mkdirSync(path.dirname(metadataFile), { recursive: true })
+  writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
   writeFileSync(fakeCli, `#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$CALLS_FILE"
 case "$*" in
@@ -158,7 +165,10 @@ test('internal profile probe does not install lark-cli when no existing candidat
   const binDir = path.join(root, 'bin')
   const callsFile = path.join(root, 'calls.log')
   const resultFile = path.join(root, 'result.json')
+  const metadataFile = path.join(root, 'npm-global', 'lib/node_modules/@luckyterry/aamp-feishu-task-agent/bin/agent-metadata.mjs')
   mkdirSync(binDir)
+  mkdirSync(path.dirname(metadataFile), { recursive: true })
+  writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
   writeFileSync(path.join(binDir, 'node'), `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} "$@"\n`)
   writeFileSync(path.join(binDir, 'npm'), '#!/usr/bin/env bash\nprintf "npm:%s\\n" "$*" >> "$CALLS_FILE"\nexit 97\n')
   writeFileSync(path.join(binDir, 'npx'), '#!/usr/bin/env bash\nprintf "npx:%s\\n" "$*" >> "$CALLS_FILE"\nexit 97\n')
@@ -198,7 +208,142 @@ test('internal profile probe does not install lark-cli when no existing candidat
   assert.equal(existsSync(callsFile), false, 'probe must never invoke npm or npx')
   assert.equal(existsSync(path.join(root, 'lark-config')), false, 'miss probe must not create config')
   assert.equal(existsSync(path.join(root, 'npm-cache')), false, 'probe must not create npm cache')
-  assert.equal(existsSync(path.join(root, 'npm-global')), false, 'probe must not create npm prefix')
+  assert.equal(existsSync(path.join(root, 'npm-global', 'bin')), false, 'probe must not install into the npm prefix')
+})
+
+test('remote AIME internal registration and preparation never call local lark-cli setup', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-remote-bootstrap-'))
+  const packageDir = path.join(root, 'npm-global', 'lib/node_modules/@larktask/aamp-feishu-task-agent')
+  const metadataFile = path.join(packageDir, 'bin/agent-metadata.mjs')
+  const bootstrapLib = path.join(root, 'bootstrap-functions.sh')
+  const callsFile = path.join(root, 'calls.log')
+  mkdirSync(path.dirname(metadataFile), { recursive: true })
+  writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
+  writeFileSync(bootstrapLib, readFileSync(bootstrap, 'utf8').replace(/\nmain "\$@"\n$/, '\n'))
+
+  const shell = [
+    'set -euo pipefail',
+    'source "$BOOTSTRAP_LIB"',
+    'AGENT="aime"',
+    'AAMP_TASK_INTERNAL_RESULT_FD=3',
+    'record() { printf "%s\\n" "$1" >> "$CALLS_FILE"; }',
+    'agent_fail() { printf "%s\\n" "$*" >&2; exit 64; }',
+    'agent_log() { :; }',
+    'agent_detail() { :; }',
+    'ensure_agent_selection_available() { record internal-network; }',
+    'source_lark_env() { record source-lark-env; exit 97; }',
+    'ensure_lark_cli() { record ensure-lark-cli; exit 97; }',
+    'ensure_lark_cli_profile() { record ensure-lark-cli-profile; exit 97; }',
+    'probe_lark_cli_profile_locked() { record probe-lark-cli-profile; exit 97; }',
+    'register_feishu_app() { record bot-registration; APP_ID=cli_remote; APP_SECRET=remote-secret-sentinel; BOT_NAME="Remote AIME"; }',
+    'ensure_agent_cli() { record pinned-aime-preparation; }',
+    'ensure_codex_cli_updated() { :; }',
+    'ensure_agent_login() { record aime-auth-status-doctor; }',
+    'ensure_acpx() { record acpx; }',
+    'build_acp_agent_command() { ACP_AGENT_COMMAND="/safe/bin/aime-acp --site cn"; }',
+    'exec 3>&1',
+    'run_internal_register_binding',
+    'run_internal_prepare_agent',
+  ].join('\n')
+  const result = spawnSync('bash', ['-c', shell], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    env: {
+      ...bootstrapBaseEnv,
+      HOME: root,
+      BOOTSTRAP: bootstrap,
+      BOOTSTRAP_LIB: bootstrapLib,
+      CALLS_FILE: callsFile,
+      NPM_GLOBAL_PREFIX: path.join(root, 'npm-global'),
+      AAMP_TASK_AGENT_NAME: '@larktask/aamp-feishu-task-agent',
+      AAMP_TASK_AUTO_UPDATE: 'false',
+    },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  const [registration, preparation] = result.stdout.trim().split('\n').map(JSON.parse)
+  assert.deepEqual(registration, {
+    app_id: 'cli_remote',
+    app_secret: 'remote-secret-sentinel',
+    display_name: 'Remote AIME',
+    auth_mode: 'app-secret',
+  })
+  assert.deepEqual(preparation, {
+    agent_type: 'aime',
+    acp_command: '/safe/bin/aime-acp --site cn',
+  })
+  assert.deepEqual(readFileSync(callsFile, 'utf8').trim().split('\n'), [
+    'internal-network',
+    'bot-registration',
+    'internal-network',
+    'pinned-aime-preparation',
+    'aime-auth-status-doctor',
+    'acpx',
+  ])
+  assert.doesNotMatch(result.stderr, /remote-secret-sentinel/)
+})
+
+test('remote AIME profile actions reject before touching a retained legacy profile sentinel', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-legacy-profile-'))
+  const prefix = path.join(root, 'npm-global')
+  const metadataFile = path.join(prefix, 'lib/node_modules/@larktask/aamp-feishu-task-agent/bin/agent-metadata.mjs')
+  const configDir = path.join(root, 'legacy-lark-config')
+  const profileFile = path.join(configDir, 'profiles', 'aime-legacy-profile.json')
+  const larkCliLog = path.join(root, 'lark-cli.log')
+  const fakeLarkCli = path.join(root, 'bin', 'lark-cli')
+  const sentinel = Buffer.from('{"legacy":"aime-profile-sentinel"}\n')
+  mkdirSync(path.dirname(metadataFile), { recursive: true })
+  mkdirSync(path.dirname(profileFile), { recursive: true })
+  mkdirSync(path.dirname(fakeLarkCli), { recursive: true })
+  writeFileSync(metadataFile, readFileSync(path.resolve(__dirname, '../bin/agent-metadata.mjs')))
+  writeFileSync(profileFile, sentinel, { mode: 0o640 })
+  chmodSync(profileFile, 0o640)
+  writeFileSync(fakeLarkCli, '#!/usr/bin/env bash\nprintf "called:%s\\n" "$*" >> "$LARK_CLI_LOG"\n')
+  chmodSync(fakeLarkCli, 0o755)
+  const originalMode = statSync(profileFile).mode & 0o777
+  const binding = JSON.stringify({
+    agent_type: 'aime',
+    aamp_host: 'https://meshmail.ai',
+    bot: {
+      app_id: 'cli_aime_legacy',
+      app_secret: 'legacy-secret-not-used',
+      lark_cli_profile: 'aime-legacy-profile',
+    },
+  })
+
+  for (const action of ['__probe-profile', '__ensure-profile']) {
+    const resultFile = path.join(root, `${action}.json`)
+    const shell = [
+      'set -euo pipefail',
+      'exec 3>"$RESULT_FILE"',
+      'exec 4<&0',
+      'exec bash "$BOOTSTRAP" "$ACTION" --agent aime --aamp-host https://meshmail.ai',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', shell], {
+      input: `${binding}\n`,
+      encoding: 'utf8',
+      timeout: 10_000,
+      env: {
+        ...bootstrapBaseEnv,
+        HOME: root,
+        PATH: `${path.dirname(fakeLarkCli)}:${process.env.PATH}`,
+        BOOTSTRAP: bootstrap,
+        ACTION: action,
+        RESULT_FILE: resultFile,
+        NPM_GLOBAL_PREFIX: prefix,
+        AAMP_TASK_AGENT_NAME: '@larktask/aamp-feishu-task-agent',
+        AAMP_LARK_CLI_BIN: fakeLarkCli,
+        AAMP_LARK_CLI_CONFIG_DIR: configDir,
+        LARK_CLI_LOG: larkCliLog,
+        AAMP_TASK_AUTO_UPDATE: 'false',
+      },
+    })
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /remote bindings do not use lark-cli profiles/)
+    assert.deepEqual(readFileSync(profileFile), sentinel)
+    assert.equal(statSync(profileFile).mode & 0o777, originalMode)
+  }
+  assert.equal(existsSync(larkCliLog), false, 'remote profile actions must not probe or ensure lark-cli')
 })
 
 test('bootstrap does not detect Grok agent as Cursor', () => {
@@ -826,6 +971,41 @@ fi
 short_command_is_current "$2"
 `
   execFileSync('bash', ['-c', shell, 'bash', legacyCommand, currentCommand])
+})
+
+test('short command refreshes when same-version bootstrap content changes', () => {
+  const source = readFileSync(bootstrap, 'utf8')
+  const helperStart = source.indexOf('script_file_task_agent_version()')
+  const helperEnd = source.indexOf('\nwrite_task_update_cache()', helperStart)
+  const helpers = source.slice(helperStart, helperEnd)
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-short-command-content-'))
+  const staleCommand = path.join(root, 'stale-command.sh')
+  const sourceCommand = path.join(root, 'source-command.sh')
+
+  writeFileSync(staleCommand, `#!/usr/bin/env bash
+AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.175"
+AIME_ACP_PKG="\${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0}"
+`)
+  writeFileSync(sourceCommand, `#!/usr/bin/env bash
+AAMP_TASK_AGENT_NAME="\${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.175"
+AIME_ACP_PKG="\${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.0-dev.7}"
+`)
+  chmodSync(staleCommand, 0o755)
+  chmodSync(sourceCommand, 0o755)
+
+  const shell = `
+set -euo pipefail
+AAMP_TASK_AGENT_NAME="@larktask/aamp-feishu-task-agent"
+AAMP_TASK_AGENT_VERSION="0.1.0-dev.175"
+${helpers}
+if short_command_is_current "$1" "$2"; then
+  exit 41
+fi
+short_command_is_current "$2" "$2"
+`
+  execFileSync('bash', ['-c', shell, 'bash', staleCommand, sourceCommand])
 })
 
 test('bootstrap removes the legacy scoped package before installing the new scope', () => {

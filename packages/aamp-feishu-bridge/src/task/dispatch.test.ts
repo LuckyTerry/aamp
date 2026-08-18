@@ -146,14 +146,24 @@ test('buildFeishuTaskDispatchContext keeps only non-duplicated task routing sour
   assert.deepEqual(context, { source: 'feishu-task' })
 })
 
-test('buildFeishuTaskDispatchContext carries lark-cli profile and absolute binary when provided', () => {
+test('buildFeishuTaskDispatchContext includes the verified Feishu app owner open id', () => {
+  const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
+    feishuAppOwnerId: ' ou_owner ',
+  })
+
+  assert.deepEqual(context, {
+    source: 'feishu-task',
+    sender_open_id: 'ou_owner',
+  })
+})
+
+test('buildFeishuTaskDispatchContext excludes local profile details from dispatch context', () => {
   const context = buildFeishuTaskDispatchContext(event, task, 'task_create', {
     feishuLarkCliProfile: 'aamp-feishu-task-cli_aac6764b90f89cd0',
     feishuLarkCliBin: '/Users/bytedance/.local/bin/lark-cli',
   })
 
-  assert.equal(context.feishu_lark_cli_profile, 'aamp-feishu-task-cli_aac6764b90f89cd0')
-  assert.equal(context.feishu_lark_cli_bin, '/Users/bytedance/.local/bin/lark-cli')
+  assert.deepEqual(context, { source: 'feishu-task' })
 })
 
 test('buildFeishuTaskDispatch mirrors session key into dispatch context', () => {
@@ -162,4 +172,57 @@ test('buildFeishuTaskDispatch mirrors session key into dispatch context', () => 
   assert.equal(dispatch.sessionKey, 'feishu-task:task_guid_123')
   assert.equal(dispatch.dispatchContext.source, 'feishu-task')
   assert.equal(dispatch.dispatchContext.aamp_session_key, dispatch.sessionKey)
+})
+
+test('buildFeishuTaskDispatch uses invariant rules for local and remote execution without rewriting task text', () => {
+  const taskWithLocalWords = {
+    ...task,
+    description: 'The user mentioned lark-cli and /Users/example',
+  } as FeishuTaskDetails
+  const local = buildFeishuTaskDispatch(event, taskWithLocalWords, 'task_create', {
+    agentExecutionLocation: 'local',
+    feishuLarkCliProfile: 'aamp-feishu-task-cli_test',
+  })
+  const remote = buildFeishuTaskDispatch(event, taskWithLocalWords, 'task_create', {
+    agentExecutionLocation: 'remote',
+    feishuLarkCliProfile: 'aamp-feishu-task-cli_test',
+  })
+
+  for (const rules of [local.promptRules ?? '', remote.promptRules ?? '']) {
+    assert.match(rules, /FEISHU_TASK_RESULT_JSON/)
+    assert.match(rules, /AAMP_RESULT_JSON/)
+    assert.match(rules, /only the Feishu Bridge writes the current Task/i)
+    assert.match(rules, /all work for this turn has settled/i)
+  }
+  assert.match(remote.bodyText, /The user mentioned lark-cli and \/Users\/example/)
+  assert.doesNotMatch(remote.bodyText, /subagents/i)
+  assert.match(remote.promptRules ?? '', /remote sandbox/i)
+  assert.match(remote.promptRules ?? '', /own remote-native Feishu\/Lark capabilities/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /lark-cli/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /--profile/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /source ~\/lark-env\.sh/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /current working directory/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /file_delivery artifact/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /do not delegate work to subagents/i)
+  assert.doesNotMatch(remote.promptRules ?? '', /copy.*verbatim/i)
+  assert.match(remote.promptRules ?? '', /internal remote tool orchestration is allowed/i)
+})
+
+test('buildFeishuTaskPromptRules renders the complete remote-safe result schema', () => {
+  const rules = buildFeishuTaskPromptRules({ agentExecutionLocation: 'remote' })
+
+  assert.match(rules, /status=answered[\s\S]*nonempty summary[\s\S]*reply_written=false/i)
+  assert.match(rules, /status=succeeded[\s\S]*nonempty summary[\s\S]*outputs/i)
+  assert.match(rules, /reply_comment[\s\S]*nonempty content/i)
+  assert.match(rules, /text_delivery[\s\S]*format=markdown or plain_text[\s\S]*nonempty content/i)
+  assert.match(rules, /link_delivery[\s\S]*HTTP\(S\)[\s\S]*no username or password/i)
+  assert.match(rules, /status=need_help[\s\S]*nonempty summary[\s\S]*nonempty question/i)
+  assert.match(rules, /status=failed[\s\S]*nonempty summary[\s\S]*nonempty error/i)
+  assert.match(rules, /nested[\s\S]*JSON[\s\S]*\\\\n/i)
+  assert.match(rules, /Example remote answered:[^\n]*AAMP_RESULT_JSON:[^\n]*\\"status\\":\\"answered\\"/i)
+  assert.match(rules, /Example remote succeeded:[^\n]*\\"kind\\":\\"text_delivery\\"[^\n]*\\"kind\\":\\"link_delivery\\"/i)
+  assert.match(rules, /Example remote need_help:[^\n]*\\"status\\":\\"need_help\\"/i)
+  assert.match(rules, /Example remote failed:[^\n]*\\"status\\":\\"failed\\"/i)
+  assert.match(rules, /Only the Feishu Bridge writes the current Task/i)
+  assert.match(rules, /all work for this turn has settled/i)
 })

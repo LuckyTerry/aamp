@@ -1,0 +1,13 @@
+{
+  "type": "session.message.delta",
+  "data": {
+    "event_id": "evt-delta",
+    "event_offset": 2,
+    "timestamp": 101,
+    "event_key": "message",
+    "message_id": "msg-1",
+    "content": " Synthetic continuation.",
+    "mode_type": "auto",
+    "is_finished": false
+  }
+}

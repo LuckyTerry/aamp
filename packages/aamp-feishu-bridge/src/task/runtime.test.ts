@@ -12,7 +12,11 @@ import type {
   TaskResult,
   TaskStreamOpened,
 } from 'aamp-sdk'
-import { FeishuTaskBridgeRuntime } from './runtime.js'
+import {
+  classifyFeishuTaskResult,
+  FeishuTaskBridgeRuntime,
+  sanitizeTaskVisibleFailureReason,
+} from './runtime.js'
 import type {
   BridgeConfig,
   FeishuDownloadedAttachment,
@@ -120,6 +124,20 @@ class FakeAampClient {
     })
   }
 
+  emitHelp(taskId: string, help: Partial<TaskHelp> = {}): void {
+    this.helpHandler?.({
+      protocolVersion: '1.1',
+      intent: 'task.help_needed',
+      taskId,
+      question: help.question ?? '',
+      blockedReason: help.blockedReason ?? '',
+      suggestedOptions: help.suggestedOptions ?? [],
+      from: help.from ?? 'agent@meshmail.ai',
+      to: help.to ?? 'bridge@meshmail.ai',
+      ...(help.messageId ? { messageId: help.messageId } : {}),
+    })
+  }
+
   emitStreamOpened(taskId: string, streamId = 'stream_1'): void {
     this.streamOpenedHandler?.({
       protocolVersion: '1.1',
@@ -148,9 +166,15 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   steps: Array<{ taskGuid: string; step: FeishuTaskStepInput }> = []
   uploadedDeliveries: Array<{ taskGuid: string; filePath: string }> = []
   uploadedDeliveryContents: string[] = []
+  textDeliveries: Array<{ taskGuid: string; urls: string[] }> = []
+  downloadedAttachmentGuids: string[] = []
   completedTaskGuids: string[] = []
   blockedTaskGuids: string[] = []
   commentFailures = 0
+  commentErrors: Error[] = []
+  completeTaskErrors: Error[] = []
+  blockTaskErrors: Record<string, Error[]> = {}
+  blockTaskAttempts: string[] = []
   getTaskBaseError?: Error
   getCommentError?: Error
   tasks: Record<string, FeishuTaskDetails> = {}
@@ -208,10 +232,13 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   }
 
   async downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment> {
+    this.downloadedAttachmentGuids.push(attachment.guid)
     return { attachment, content: Buffer.from('') }
   }
 
   async commentTask(taskGuid: string, content: string): Promise<void> {
+    const error = this.commentErrors.shift()
+    if (error) throw error
     if (this.commentFailures > 0) {
       this.commentFailures -= 1
       throw Object.assign(new Error('temporary comment failure'), { code: 'ECONNRESET' })
@@ -232,7 +259,9 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     }
   }
 
-  async appendTextDeliveries(_taskGuid: string, _urls: string[]): Promise<void> {}
+  async appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void> {
+    this.textDeliveries.push({ taskGuid, urls })
+  }
 
   async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
     this.uploadedDeliveries.push({ taskGuid, filePath })
@@ -242,10 +271,15 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   async markTaskInProgress(_taskGuid: string): Promise<void> {}
 
   async completeTask(taskGuid: string): Promise<void> {
+    const error = this.completeTaskErrors.shift()
+    if (error) throw error
     this.completedTaskGuids.push(taskGuid)
   }
 
   async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
+    this.blockTaskAttempts.push(taskGuid)
+    const error = this.blockTaskErrors[taskGuid]?.shift()
+    if (error) throw error
     this.blockedTaskGuids.push(taskGuid)
   }
 
@@ -276,6 +310,13 @@ function buildConfig(): BridgeConfig {
     behavior: {
       ackComment: true,
     },
+  }
+}
+
+function buildRemoteConfig(): BridgeConfig {
+  return {
+    ...buildConfig(),
+    agent: { type: 'aime', executionLocation: 'remote' },
   }
 }
 
@@ -574,6 +615,139 @@ test('runtime writes content-bearing text deltas as task steps', async () => {
         content: '我已经确认任务需要参考 IM 的过程展示策略。',
       },
     ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime splits text steps at message boundaries and drops standalone AIME progress', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_msg_boundary-evt_msg_boundary'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_msg_boundary',
+      taskGuid: 'task_guid_msg_boundary',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_msg_boundary')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_msg_boundary)
+    })
+
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: { text: '收到，我会继续处理该任务。', messageId: 'assistant-ack' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_2',
+      taskId: aampTaskId,
+      seq: 2,
+      type: 'text.delta',
+      payload: { text: '开始分析任务，简单问题将快速给出结果', messageId: 'thought-1' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_3',
+      taskId: aampTaskId,
+      seq: 3,
+      type: 'text.delta',
+      payload: { text: 'AIME is executing.', messageId: 'progress-1' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_4',
+      taskId: aampTaskId,
+      seq: 4,
+      type: 'text.delta',
+      payload: { text: '[thinking] AIME is preparing.', messageId: 'progress-2' },
+    })
+    fakeAamp.emitStreamEvent('stream_msg_boundary', {
+      id: 'stream_event_boundary_5',
+      taskId: aampTaskId,
+      seq: 5,
+      type: 'text.delta',
+      payload: { text: ' 正在理解任务的真实意图', messageId: 'thought-1' },
+    })
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps.map(({ step }) => step.content), [
+      '收到，我会继续处理该任务。',
+      '开始分析任务，简单问题将快速给出结果 正在理解任务的真实意图',
+    ])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime ignores AIME progress notices as task steps', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+    streamStepFlushIntervalMs: 60_000,
+  })
+  const aampTaskId = 'feishu-task-task_guid_aime_progress-evt_aime_progress'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_aime_progress',
+      taskGuid: 'task_guid_aime_progress',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_aime_progress')
+    await waitFor(() => {
+      assert.ok(fakeAamp.streamHandlers.stream_aime_progress)
+    })
+
+    fakeAamp.emitStreamEvent('stream_aime_progress', {
+      id: 'stream_event_progress_1',
+      taskId: aampTaskId,
+      seq: 1,
+      type: 'text.delta',
+      payload: { text: 'AIME is executing.' },
+    })
+    fakeAamp.emitStreamEvent('stream_aime_progress', {
+      id: 'stream_event_progress_2',
+      taskId: aampTaskId,
+      seq: 2,
+      type: 'text.delta',
+      payload: { text: 'AIME is thinking.' },
+    })
+    fakeAamp.emitStreamEvent('stream_aime_progress', {
+      id: 'stream_event_progress_3',
+      taskId: aampTaskId,
+      seq: 3,
+      type: 'todo' as AampStreamEvent['type'],
+      payload: { items: [{ content: '定位目标群聊', status: 'in_progress' }] },
+    })
+
+    await runtime.stop()
+
+    assert.deepEqual(fakeFeishu.steps.map(({ step }) => step.content), ['定位目标群聊'])
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })
@@ -1292,6 +1466,774 @@ test('runtime keeps lark-cli profile out of dispatch context and puts it in prom
     assert.equal(fakeAamp.sentTasks[0]?.dispatchContext?.feishu_lark_cli_profile, undefined)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /Feishu lark-cli profile rules:/)
     assert.match(fakeAamp.sentTasks[0]?.promptRules ?? '', /--profile custom-feishu-profile/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime rejects remote file_delivery before filesystem access and persists a safe failure', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const aampTaskId = 'feishu-task-task_guid_remote_file-evt_remote_file'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_remote_file',
+      taskGuid: 'task_guid_remote_file',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    })
+    fakeAamp.emitResult(aampTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'succeeded',
+        summary: '已生成文件。',
+        outputs: [{ kind: 'file_delivery', path: '/Users/private/SECRET_FILE' }],
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
+      assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_remote_file'])
+    })
+    const evidence = [
+      fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+      runtime.getStateSnapshot().lastError ?? '',
+      runtime.getStateSnapshot().tasks[aampTaskId]?.lastError ?? '',
+      logs.join('\n'),
+    ].join('\n')
+    assert.match(evidence, /REMOTE_ARTIFACT_UNSUPPORTED/)
+    assert.doesNotMatch(evidence, /\/Users\/private/)
+    assert.doesNotMatch(evidence, /SECRET_FILE/)
+    assert.deepEqual(fakeFeishu.uploadedDeliveries, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime surfaces remote result failure diagnostics verbatim', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const rejectedTaskId = 'feishu-task-task_guid_remote_rejected-evt_remote_rejected'
+  const safeFailedTaskId = 'feishu-task-task_guid_remote_safe_failed-evt_remote_safe_failed'
+  const rawFailure = 'ACP agent error: acpx --cwd /Users/private --agent /secret/aime-acp prompt ## AAMP Task SECRET_PROMPT'
+  const permissionError = '没有权限读取指定群聊，请确认远端 Aime 账号权限。'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({ eventId: 'evt_remote_rejected', taskGuid: 'task_guid_remote_rejected', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(rejectedTaskId, { status: 'rejected', errorMsg: rawFailure })
+    await fakeFeishu.emit({ eventId: 'evt_remote_safe_failed', taskGuid: 'task_guid_remote_safe_failed', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(safeFailedTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'failed',
+        summary: '无法读取指定群聊。',
+        error: permissionError,
+      })}`,
+    })
+
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().tasks[rejectedTaskId]?.status, 'failed')
+      assert.equal(runtime.getStateSnapshot().tasks[rejectedTaskId]?.lastError, rawFailure)
+      assert.equal(runtime.getStateSnapshot().tasks[safeFailedTaskId]?.status, 'failed')
+      assert.equal(runtime.getStateSnapshot().tasks[safeFailedTaskId]?.lastError, permissionError)
+    })
+    const evidence = [
+      fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+      runtime.getStateSnapshot().lastError ?? '',
+      runtime.getStateSnapshot().tasks[rejectedTaskId]?.lastError ?? '',
+      logs.join('\n'),
+    ].join('\n')
+    assert.equal(evidence.includes('REMOTE_AGENT_FAILED'), false)
+    assert.equal(evidence.includes(rawFailure), true)
+    assert.equal(fakeFeishu.comments.map((entry) => entry.content).join('\n').includes(permissionError), true)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime suppresses malformed remote result snippets from task logs', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const errors: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: (message) => { errors.push(String(message)) } },
+  })
+  const aampTaskId = 'feishu-task-task_guid_remote_bad_json-evt_remote_bad_json'
+  const sentinels = 'acpx --cwd /Users/private --agent /secret/aime-acp ## AAMP Task SECRET_PROMPT access_token=SECRET_TOKEN'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({ eventId: 'evt_remote_bad_json', taskGuid: 'task_guid_remote_bad_json', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(aampTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"${sentinels}",}`,
+    })
+
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
+      assert.ok(errors.some((message) => message.includes('result invalid FEISHU_TASK_RESULT_JSON')))
+    })
+    const evidence = [
+      errors.join('\n'),
+      runtime.getStateSnapshot().lastError ?? '',
+      runtime.getStateSnapshot().tasks[aampTaskId]?.lastError ?? '',
+      fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+    ].join('\n')
+    assert.doesNotMatch(evidence, /acpx|--cwd|--agent|\/Users\/private|SECRET_PROMPT|access_token|SECRET_TOKEN|## AAMP Task/i)
+    assert.match(errors.join('\n'), /category=final_contract/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime surfaces remote post-prompt Feishu write failure details verbatim', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const aampTaskId = 'feishu-task-task_guid_remote_write_failure-evt_remote_write_failure'
+  const sentinels = 'acpx --cwd /Users/private --agent /secret/aime-acp ## AAMP Task SECRET_PROMPT access_token=SECRET_TOKEN'
+
+  fakeFeishu.commentErrors.push(new Error(sentinels))
+  fakeFeishu.completeTaskErrors.push(new Error(sentinels))
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({ eventId: 'evt_remote_write_failure', taskGuid: 'task_guid_remote_write_failure', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(aampTaskId, {
+      output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"answered","summary":"已完成。","reply_written":false}',
+    })
+
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'completed')
+      assert.equal(fakeFeishu.comments.length, 1)
+    })
+    const evidence = [
+      fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+      runtime.getStateSnapshot().lastError ?? '',
+      runtime.getStateSnapshot().tasks[aampTaskId]?.lastError ?? '',
+      logs.join('\n'),
+    ].join('\n')
+    assert.equal(evidence.includes('REMOTE_AGENT_FAILED'), false)
+    assert.equal(evidence.includes(sentinels), true)
+    assert.match(logs.join('\n'), /action=result_comment/)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime blocks remote tasks with any attachment metadata before download or AAMP dispatch', async () => {
+  const sources = ['parent_attachment', 'parent_delivery', 'child_attachment', 'child_delivery'] as const
+
+  for (const [index, source] of sources.entries()) {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+    const fakeAamp = new FakeAampClient()
+    const fakeFeishu = new FakeFeishuTaskClient()
+    const logs: string[] = []
+    const taskGuid = `task_guid_remote_attachments_${index}`
+    const childGuid = `child_guid_remote_attachments_${index}`
+    const eventId = `evt_remote_attachments_${index}`
+    const aampTaskId = `feishu-task-${taskGuid}-${eventId}`
+    const attachment: FeishuTaskAttachment = {
+      guid: `${source}_guid`,
+      kind: source.endsWith('delivery') ? 'task_delivery' : 'task_attachment',
+      name: '/opt/private/SECRET_ATTACHMENT client_secret=SECRET_CLIENT',
+      url: '\\\\private-server\\secret\\attachment',
+    }
+    fakeFeishu.tasks[taskGuid] = {
+      guid: taskGuid,
+      taskId: `t_remote_attachments_${index}`,
+      summary: '处理附件',
+      status: 'todo',
+      attachments: source === 'parent_attachment' ? [attachment] : [],
+      attachmentDeliveries: source === 'parent_delivery' ? [attachment] : [],
+      subtasks: [{
+        guid: childGuid,
+        summary: '子任务附件',
+        status: 'todo',
+        attachments: source === 'child_attachment' ? [attachment] : [],
+        attachmentDeliveries: source === 'child_delivery' ? [attachment] : [],
+      }],
+    }
+    const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+      configDir,
+      aampClient: fakeAamp,
+      feishuClient: fakeFeishu,
+      logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+    })
+
+    try {
+      await runtime.start()
+      await fakeFeishu.emit({ eventId, taskGuid, eventTypes: ['task_create'], timestamp: '1775793266155' })
+
+      const state = runtime.getStateSnapshot()
+      const evidence = [
+        fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+        state.lastError ?? '',
+        state.tasks[aampTaskId]?.lastError ?? '',
+        logs.join('\n'),
+      ].join('\n')
+      assert.equal(state.tasks[aampTaskId]?.status, 'help_needed', source)
+      assert.deepEqual(fakeFeishu.blockedTaskGuids, [childGuid, taskGuid], source)
+      assert.match(fakeFeishu.comments[0]?.content ?? '', /REMOTE_ATTACHMENTS_UNSUPPORTED/, source)
+      assert.deepEqual(fakeFeishu.downloadedAttachmentGuids, [], source)
+      assert.deepEqual(fakeAamp.sentTasks, [], source)
+      assert.deepEqual(fakeAamp.streamHandlers, {}, source)
+      assert.deepEqual(fakeFeishu.uploadedDeliveries, [], source)
+      assert.doesNotMatch(evidence, /SECRET_ATTACHMENT|SECRET_CLIENT|client_secret|\/opt\/private|private-server/i, source)
+    } finally {
+      await runtime.stop()
+      await rm(configDir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('remote attachment rejection resumes partial waiting transitions without duplicate help comments', async () => {
+  for (const failureTarget of ['child', 'parent'] as const) {
+    const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+    const fakeAamp = new FakeAampClient()
+    const fakeFeishu = new FakeFeishuTaskClient()
+    const taskGuid = `task_guid_attachment_retry_${failureTarget}`
+    const childGuid = `child_guid_attachment_retry_${failureTarget}`
+    const eventId = `evt_attachment_retry_${failureTarget}`
+    const aampTaskId = `feishu-task-${taskGuid}-${eventId}`
+    const attachment: FeishuTaskAttachment = {
+      guid: `attachment_retry_${failureTarget}`,
+      kind: 'task_attachment',
+      name: '/opt/private/SECRET_ATTACHMENT refreshToken=SECRET_REFRESH',
+    }
+    fakeFeishu.tasks[taskGuid] = {
+      guid: taskGuid,
+      taskId: `t_attachment_retry_${failureTarget}`,
+      summary: '处理附件',
+      status: 'todo',
+      attachments: [attachment],
+      subtasks: [{ guid: childGuid, summary: '子任务', status: 'todo' }],
+    }
+    const failedGuid = failureTarget === 'child' ? childGuid : taskGuid
+    fakeFeishu.blockTaskErrors[failedGuid] = [new Error(`${failureTarget} waiting transition failed`)]
+    const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+      configDir,
+      aampClient: fakeAamp,
+      feishuClient: fakeFeishu,
+      logger: { log: () => {}, error: () => {} },
+    })
+    const event: FeishuTaskEvent = {
+      eventId,
+      taskGuid,
+      eventTypes: ['task_create'],
+      timestamp: '1775793266155',
+    }
+
+    try {
+      await runtime.start()
+      await assert.rejects(fakeFeishu.emit(event), new RegExp(`${failureTarget} waiting transition failed`))
+
+      let state = runtime.getStateSnapshot()
+      assert.equal(fakeFeishu.comments.length, 1, failureTarget)
+      assert.deepEqual(state.tasks[aampTaskId]?.helpCommentedTaskIds, [aampTaskId], failureTarget)
+      assert.equal(state.dedupEventIds[eventId], undefined, failureTarget)
+
+      await fakeFeishu.emit(event)
+      state = runtime.getStateSnapshot()
+      assert.equal(fakeFeishu.comments.length, 1, failureTarget)
+      assert.deepEqual(fakeFeishu.blockedTaskGuids, [childGuid, taskGuid], failureTarget)
+      assert.deepEqual(
+        fakeFeishu.blockTaskAttempts,
+        failureTarget === 'child' ? [childGuid, childGuid, taskGuid] : [childGuid, taskGuid, taskGuid],
+        failureTarget,
+      )
+      assert.equal(state.tasks[aampTaskId]?.status, 'help_needed', failureTarget)
+      assert.deepEqual(state.tasks[aampTaskId]?.feishuBlockedTaskIds, [childGuid, taskGuid], failureTarget)
+      assert.ok(state.dedupEventIds[eventId], failureTarget)
+      assert.deepEqual(fakeFeishu.downloadedAttachmentGuids, [], failureTarget)
+      assert.deepEqual(fakeAamp.sentTasks, [], failureTarget)
+      assert.deepEqual(fakeAamp.streamHandlers, {}, failureTarget)
+      assert.deepEqual(fakeFeishu.uploadedDeliveries, [], failureTarget)
+    } finally {
+      await runtime.stop()
+      await rm(configDir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('exported result classifier enforces required remote human-visible fields', () => {
+  const makeResult = (payload: Record<string, unknown>): TaskResult => ({
+    protocolVersion: '1.1',
+    intent: 'task.result',
+    taskId: 'remote-contract-task',
+    status: 'completed',
+    output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({ schema: 'feishu_task_result.v2', ...payload })}`,
+    from: 'agent@meshmail.ai',
+    to: 'bridge@meshmail.ai',
+  })
+  const invalidPayloads: Record<string, unknown>[] = [
+    { status: 'answered', reply_written: false },
+    { status: 'answered', summary: '已回答。', reply_written: true },
+    { status: 'succeeded', outputs: [{ kind: 'reply_comment', content: '结果' }] },
+    { status: 'need_help', summary: '需要输入。' },
+    { status: 'failed', summary: '执行失败。' },
+  ]
+
+  for (const payload of invalidPayloads) {
+    const disposition = classifyFeishuTaskResult(makeResult(payload), 'remote')
+    assert.equal(disposition.kind, 'failure')
+    assert.equal(disposition.kind === 'failure' ? disposition.reason : '', 'final_contract')
+    assert.match(disposition.kind === 'failure' ? disposition.message : '', /不能为空|必须|不允许/)
+  }
+  assert.equal(classifyFeishuTaskResult(makeResult({ status: 'answered', summary: '已回答。', reply_written: false }), 'remote').kind, 'answered')
+  assert.equal(classifyFeishuTaskResult(makeResult({
+    status: 'succeeded',
+    summary: '文本已生成。',
+    outputs: [{ kind: 'text_delivery', format: 'plain_text', content: '结果' }],
+  }), 'remote').kind, 'succeeded')
+  assert.equal(classifyFeishuTaskResult(makeResult({ status: 'need_help', summary: '需要输入。', question: '请提供群 ID。' }), 'remote').kind, 'help_needed')
+  const failed = classifyFeishuTaskResult(makeResult({ status: 'failed', summary: '执行失败。', error: '没有权限读取指定群聊。' }), 'remote')
+  assert.equal(failed.kind, 'failure')
+  assert.equal(failed.reason, 'agent_failed')
+
+  const remoteFile = classifyFeishuTaskResult(makeResult({
+    status: 'succeeded',
+    summary: '生成了远端文件。',
+    outputs: [{ kind: 'file_delivery', path: 'relative/SECRET_FILE' }],
+  }), 'remote')
+  assert.equal(remoteFile.kind, 'failure')
+  assert.equal(remoteFile.kind === 'failure' ? remoteFile.reason : '', 'agent_failed')
+  assert.equal(
+    remoteFile.kind === 'failure' ? remoteFile.message : '',
+    'REMOTE_ARTIFACT_UNSUPPORTED: Remote Agent file delivery is not supported.',
+  )
+
+  const malformed = classifyFeishuTaskResult({
+    ...makeResult({ status: 'answered', summary: '不会使用。', reply_written: false }),
+    output: 'FEISHU_TASK_RESULT_JSON: {"summary":"/opt/private/SECRET_PROMPT",}',
+  }, 'remote')
+  assert.equal(malformed.kind, 'failure')
+  assert.equal(malformed.kind === 'failure' ? malformed.diagnosticCategory : undefined, 'malformed_result_json')
+  assert.equal(malformed.kind === 'failure' ? malformed.diagnosticSnippet : undefined, undefined)
+})
+
+test('remote failure sanitizer passes remote error text through verbatim', () => {
+  const failures = [
+    'Authorization: Bearer SECRET_BEARER',
+    'client_secret=SECRET_CLIENT app_secret=SECRET_APP access_token=SECRET_ACCESS',
+    'clientSecret=SECRET_CLIENT appSecret=SECRET_APP accessToken=SECRET_ACCESS resumeToken=SECRET_RESUME',
+    'resume-token=SECRET_RESUME mailboxToken=SECRET_MAILBOX',
+    'refresh_token=SECRET_REFRESH refreshToken=SECRET_REFRESH_CAMEL',
+    'id_token=SECRET_ID idToken=SECRET_ID_CAMEL',
+    'session_token=SECRET_SESSION sessionToken=SECRET_SESSION_CAMEL',
+    'signing_secret=SECRET_SIGNING signingSecret=SECRET_SIGNING_CAMEL',
+    'database_password=SECRET_PASSWORD databasePassword=SECRET_PASSWORD_CAMEL',
+    'x_api_key=SECRET_API xApiKey=SECRET_API_CAMEL X-API-KEY=SECRET_API_DASH',
+    '--refresh-token SECRET_OPTION --servicePassword=SECRET_OPTION_PASSWORD',
+    'open /opt/aime/private/config.json failed',
+    'open,/opt/aime/private/config.json failed',
+    'open ~/aime/private/config.json failed',
+    String.raw`open C:\Users\private\secret.txt failed`,
+    'open C:/Users/private/secret.txt failed',
+    String.raw`open \\private-server\secret\payload failed`,
+    'api_key=SECRET_KEY password=SECRET_PASSWORD',
+    'argv=["acpx","--cwd","/workspace"] prompt=## AAMP Task SECRET_PROMPT',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature',
+    'sk-proj-ABCDEF1234567890',
+    'SECRET_SENTINEL',
+    'AIME_SECRET_SENTINEL',
+    'vF8kQ2mN7pR4sT9wX6yZ3aB1cD5eG0hJ',
+    '没有权限读取指定群聊，请确认远端 Aime 账号权限。',
+  ]
+
+  for (const failure of failures) {
+    assert.equal(sanitizeTaskVisibleFailureReason(new Error(failure), 'remote'), failure)
+  }
+  assert.equal(
+    sanitizeTaskVisibleFailureReason(new Error('AUTH_REQUIRED Authorization: Bearer SECRET'), 'remote'),
+    'AUTH_REQUIRED Authorization: Bearer SECRET',
+  )
+  assert.equal(
+    sanitizeTaskVisibleFailureReason(new Error('AUTH_IDENTITY_CHANGED client_secret=SECRET'), 'remote'),
+    'AUTH_IDENTITY_CHANGED client_secret=SECRET',
+  )
+  assert.equal(
+    sanitizeTaskVisibleFailureReason(new Error('REMOTE_ARTIFACT_UNSUPPORTED /opt/private/file'), 'remote'),
+    'REMOTE_ARTIFACT_UNSUPPORTED /opt/private/file',
+  )
+  assert.equal(sanitizeTaskVisibleFailureReason(new Error('SECRET_SENTINEL'), 'local'), 'SECRET_SENTINEL')
+})
+
+test('runtime surfaces remote help and failure text verbatim in comments state and logs', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.signature'
+  const providerToken = 'sk-proj-ABCDEF1234567890'
+  const secretMarker = 'SECRET_SENTINEL'
+  const highEntropyToken = 'vF8kQ2mN7pR4sT9wX6yZ3aB1cD5eG0hJ'
+  const rejectedTaskId = 'feishu-task-task_guid_remote_bare_rejected-evt_remote_bare_rejected'
+  const failedTaskId = 'feishu-task-task_guid_remote_bare_failed-evt_remote_bare_failed'
+  const safeHelpTaskId = 'feishu-task-task_guid_remote_safe_help-evt_remote_safe_help'
+
+  try {
+    await runtime.start()
+
+    await fakeFeishu.emit({ eventId: 'evt_remote_bare_rejected', taskGuid: 'task_guid_remote_bare_rejected', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(rejectedTaskId, { status: 'rejected', errorMsg: jwt })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[rejectedTaskId]?.lastError, jwt))
+
+    await fakeFeishu.emit({ eventId: 'evt_remote_bare_failed', taskGuid: 'task_guid_remote_bare_failed', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(failedTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'failed',
+        summary: '远程执行失败。',
+        error: providerToken,
+      })}`,
+    })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[failedTaskId]?.lastError, providerToken))
+
+    for (const [index, probe] of [jwt, providerToken, secretMarker, highEntropyToken].entries()) {
+      const taskGuid = `task_guid_remote_bare_help_${index}`
+      const eventId = `evt_remote_bare_help_${index}`
+      const taskId = `feishu-task-${taskGuid}-${eventId}`
+      await fakeFeishu.emit({ eventId, taskGuid, eventTypes: ['task_create'], timestamp: '1775793266155' })
+      fakeAamp.emitHelp(taskId, { question: probe })
+      await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'help_needed'))
+    }
+
+    const safeQuestion = '请提供目标群 ID，我会继续处理。'
+    await fakeFeishu.emit({ eventId: 'evt_remote_safe_help', taskGuid: 'task_guid_remote_safe_help', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitHelp(safeHelpTaskId, { question: safeQuestion })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[safeHelpTaskId]?.status, 'help_needed'))
+
+    const combinedProbes = `${jwt} ${providerToken} ${secretMarker} ${highEntropyToken}`
+    fakeAamp.errorHandler?.(new Error(combinedProbes))
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().lastError, combinedProbes))
+
+    const comments = fakeFeishu.comments.map((entry) => entry.content)
+    for (const probe of [jwt, providerToken, secretMarker, highEntropyToken]) {
+      assert.equal(comments.filter((entry) => entry === probe).length, 1, probe)
+    }
+    assert.equal(comments.filter((entry) => entry === safeQuestion).length, 1)
+    assert.equal(comments.filter((entry) => entry.includes('REMOTE_AGENT_FAILED')).length, 0)
+
+    await runtime.stop()
+    const persistedState = await readFile(path.join(configDir, 'state.json'), 'utf8')
+    const evidence = [
+      comments.join('\n'),
+      persistedState,
+      logs.join('\n'),
+    ].join('\n')
+    for (const probe of [jwt, providerToken, secretMarker, highEntropyToken, combinedProbes]) {
+      assert.equal(evidence.includes(probe), true, probe)
+    }
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime surfaces remote help questions verbatim including timezone and path-like text', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const questions = [
+    '0123456789abcdef0123456789abcdef',
+    '请提供 0123456789abcdef 0123456789abcdef',
+    '请提供 g123456789abcdef h123456789abcdef',
+    '请读取 relative/private.json',
+    '请提供 ｓｋ－ｐｒｏｊ－ＡＢＣＤＥＦ１２３４５６７８９０',
+    '请读取 ./private.json',
+    '请读取 ../private.json',
+    '请读取 ~/private.json',
+    String.raw`请读取 C:\Users\private\secret.txt`,
+    String.raw`请读取 \\private-server\secret\payload.txt`,
+    '请读取「relative/private.json」。',
+    '请查看 https://bytedance.larkoffice.com/docx/E6bddi2EAoZzKcx9irBcILi1nCc 并提供 SECRET_SENTINEL',
+    '请查看 https://user:password@example.com/task/0123456789abcdef',
+    '请查看 https://example.com/task/0123456789abcdef?access_token=public-value',
+    '请查看 https://example.com/task/0123456789abcdef?ａｃｃｅｓｓ＿ｔｏｋｅｎ=ｐｕｂｌｉｃ',
+    '请查看 https://example.com/task/0123456789abcdef#sk-proj-ABCDEF1234567890',
+    '请查看 https://example.com/task/sk-proj-ABCDEF1234567890',
+    '请查看 https://0123456789abcdef0123456789abcdef.example.com/task',
+    '请查看 https:/example.com/task/0123456789abcdef',
+    '请提供目标群 ID，我会继续处理。',
+    '请查看 https://example.com/docs/guide.html 并确认是否继续。',
+    '请查看 https://example.com/docs/guide.html?page=2#usage 并确认是否继续。',
+    'https://bytedance.larkoffice.com/docx/E6bddi2EAoZzKcx9irBcILi1nCc',
+    'https://example.com/task/0123456789abcdef',
+    // Regression: IANA timezone hints must be shown verbatim, not treated as a leaked relative path.
+    '请提供你所在的时区，例如 Asia/Shanghai，我再继续查询今天的日程。',
+    '请提供你所在的时区，例如 America/New_York。',
+    '请提供你所在的时区，例如 Europe/Berlin 或 Etc/GMT+8。',
+  ]
+
+  try {
+    await runtime.start()
+
+    for (const [index, question] of questions.entries()) {
+      const taskGuid = `task_guid_remote_obfuscated_help_${index}`
+      const eventId = `evt_remote_obfuscated_help_${index}`
+      const taskId = `feishu-task-${taskGuid}-${eventId}`
+      await fakeFeishu.emit({ eventId, taskGuid, eventTypes: ['task_create'], timestamp: '1775793266155' })
+      fakeAamp.emitHelp(taskId, { question })
+      await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'help_needed'))
+    }
+
+    for (const question of questions) {
+      assert.equal(fakeFeishu.comments.filter((entry) => entry.content === question).length, 1, question)
+    }
+
+    await runtime.stop()
+    const persistedState = await readFile(path.join(configDir, 'state.json'), 'utf8')
+    const evidence = [
+      fakeFeishu.comments.map((entry) => entry.content).join('\n'),
+      persistedState,
+      logs.join('\n'),
+    ].join('\n')
+    assert.equal(evidence.includes('REMOTE_AGENT_FAILED'), false)
+    for (const question of questions) {
+      assert.equal(evidence.includes(question), true, question)
+    }
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime preserves credential-like local help text', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const taskGuid = 'task_guid_local_opaque_help'
+  const eventId = 'evt_local_opaque_help'
+  const taskId = `feishu-task-${taskGuid}-${eventId}`
+  const question = '请提供 ｓｋ－ｐｒｏｊ－ＡＢＣＤＥＦ１２３４５６７８９０ 并读取 relative/private.json'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({ eventId, taskGuid, eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitHelp(taskId, { question })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'help_needed'))
+    assert.equal(fakeFeishu.comments.filter((entry) => entry.content === question).length, 1)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime surfaces remote AAMP and result help questions verbatim', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  let index = 0
+  const dispatch = async (): Promise<string> => {
+    const current = index
+    index += 1
+    const taskGuid = `task_guid_remote_help_${current}`
+    const eventId = `evt_remote_help_${current}`
+    await fakeFeishu.emit({ eventId, taskGuid, eventTypes: ['task_create'], timestamp: '1775793266155' })
+    return `feishu-task-${taskGuid}-${eventId}`
+  }
+
+  try {
+    await runtime.start()
+
+    const questionTaskId = await dispatch()
+    fakeAamp.emitHelp(questionTaskId, {
+      question: '请提供 refreshToken=SECRET_REFRESH 和 /opt/private/config.json。',
+      blockedReason: '等待凭证',
+    })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[questionTaskId]?.status, 'help_needed'))
+
+    const bodyTaskId = await dispatch()
+    fakeAamp.emitHelp(bodyTaskId, {
+      question: '',
+      blockedReason: String.raw`请读取 \\private-server\secret\payload 和 C:\Users\private\token.txt`,
+    })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[bodyTaskId]?.status, 'help_needed'))
+
+    const resultTaskId = await dispatch()
+    fakeAamp.emitResult(resultTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'need_help',
+        summary: '需要凭证。',
+        question: '请提供 session_token=SECRET_SESSION。',
+      })}`,
+    })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[resultTaskId]?.status, 'help_needed'))
+
+    const safeQuestion = '请提供目标群 ID，我会继续处理。'
+    const safeTaskId = await dispatch()
+    fakeAamp.emitHelp(safeTaskId, { question: safeQuestion })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[safeTaskId]?.status, 'help_needed'))
+
+    const safeResultQuestion = '请确认是否继续处理下一批任务。'
+    const safeResultTaskId = await dispatch()
+    fakeAamp.emitResult(safeResultTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'need_help',
+        summary: '等待用户确认。',
+        question: safeResultQuestion,
+      })}`,
+    })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[safeResultTaskId]?.status, 'help_needed'))
+
+    const comments = fakeFeishu.comments.map((entry) => entry.content)
+    assert.equal(comments.filter((comment) => comment === '请提供 refreshToken=SECRET_REFRESH 和 /opt/private/config.json。').length, 1)
+    assert.equal(comments.filter((comment) => comment === String.raw`请读取 \\private-server\secret\payload 和 C:\Users\private\token.txt`).length, 1)
+    assert.equal(comments.filter((comment) => comment.endsWith('请提供 session_token=SECRET_SESSION。')).length, 1)
+    assert.equal(comments.filter((comment) => comment === safeQuestion).length, 1)
+    assert.equal(comments.filter((comment) => comment.endsWith(safeResultQuestion)).length, 1)
+    assert.equal(comments.filter((comment) => comment.includes('REMOTE_AGENT_FAILED')).length, 0)
+    const evidence = [comments.join('\n'), runtime.getStateSnapshot().lastError ?? '', logs.join('\n')].join('\n')
+    for (const sentinel of ['refreshToken=SECRET_REFRESH', '/opt/private', 'private-server', 'C:\\Users', 'session_token=SECRET_SESSION']) {
+      assert.equal(evidence.includes(sentinel), true, sentinel)
+    }
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime persists remote asynchronous AAMP failure messages verbatim', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const logs: string[] = []
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: (message) => { logs.push(String(message)) }, error: (message) => { logs.push(String(message)) } },
+  })
+  const sentinels = 'Authorization: Bearer SECRET_BEARER argv=["acpx","--cwd","/opt/private"]'
+
+  try {
+    await runtime.start()
+    fakeAamp.errorHandler?.(new Error(sentinels))
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().lastError, sentinels)
+    })
+    const evidence = [runtime.getStateSnapshot().lastError ?? '', logs.join('\n')].join('\n')
+    assert.equal(evidence.includes(sentinels), true)
+    assert.equal(evidence.includes('REMOTE_AGENT_FAILED'), false)
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('exported result classifier accepts only credential-free HTTP(S) link outputs', () => {
+  const makeResult = (url: string): TaskResult => ({
+    protocolVersion: '1.1',
+    intent: 'task.result',
+    taskId: 'link-contract-task',
+    status: 'completed',
+    output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+      schema: 'feishu_task_result.v2',
+      status: 'succeeded',
+      summary: '链接已生成。',
+      outputs: [{ kind: 'link_delivery', url }],
+    })}`,
+    from: 'agent@meshmail.ai',
+    to: 'bridge@meshmail.ai',
+  })
+
+  for (const url of ['file:///opt/private', 'javascript:alert(1)', 'not a url', 'https://user:password@example.com/private']) {
+    const disposition = classifyFeishuTaskResult(makeResult(url), 'remote')
+    assert.equal(disposition.kind, 'failure')
+    assert.equal(disposition.kind === 'failure' ? disposition.reason : '', 'final_contract')
+    assert.doesNotMatch(disposition.kind === 'failure' ? disposition.message : '', /user:password|\/opt\/private/)
+  }
+  for (const url of ['https://example.com/result', 'http://example.com/result?q=1']) {
+    assert.equal(classifyFeishuTaskResult(makeResult(url), 'remote').kind, 'succeeded')
+  }
+})
+
+test('runtime rejects an unsafe link before writing a Task delivery', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildRemoteConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = 'feishu-task-task_guid_unsafe_link-evt_unsafe_link'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({ eventId: 'evt_unsafe_link', taskGuid: 'task_guid_unsafe_link', eventTypes: ['task_create'], timestamp: '1775793266155' })
+    fakeAamp.emitResult(aampTaskId, {
+      output: 'FEISHU_TASK_RESULT_JSON: {"schema":"feishu_task_result.v2","status":"succeeded","summary":"链接已生成。","outputs":[{"kind":"link_delivery","url":"https://user:password@example.com/private"}]}',
+    })
+
+    await waitFor(() => {
+      assert.equal(runtime.getStateSnapshot().tasks[aampTaskId]?.status, 'failed')
+    })
+    assert.deepEqual(fakeFeishu.textDeliveries, [])
+    assert.doesNotMatch(fakeFeishu.comments.map((entry) => entry.content).join('\n'), /user:password/)
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

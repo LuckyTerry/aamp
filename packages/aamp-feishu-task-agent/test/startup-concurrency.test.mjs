@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -100,7 +101,10 @@ function lifecycleHarness(failAt) {
       assert.deepEqual(args, [
         'pair', '--agent', 'codex', '--config', '/tmp/aamp-task-agent/acp/config.json', '--json', '--no-start',
       ])
-      assert.deepEqual(options, { logFile: '/tmp/aamp-task-agent/acp/acp-bridge.log' })
+      assert.deepEqual(options, {
+        logFile: '/tmp/aamp-task-agent/acp/acp-bridge.log',
+        executionLocation: 'local',
+      })
       if (failAt === 'pair') throw failure
       return { stdout: JSON.stringify(pairing), stderr: '' }
     },
@@ -108,6 +112,8 @@ function lifecycleHarness(failAt) {
       assert.equal(label, 'ACP pairing')
       return JSON.parse(stdout)
     },
+    resolveConfiguredPendingPairingFile: async () => pairing.pairingFile,
+    resolvePendingPairingFile: async (_group, _agentType, result) => result.pairingFile,
     startPreparedFeishuUntilReady: async () => {
       calls.push('start')
       if (failAt === 'start') throw failure
@@ -235,7 +241,8 @@ test('Agent preparation stays serial while ACP init and start are split at the o
   const initialize = functionRange('async function initializeAgentGroups(', 'async function startAgentGroups(')
   assert.match(initialize, /for \(const \[host, agentBindings\] of byHost\)/)
   assert.match(initialize, /for \(const \[agentType, sampleBinding\] of agentBindings\)/)
-  assert.match(initialize, /await runBootstrapHelper\('__prepare-agent'/)
+  assert.match(initialize, /const prepareAgent = operations\.runBootstrapHelper \|\| runBootstrapHelper/)
+  assert.match(initialize, /await prepareAgent\('__prepare-agent'/)
   assert.match(initialize, /'acp-init'/)
   assert.doesNotMatch(initialize, /startManagedProcess/)
 
@@ -467,6 +474,8 @@ test('pending pairing serializes by stable binding key while other keys and read
       }
     },
     parseJsonDocument: JSON.parse,
+    resolveConfiguredPendingPairingFile: async (_group, agentType) => `/tmp/${agentType}.json`,
+    resolvePendingPairingFile: async (_group, _agentType, pairing) => pairing.pairingFile,
     startPreparedFeishuUntilReady: async (preparedFeishu) => {
       events.push(`start:${preparedFeishu.binding.binding_id}`)
       return { bindingId: preparedFeishu.binding.binding_id }
@@ -974,6 +983,112 @@ test('probe miss or rejection falls back to authoritative profile ensure while a
   assert.equal(preparedMiss.larkCliBin, '/tmp/ensured-probe-miss')
   assert.equal(preparedRejected.larkCliBin, '/tmp/ensured-probe-rejected')
   assert.deepEqual(ensured, ['probe-wrong-config', 'probe-miss', 'probe-rejected'])
+})
+
+test('remote bindings never probe or ensure legacy local lark-cli profiles', async () => {
+  const probeReadyBindingProfiles = requireExecutor('probeReadyBindingProfiles')
+  const prepareFeishuProcess = requireExecutor('prepareFeishuProcess')
+  const remote = startupBinding('remote-aime', 'aime')
+  remote.bot.lark_cli_profile = 'aime-legacy-profile'
+  let probeCalls = 0
+  let ensureCalls = 0
+
+  const probes = await probeReadyBindingProfiles([remote], {
+    throwIfStopping: () => {},
+    probeBindingProfile: async () => {
+      probeCalls += 1
+      throw new Error('remote binding must not inspect a legacy profile')
+    },
+  })
+  const prepared = await prepareFeishuProcess(remote, 'start', 'aime', probes, {
+    throwIfStopping: () => {},
+    writeFeishuRuntimeProfile: async () => {},
+    ensureBindingProfile: async () => {
+      ensureCalls += 1
+      throw new Error('remote binding must not ensure a local profile')
+    },
+    resolveFeishuExecutable: async () => ({ executable: 'aamp-feishu-bridge' }),
+    onlineEnvironment: () => ({ LARKSUITE_CLI_CONFIG_DIR: '/tmp/lark-config' }),
+  })
+
+  assert.equal(probeCalls, 0)
+  assert.equal(ensureCalls, 0)
+  assert.equal(prepared.larkCliBin, undefined)
+})
+
+test('remote startup orchestration preserves a retained legacy AIME profile without local operations', async () => {
+  const orchestrate = requireExecutor('orchestrateStartupBindings')
+  const probeReadyBindingProfiles = requireExecutor('probeReadyBindingProfiles')
+  const prepareFeishuProcess = requireExecutor('prepareFeishuProcess')
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-startup-profile-'))
+  const profileFile = path.join(root, 'lark-config', 'profiles', 'aime-legacy-profile.json')
+  const sentinel = Buffer.from('{"legacy":"remote-startup-profile"}\n')
+  const binding = startupBinding('remote-startup', 'aime')
+  binding.bot.lark_cli_profile = 'aime-legacy-profile'
+  mkdirSync(path.dirname(profileFile), { recursive: true })
+  writeFileSync(profileFile, sentinel, { mode: 0o640 })
+  chmodSync(profileFile, 0o640)
+  const mode = statSync(profileFile).mode & 0o777
+  const calls = []
+  const groups = new Map([[binding.aamp_host, {
+    host: binding.aamp_host,
+    runtimeAgentTypes: new Map([['aime', 'aime']]),
+  }]])
+
+  const result = await orchestrate([binding], undefined, {
+    validateBinding: (candidate) => {
+      calls.push('validate')
+      assert.equal(candidate.bot.lark_cli_profile, 'aime-legacy-profile')
+    },
+    recordValidationFailure: async () => assert.fail('remote binding must pass validation'),
+    prewarmFeishuExecutable: () => {
+      calls.push('prewarm')
+      return Promise.resolve()
+    },
+    initializeAgentGroups: async () => {
+      calls.push('initialize')
+      return groups
+    },
+    probeReadyBindingProfiles: async (bindings) => {
+      calls.push('probe-stage')
+      return probeReadyBindingProfiles(bindings, {
+        throwIfStopping: () => {},
+        probeBindingProfile: async () => {
+          calls.push('probe-local-profile')
+          throw new Error('remote binding must not probe a local profile')
+        },
+      })
+    },
+    startAgentGroups: async () => { calls.push('start-agent') },
+    startBindingsWithGroups: async (bindings, _groups, _mode, options) => {
+      calls.push('start-feishu')
+      assert.equal(options?.allowAgentStarting, true)
+      const prepared = await prepareFeishuProcess(bindings[0], 'start', 'aime', options.profileProbes, {
+        throwIfStopping: () => {},
+        writeFeishuRuntimeProfile: async () => { calls.push('write-runtime-profile') },
+        ensureBindingProfile: async () => {
+          calls.push('ensure-local-profile')
+          throw new Error('remote binding must not ensure a local profile')
+        },
+        resolveFeishuExecutable: async () => ({ executable: 'aamp-feishu-bridge' }),
+        onlineEnvironment: () => ({ LARKSUITE_CLI_CONFIG_DIR: path.dirname(path.dirname(profileFile)) }),
+      })
+      assert.equal(prepared.larkCliBin, undefined)
+      return { running: [{ binding: bindings[0], runtimeAgentType: 'aime' }], failed: [], cancelled: [] }
+    },
+    reconcileOverlappedReadyBindings: async (_bindings, launched) => ({ alive: launched.running, failed: [], cancelled: [] }),
+    stopRunningBindings: async () => assert.fail('remote startup must not fail'),
+    throwIfStopping: () => {},
+    reconcileRetainedBindings: async (running) => ({ alive: running, failed: [] }),
+  })
+
+  assert.deepEqual(result.running.map(({ binding: item }) => item.binding_id), [binding.binding_id])
+  assert.deepEqual(calls, [
+    'validate', 'prewarm', 'initialize', 'probe-stage', 'start-agent',
+    'start-feishu', 'write-runtime-profile',
+  ])
+  assert.deepEqual(readFileSync(profileFile), sentinel)
+  assert.equal(statSync(profileFile).mode & 0o777, mode)
 })
 
 test('ready execution starts before status and retains the process', async () => {

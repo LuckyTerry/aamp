@@ -153,7 +153,9 @@ function createPairingForAgent(configPathValue: string, agentName: string) {
     expiresAt: pairing.expiresAt,
     connectUrl: pairing.connectUrl,
     webUrl: pairingUrlToWebUrl(pairing.connectUrl),
-    pairingFile,
+    ...(agent.executionLocation === 'remote'
+      ? { pairingFileConfigured: true }
+      : { pairingFile }),
   }
 }
 
@@ -273,15 +275,24 @@ async function main() {
             bridge: 'acp-bridge',
             connection: 'acp_bridge',
             email,
-            acpCommand: agent.acpCommand,
-            credentialsFile: credFile,
+            ...(agent.executionLocation === 'remote'
+              ? {
+                  executionLocation: 'remote',
+                  acpCommandConfigured: true,
+                  credentialsConfigured: true,
+                }
+              : {
+                  acpCommand: agent.acpCommand,
+                  credentialsFile: credFile,
+                }),
             configured: true,
           }
         })
+        const containsRemoteAgent = config.agents.some((agent) => agent.executionLocation === 'remote')
         console.log(JSON.stringify({
           schemaVersion: 1,
           bridge: 'acp-bridge',
-          configPath,
+          ...(containsRemoteAgent ? { configPathConfigured: true } : { configPath }),
           aampHost: config.aampHost,
           agents,
         }, null, 2))
@@ -295,7 +306,9 @@ async function main() {
           const creds = JSON.parse(readFileSync(credFile, 'utf-8'))
           email = creds.email ?? email
         } catch { /* no credentials yet */ }
-        console.log(`  ${a.name}: ${email} (${a.acpCommand})`)
+        console.log(a.executionLocation === 'remote'
+          ? `  ${a.name}: ${email} (remote Agent; ACP command configured)`
+          : `  ${a.name}: ${email} (${a.acpCommand})`)
       }
       console.log()
       break

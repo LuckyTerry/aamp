@@ -1,0 +1,11 @@
+{
+  "type": "session.progress_notice",
+  "data": {
+    "event_id": "evt-progress",
+    "event_offset": 3,
+    "timestamp": 102,
+    "event_key": "progress",
+    "session_id": "session-demo",
+    "status": "thinking"
+  }
+}

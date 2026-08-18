@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { resolveLarkCliProfileCredentials } from './feishu-cli.js'
+import { parseLarkCliAppOwnerResponse, resolveLarkCliProfileCredentials } from './feishu-cli.js'
 
 test('resolveLarkCliProfileCredentials reads app secret by profile name', () => {
   const credentials = resolveLarkCliProfileCredentials({
@@ -39,4 +39,19 @@ test('resolveLarkCliProfileCredentials resolves env backed app secret', () => {
   } finally {
     delete process.env.TEST_LARK_CLI_APP_SECRET
   }
+})
+
+test('parseLarkCliAppOwnerResponse extracts the application owner open id', () => {
+  assert.deepEqual(parseLarkCliAppOwnerResponse({
+    code: 0,
+    data: {
+      app: {
+        owner: { owner_id: 'ou_owner' },
+      },
+    },
+  }), { ownerId: 'ou_owner' })
+})
+
+test('parseLarkCliAppOwnerResponse rejects responses without an owner id', () => {
+  assert.equal(parseLarkCliAppOwnerResponse({ data: { app: {} } }), undefined)
 })

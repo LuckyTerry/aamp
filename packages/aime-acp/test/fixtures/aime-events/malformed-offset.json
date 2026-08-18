@@ -1,0 +1,13 @@
+{
+  "type": "session.message.delta",
+  "data": {
+    "event_id": "evt-bad-offset",
+    "event_offset": "two",
+    "timestamp": 110,
+    "event_key": "message",
+    "message_id": "msg-bad",
+    "content": "Ignored",
+    "mode_type": "auto",
+    "is_finished": false
+  }
+}

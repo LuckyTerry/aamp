@@ -243,9 +243,9 @@ test('controller normalizes only new Coco bindings to the prepared traex type', 
   const source = readFileSync(controller, 'utf8')
   const helper = functionRange(source, 'function resolvePreparedAgentBindings(', 'function printBindingStarted(')
   const helpers = new Function(
-    'AGENT_TYPES',
+    'TASK_AGENT_TYPES',
     `${helper}\nreturn { resolvePreparedAgentBindings, commitPreparedAgentBindings };`,
-  )(['codex', 'cursor', 'coco', 'traex'])
+  )(['codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'aime'])
   const host = 'https://meshmail.ai'
   const pending = [{ agent_type: 'coco', aamp_host: host, state: 'pending' }]
   const ready = [{ agent_type: 'coco', aamp_host: host, state: 'ready', agent_target_email: 'coco@example.com' }]
@@ -372,20 +372,19 @@ test('controller displays a saved Coco binding as its raw type in list and start
   )
 })
 
-test('Trae one-click package pins move together', () => {
+test('Trae one-click source records the released ACP identity at the source package version', () => {
   const bootstrapSource = readFileSync(bootstrap, 'utf8')
   const controllerSource = readFileSync(controller, 'utf8')
   const acpPackage = JSON.parse(readFileSync(path.resolve(__dirname, '../../aamp-acp-bridge/package.json'), 'utf8'))
   const acpLock = JSON.parse(readFileSync(path.resolve(__dirname, '../../aamp-acp-bridge/package-lock.json'), 'utf8'))
   const taskLock = JSON.parse(readFileSync(path.resolve(__dirname, '../package-lock.json'), 'utf8'))
-  assert.equal(acpPackage.version, '0.1.28-dev.21')
   assert.equal(acpLock.version, acpPackage.version)
   assert.equal(acpLock.packages[''].version, acpPackage.version)
-  assert.equal(packageJson.version, '0.1.0-dev.175')
   assert.equal(taskLock.version, packageJson.version)
   assert.equal(taskLock.packages[''].version, packageJson.version)
-  assert.match(bootstrapSource, /ACP_BRIDGE_PKG="\$\{ACP_BRIDGE_PKG:-@zengxingyuan\/aamp-acp-bridge@0\.1\.28-dev\.21\}"/)
-  assert.match(controllerSource, /@zengxingyuan\/aamp-acp-bridge@0\.1\.28-dev\.21/)
+  const pinnedAcp = `@luckyterry/aamp-acp-bridge@${acpPackage.version}`
+  assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
+  assert.equal(controllerSource.includes(pinnedAcp), true)
 })
 
 test('Trae one-click user-facing agent guidance is not stale', () => {

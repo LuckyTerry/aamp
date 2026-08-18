@@ -1,0 +1,21 @@
+{
+  "type": "session.message.create",
+  "data": {
+    "event_id": "evt-create",
+    "event_offset": 1,
+    "timestamp": 100,
+    "event_key": "message",
+    "message": {
+      "message_id": "msg-1",
+      "session_id": "session-demo",
+      "role": "assistant",
+      "content": "Synthetic reply.",
+      "attachments": [],
+      "creator": "demo",
+      "created_at": "",
+      "updated_at": "",
+      "mode_type": "auto"
+    },
+    "reply_message_id": "request-1"
+  }
+}

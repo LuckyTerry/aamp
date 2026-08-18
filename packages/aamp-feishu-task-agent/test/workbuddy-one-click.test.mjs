@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { resolveTaskAgentMetadata } from '../bin/agent-metadata.mjs'
 
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const bootstrap = path.resolve(testDir, '../bootstrap/aamp-feishu-task-agent-bootstrap.sh')
@@ -123,7 +124,8 @@ test('WorkBuddy appears in bootstrap agent guidance', () => {
 
 test('WorkBuddy is a canonical controller binding with actionable failure guidance', () => {
   const source = readFileSync(controller, 'utf8')
-  assert.match(source, /const AGENT_TYPES = \[[^\]]*'workbuddy'/)
+  assert.match(source, /TASK_AGENT_TYPES,\n  resolveTaskAgentMetadata,\n\} from '\.\/agent-metadata\.mjs';/)
+  assert.deepEqual(resolveTaskAgentMetadata('workbuddy'), { executionLocation: 'local' })
   assert.match(source, /codex\/cursor\/coco\/traex\/traecli\/workbuddy/)
   assert.match(source, /function agentFailureMessage\(agentType, message\)/)
   assert.match(source, /如果尚未登录，请打开 \$\{productName\} 完成登录后重试/)

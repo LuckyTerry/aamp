@@ -1,0 +1,6 @@
+{
+  "name": "@bytedance-dev/bytedcli",
+  "version": "0.123.0",
+  "type": "module",
+  "exports": "./dist/index.mjs"
+}

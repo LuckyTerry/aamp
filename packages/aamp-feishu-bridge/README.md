@@ -62,7 +62,25 @@ node dist/index.js init \
   --app-secret xxx
 ```
 
-The bridge sends `pair.request` from its own AAMP mailbox with
-`dispatchContextRules={ "source": ["feishu"] }`, so the Agent can accept future
-Feishu dispatches without manual sender policy editing. The Agent replies with
+The bridge sends `pair.request` from its own AAMP mailbox with a Feishu source
+rule and the current app owner's `open_id` (
+`dispatchContextRules.sender_open_id`). The target Agent writes both rules into
+the paired sender policy, so future Feishu IM dispatches are restricted to the
+app owner. The owner is resolved from the Feishu application information API
+using the configured Bot credentials; if the owner cannot be resolved, pairing
+fails closed and no unrestricted `pair.request` is sent. The Agent replies with
 `pair.respond` to indicate success or a failure reason.
+
+## Remote AIME target
+
+All Agents are local by default. AIME is the explicit remote exception: its
+Agent configuration uses `executionLocation: "remote"` and rejects incoming
+attachments. AIME reads requested Feishu/Lark data with its own remote-native
+capabilities and identity; it does not require a local `lark-cli` profile or
+user OAuth. The local Feishu Bridge still owns Bot App credentials and is the
+only component that writes the current Task's comment, status, or delivery.
+
+Remote attachments and local file delivery are unsupported. Use text or
+HTTP(S) links for remote results. `aamp-feishu-task-bridge` is deprecated and
+is not an implementation target. AIME `auth` or `doctor` readiness does not
+establish authorization to read a particular group.

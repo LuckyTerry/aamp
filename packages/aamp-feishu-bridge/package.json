@@ -4,7 +4,7 @@
     "dist"
   ],
   "license": "MIT",
-  "version": "0.1.52",
+  "version": "0.1.52-dev.4",
   "description": "Local Feishu bridge daemon for connecting a user-owned Feishu bot to a target AAMP agent.",
   "type": "module",
   "main": "dist/index.js",
@@ -14,6 +14,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
+    "postbuild": "npm run prepare-bin",
     "prepare-bin": "node -e \"require('node:fs').chmodSync('dist/index.js', 0o755)\"",
     "prepack": "npm run build && npm run prepare-bin",
     "prepublishOnly": "npm run build && npm run prepare-bin",

@@ -1,0 +1,12 @@
+{
+  "type": "session.plan.update",
+  "data": {
+    "event_id": "evt-plan",
+    "event_offset": 6,
+    "timestamp": 105,
+    "event_key": "plan",
+    "session_id": "session-demo",
+    "plan_id": "plan-1",
+    "status": "running"
+  }
+}

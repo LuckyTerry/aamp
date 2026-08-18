@@ -5,11 +5,19 @@ export interface BridgeMailboxIdentity {
   baseUrl: string
 }
 
+export type AgentExecutionLocation = 'local' | 'remote'
+
+export interface TaskRuntimeAgentDescriptor {
+  type: string
+  executionLocation: AgentExecutionLocation
+}
+
 export interface BridgeConfig {
   version: 1
   aampHost: string
   targetAgentEmail: string
   slug: string
+  agent?: TaskRuntimeAgentDescriptor
   feishu: {
     appId: string
     appSecret?: string

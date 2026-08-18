@@ -110,7 +110,7 @@ function printUsage(): void {
 Usage:
   aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
   aamp-feishu-bridge start [--config-dir DIR] [--json]
-  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
+  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--agent-execution-location local|remote] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
   aamp-feishu-bridge status [--config-dir DIR] [--json]
   aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
@@ -236,10 +236,18 @@ async function runRemove(args: ParsedArgs): Promise<void> {
 async function runBridge(args: ParsedArgs): Promise<void> {
   const configDir = firstArg(args, 'config-dir')
   if (args.booleans.has('enable-task')) {
+    const rawExecutionLocation = firstArg(args, 'agent-execution-location')
+    if (rawExecutionLocation && rawExecutionLocation !== 'local' && rawExecutionLocation !== 'remote') {
+      throw new Error('--agent-execution-location must be local or remote.')
+    }
+    const agentExecutionLocation = rawExecutionLocation === 'local' || rawExecutionLocation === 'remote'
+      ? rawExecutionLocation
+      : undefined
     await runTaskEnabledBridge({
       configDir,
       aampHost: firstArg(args, 'aamp-host'),
       agent: firstArg(args, 'agent'),
+      agentExecutionLocation,
       targetAgentEmail: firstArg(args, 'target-agent'),
       pairingUrl: firstArg(args, 'pairing-url'),
       appId: firstArg(args, 'app-id'),

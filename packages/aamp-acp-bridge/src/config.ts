@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import { readFileSync, existsSync } from 'node:fs'
 
+export const agentExecutionLocationSchema = z.enum(['local', 'remote'])
+export type AgentExecutionLocation = z.infer<typeof agentExecutionLocationSchema>
+
 const senderPolicySchema = z.object({
   sender: z.string().min(1),
   dispatchContextRules: z.record(z.array(z.string().min(1))).optional(),
@@ -25,6 +28,16 @@ const agentConfigSchema = z.object({
   senderWhitelist: z.array(z.string().email()).optional(),
   senderPolicies: z.array(senderPolicySchema).optional(),
   taskDispatchConcurrency: z.number().int().positive().optional(),
+  attachmentPolicy: z.enum(['allow', 'reject']).default('allow'),
+  executionLocation: agentExecutionLocationSchema.default('local'),
+}).superRefine((agent, context) => {
+  if (agent.executionLocation === 'remote' && agent.attachmentPolicy !== 'reject') {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['attachmentPolicy'],
+      message: 'remote Agent requires attachmentPolicy=reject',
+    })
+  }
 })
 
 const bridgeConfigSchema = z.object({
@@ -34,8 +47,10 @@ const bridgeConfigSchema = z.object({
 })
 
 export type SenderPolicy = z.infer<typeof senderPolicySchema>
-export type AgentConfig = z.infer<typeof agentConfigSchema>
-export type BridgeConfig = z.infer<typeof bridgeConfigSchema>
+export type AgentConfigInput = z.input<typeof agentConfigSchema>
+export type AgentConfig = z.output<typeof agentConfigSchema>
+export type BridgeConfigInput = z.input<typeof bridgeConfigSchema>
+export type BridgeConfig = z.output<typeof bridgeConfigSchema>
 
 export function defaultAgentSlug(agentName: string): string {
   const normalizedName = agentName
@@ -87,10 +102,12 @@ function normalizeSenderPolicies(
   return normalized.length > 0 ? normalized : undefined
 }
 
-function normalizeAgentConfig(agent: AgentConfig): AgentConfig {
+export function normalizeAgentConfig(agent: AgentConfigInput): AgentConfig {
+  const parsed = agentConfigSchema.parse(agent)
   return {
-    ...agent,
-    senderPolicies: normalizeSenderPolicies(agent.senderPolicies, agent.senderWhitelist),
+    ...parsed,
+    attachmentPolicy: parsed.attachmentPolicy,
+    senderPolicies: normalizeSenderPolicies(parsed.senderPolicies, parsed.senderWhitelist),
   }
 }
 
