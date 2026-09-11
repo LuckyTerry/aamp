@@ -42,22 +42,7 @@ test('normalizeTaskProfile derives lark-cli profile config', () => {
     display_name: '飞书 CLI',
     auth_mode: 'lark-cli',
     capabilities: ['im', 'task'],
-    domains: [
-      'base',
-      'calendar',
-      'contact',
-      'docs',
-      'im',
-      'mail',
-      'mindnotes',
-      'minutes',
-      'note',
-      'sheets',
-      'slides',
-      'task',
-      'vc',
-      'wiki',
-    ],
+    domains: ['task'],
     updated_at: profile.updated_at,
   })
   assert.match(profile.updated_at, /^\d{4}-\d{2}-\d{2}T/)

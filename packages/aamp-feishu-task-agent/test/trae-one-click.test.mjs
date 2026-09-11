@@ -366,10 +366,13 @@ test('controller displays a saved Coco binding as its raw type in list and start
   )
   const bindingLabel = new Function(`${labelHelpers}\nreturn bindingLabel;`)()
   assert.equal(bindingLabel(binding), 'coco ↔ cli_test_app (cli_test_app)')
-  assert.match(
+  const startFlow = functionRange(
     controllerSource,
-    /chooseMany\('请选择要启动的绑定配置：', store\.bindings, bindingLabel\)/,
+    'async function runStart(',
+    'async function runServiceWorker(',
   )
+  assert.match(startFlow, /chooseMany\(prompt, bindings, bindingLabel\)/)
+  assert.match(startFlow, /chooseBindings\('请选择要启动的绑定配置：', availableBindings\)/)
 })
 
 test('Trae one-click source records the released ACP identity at the source package version', () => {

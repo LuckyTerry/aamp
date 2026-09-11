@@ -5,6 +5,7 @@ umask 077
 AGENT=""
 APP_ID=""
 APP_SECRET=""
+APP_TENANT_BRAND="feishu"
 BOT_NAME=""
 LARK_CLI_PROFILE=""
 AGENT_EXECUTION_LOCATION=""
@@ -14,11 +15,15 @@ AAMP_HOST="https://meshmail.ai"
 DEBUG_MODE="false"
 AAMP_TASK_START_MODE="install"
 AAMP_TASK_ACTION=""
+AAMP_TASK_FOREGROUND="${AAMP_TASK_FOREGROUND:-false}"
+AAMP_TASK_NO_START="${AAMP_TASK_NO_START:-false}"
 AAMP_TASK_ENTRY="${AAMP_TASK_ENTRY:-}"
 AAMP_TASK_INTERNAL="${AAMP_TASK_INTERNAL:-false}"
 AAMP_TASK_INTERNAL_RESULT_FD="${AAMP_TASK_INTERNAL_RESULT_FD:-3}"
 AAMP_TASK_INTERNAL_INPUT_FD="${AAMP_TASK_INTERNAL_INPUT_FD:-4}"
 AAMP_TASK_INTERNAL_EXECUTION_LOCATION="${AAMP_TASK_INTERNAL_EXECUTION_LOCATION:-}"
+AAMP_TASK_NON_INTERACTIVE="${AAMP_TASK_NON_INTERACTIVE:-false}"
+AAMP_TASK_USER_TENANT_KEY="${AAMP_TASK_USER_TENANT_KEY:-}"
 NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmjs.org/}"
 NPM_CACHE_DIR="${NPM_CONFIG_CACHE:-${npm_config_cache:-${TMPDIR:-/tmp}/aamp-one-click-npm-cache}}"
 NPM_GLOBAL_PREFIX="${NPM_GLOBAL_PREFIX:-$HOME/.aamp/npm-global}"
@@ -69,13 +74,23 @@ WORKBUDDY_APP_CLI="/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpac
 WORKBUDDY_AI_APP_CLI="/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy"
 LARK_REGISTER_APP_SDK="${LARK_REGISTER_APP_SDK:-@larksuiteoapi/node-sdk@1.68.0}"
 LARK_CLI_MIN_VERSION="${LARK_CLI_MIN_VERSION:-1.0.64}"
-FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-im:message,im:message:send_as_bot,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat:moderation:write_only,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes:readonly,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
-FEISHU_APP_SCOPES_USER="${FEISHU_APP_SCOPES_USER:-im:message,im:message:readonly,im:resource,cardkit:card:write,task:task,task:comment,task:task:readonly,task:comment:readonly,task:attachment:delete,task:attachment:file:download,task:attachment:read,task:attachment:upload,task:attachment:write,task:comment:delete,task:comment:read,task:comment:write,task:comment:writeonly,task:task:delete,task:task:read,task:task:write,task:task:writeonly,task:tasklist:delete,task:tasklist:read,task:tasklist:write,task:tasklist:writeonly,search:docs:read,search:message,base:app:copy,base:app:create,base:app:read,base:app:update,base:block:create,base:block:delete,base:block:read,base:block:update,base:dashboard:create,base:dashboard:delete,base:dashboard:read,base:dashboard:update,base:field:create,base:field:delete,base:field:read,base:field:update,base:form:create,base:form:delete,base:form:read,base:form:update,base:history:read,base:record:create,base:record:delete,base:record:read,base:record:update,base:role:create,base:role:delete,base:role:read,base:role:update,base:table:create,base:table:delete,base:table:read,base:table:update,base:view:read,base:view:write_only,base:workflow:create,base:workflow:read,base:workflow:update,board:whiteboard:node:create,board:whiteboard:node:read,calendar:calendar.event:create,calendar:calendar.event:delete,calendar:calendar.event:read,calendar:calendar.event:reply,calendar:calendar.event:update,calendar:calendar.free_busy:read,calendar:calendar:create,calendar:calendar:delete,calendar:calendar:read,calendar:calendar:update,contact:user.base:readonly,contact:user.basic_profile:readonly,contact:user:search,docs:document.media:download,docs:document.media:upload,docs:document:export,docs:document:import,docx:document:create,docx:document:readonly,docx:document:write_only,drive:drive.metadata:readonly,drive:file:download,drive:file:upload,im:chat.managers:write_only,im:chat.members:read,im:chat.members:write_only,im:chat.moderation:read,im:chat.nickname:read,im:chat.nickname:write,im:chat.user_setting:read,im:chat.user_setting:write,im:chat:read,im:chat:update,im:chat:create_by_user,im:chat:moderation:write_only,im:feed.flag:read,im:feed.flag:write,im:feed.shortcut:read,im:feed.shortcut:write,im:feed_group_v1:read,im:feed_group_v1:write,im:message.group_msg:get_as_user,im:message.p2p_msg:get_as_user,im:message.pins:read,im:message.pins:write_only,im:message.reactions:read,im:message.reactions:write_only,im:message:recall,mail:event,mail:user_mailbox.event.mail_address:read,mail:user_mailbox.mail_contact:read,mail:user_mailbox.message.address:read,mail:user_mailbox.message.body:read,mail:user_mailbox.message.subject:read,mindnote:node:create,mindnote:node:read,minutes:minutes.artifacts:read,minutes:minutes.basic:read,minutes:minutes.media:export,minutes:minutes.search:read,minutes:minutes.upload:write,minutes:minutes:readonly,minutes:minutes:update,profile:user_profile:read,sheets:spreadsheet.meta:read,sheets:spreadsheet.meta:write_only,sheets:spreadsheet:create,sheets:spreadsheet:read,sheets:spreadsheet:write_only,slides:presentation:create,slides:presentation:read,slides:presentation:update,slides:presentation:write_only,task:custom_field:read,task:custom_field:write,task:section:read,task:section:write,vc:meeting.bot.join:write,vc:meeting.meetingevent:read,vc:meeting.message:write,vc:meeting.search:read,vc:note:read,vc:record:readonly,wiki:member:create,wiki:member:retrieve,wiki:member:update,wiki:node:copy,wiki:node:create,wiki:node:move,wiki:node:read,wiki:node:retrieve,wiki:space:read,wiki:space:retrieve,wiki:space:write_only}"
+AAMP_FEISHU_APP_SCOPES_TENANT_OVERRIDE="${FEISHU_APP_SCOPES_TENANT-}"
+AAMP_FEISHU_APP_SCOPES_USER_OVERRIDE="${FEISHU_APP_SCOPES_USER-}"
+AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE="${FEISHU_USER_AUTH_REQUIRED_SCOPES-}"
+AAMP_FEISHU_USER_AUTH_REQUESTED_SCOPES_OVERRIDE="${FEISHU_USER_AUTH_REQUESTED_SCOPES-}"
+AAMP_FEISHU_USER_AUTH_EXCLUDES_OVERRIDE="${FEISHU_USER_AUTH_EXCLUDES-}"
+FEISHU_APP_SCOPES_TENANT="$AAMP_FEISHU_APP_SCOPES_TENANT_OVERRIDE"
+FEISHU_APP_SCOPES_USER="$AAMP_FEISHU_APP_SCOPES_USER_OVERRIDE"
 FEISHU_APP_EVENTS_TENANT="${FEISHU_APP_EVENTS_TENANT:-task.task.update_user_access_v2}"
 FEISHU_APP_EVENTS_USER="${FEISHU_APP_EVENTS_USER:-task.task.update_user_access_v2}"
-FEISHU_USER_AUTH_DOMAINS="${FEISHU_USER_AUTH_DOMAINS:-base,calendar,contact,docs,im,mail,mindnotes,minutes,note,sheets,slides,task,vc,wiki}"
-FEISHU_USER_AUTH_EXCLUDES="${FEISHU_USER_AUTH_EXCLUDES:-im:message.send_as_user,mail:user_mailbox.message:send,mail:user_mailbox.rule:read,mail:user_mailbox.folder:write,mail:user_mailbox.rule:write,mail:user_mailbox.message:modify,mail:user_mailbox.message:readonly,mail:user_mailbox.folder:read,mail:user_mailbox.mail_contact:write,mail:user_mailbox:readonly}"
-FEISHU_USER_AUTH_REQUIRED_SCOPES="${FEISHU_USER_AUTH_REQUIRED_SCOPES:-im:message im:message:readonly im:resource cardkit:card:write task:task task:comment task:task:readonly task:comment:readonly task:attachment:delete task:attachment:file:download task:attachment:read task:attachment:upload task:attachment:write task:comment:delete task:comment:read task:comment:write task:comment:writeonly task:task:delete task:task:read task:task:write task:task:writeonly task:tasklist:delete task:tasklist:read task:tasklist:write task:tasklist:writeonly search:docs:read search:message base:app:copy base:app:create base:app:read base:app:update base:block:create base:block:delete base:block:read base:block:update base:dashboard:create base:dashboard:delete base:dashboard:read base:dashboard:update base:field:create base:field:delete base:field:read base:field:update base:form:create base:form:delete base:form:read base:form:update base:history:read base:record:create base:record:delete base:record:read base:record:update base:role:create base:role:delete base:role:read base:role:update base:table:create base:table:delete base:table:read base:table:update base:view:read base:view:write_only base:workflow:create base:workflow:read base:workflow:update board:whiteboard:node:create board:whiteboard:node:read calendar:calendar.event:create calendar:calendar.event:delete calendar:calendar.event:read calendar:calendar.event:reply calendar:calendar.event:update calendar:calendar.free_busy:read calendar:calendar:create calendar:calendar:delete calendar:calendar:read calendar:calendar:update contact:user.base:readonly contact:user.basic_profile:readonly contact:user:search docs:document.media:download docs:document.media:upload docs:document:export docs:document:import docx:document:create docx:document:readonly docx:document:write_only drive:drive.metadata:readonly drive:file:download drive:file:upload im:chat.managers:write_only im:chat.members:read im:chat.members:write_only im:chat.moderation:read im:chat.nickname:read im:chat.nickname:write im:chat.user_setting:read im:chat.user_setting:write im:chat:read im:chat:update im:chat:create_by_user im:chat:moderation:write_only im:feed.flag:read im:feed.flag:write im:feed.shortcut:read im:feed.shortcut:write im:feed_group_v1:read im:feed_group_v1:write im:message.group_msg:get_as_user im:message.p2p_msg:get_as_user im:message.pins:read im:message.pins:write_only im:message.reactions:read im:message.reactions:write_only im:message:recall mail:event mail:user_mailbox.event.mail_address:read mail:user_mailbox.mail_contact:read mail:user_mailbox.message.address:read mail:user_mailbox.message.body:read mail:user_mailbox.message.subject:read mindnote:node:create mindnote:node:read minutes:minutes.artifacts:read minutes:minutes.basic:read minutes:minutes.media:export minutes:minutes.search:read minutes:minutes.upload:write minutes:minutes:readonly minutes:minutes:update profile:user_profile:read sheets:spreadsheet.meta:read sheets:spreadsheet.meta:write_only sheets:spreadsheet:create sheets:spreadsheet:read sheets:spreadsheet:write_only slides:presentation:create slides:presentation:read slides:presentation:update slides:presentation:write_only task:custom_field:read task:custom_field:write task:section:read task:section:write vc:meeting.bot.join:write vc:meeting.meetingevent:read vc:meeting.message:write vc:meeting.search:read vc:note:read vc:record:readonly wiki:member:create wiki:member:retrieve wiki:member:update wiki:node:copy wiki:node:create wiki:node:move wiki:node:read wiki:node:retrieve wiki:space:read wiki:space:retrieve wiki:space:write_only}"
+FEISHU_USER_AUTH_EXCLUDES="$AAMP_FEISHU_USER_AUTH_EXCLUDES_OVERRIDE"
+FEISHU_USER_AUTH_REQUIRED_SCOPES="$AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE"
+FEISHU_USER_AUTH_REQUESTED_SCOPES="$AAMP_FEISHU_USER_AUTH_REQUESTED_SCOPES_OVERRIDE"
+FEISHU_USER_AUTH_CORE_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES:-}"
+FEISHU_USER_AUTH_OPTIONAL_SCOPES="${FEISHU_USER_AUTH_OPTIONAL_SCOPES:-}"
+FEISHU_USER_AUTH_MODE="${FEISHU_USER_AUTH_MODE:-optional}"
+FEISHU_TASK_PROFILE_DOMAINS="${FEISHU_TASK_PROFILE_DOMAINS:-task}"
+AAMP_FEISHU_AUTH_STATE_DIR="${AAMP_FEISHU_AUTH_STATE_DIR:-$HOME/.aamp/feishu-bridge/auth-capabilities}"
 AAMP_TASK_ALLOW_PACKAGE_OVERRIDES="${AAMP_TASK_ALLOW_PACKAGE_OVERRIDES:-false}"
 if [ "$AAMP_TASK_INTERNAL" = "true" ] \
   && [ "${AAMP_TASK_PACKAGE_OVERRIDES_RESOLVED:-false}" = "true" ]; then
@@ -95,13 +110,13 @@ ACP_BRIDGE_PKG="${ACP_BRIDGE_PKG:-@luckyterry/aamp-acp-bridge@0.1.29-dev.0}"
 AIME_ACP_PKG="${AIME_ACP_PKG:-@tengchengwei/aime-acp@0.1.1-dev.1}"
 AIME_ACP_REGISTRY="${AIME_ACP_REGISTRY:-https://bnpm.byted.org}"
 CLI_BRIDGE_PKG="${CLI_BRIDGE_PKG:-@zengxingyuan/aamp-cli-bridge@0.1.7-dev.14}"
-FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@luckyterry/aamp-feishu-bridge@0.1.52-dev.4}"
+FEISHU_BRIDGE_PKG="${FEISHU_BRIDGE_PKG:-@iluolyx/aamp-feishu-bridge@0.1.52-dev.5}"
 AAMP_TASK_DEFAULT_ACP_BRIDGE_PKG="$ACP_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_FEISHU_BRIDGE_PKG="$FEISHU_BRIDGE_PKG"
 AAMP_TASK_DEFAULT_AIME_ACP_PKG="$AIME_ACP_PKG"
-AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@luckyterry/aamp-feishu-task-agent}"
+AAMP_TASK_AGENT_NAME="${AAMP_TASK_AGENT_NAME:-@larktask/aamp-feishu-task-agent}"
 AAMP_TASK_AGENT_LEGACY_NAME="${AAMP_TASK_AGENT_LEGACY_NAME:-@zengxingyuan/aamp-feishu-task-agent}"
-AAMP_TASK_AGENT_VERSION="0.1.1-dev.1"
+AAMP_TASK_AGENT_VERSION="0.1.1-dev.7"
 AAMP_TASK_AGENT_CHANNEL="${AAMP_TASK_AGENT_CHANNEL:-dev}"
 AAMP_STALE_PROCESS_CLEANUP="${AAMP_STALE_PROCESS_CLEANUP:-false}"
 AAMP_STALE_PROCESS_SECONDS="${AAMP_STALE_PROCESS_SECONDS:-86400}"
@@ -113,6 +128,7 @@ ACP_TAIL_PID=""
 CLI_TAIL_PID=""
 FEISHU_TAIL_PID=""
 DETECTED_AGENTS=()
+AIME_ALLOWED_TENANT_KEY="736588c9260f175d"
 ACP_LOG=""
 CLI_LOG=""
 FEISHU_LOG=""
@@ -127,6 +143,7 @@ PAIRING_URL=""
 ACP_AGENT_COMMAND=""
 AGENT_PREPARE_CANCELLED="false"
 AGENT_PREPARE_CANCEL_REASON=""
+APP_USER_TENANT_KEY=""
 STARTED_BRIDGE_PID=""
 ONE_CLICK_RUN_ID="$(date +%s)-$$"
 BOT_RESERVED="false"
@@ -165,10 +182,17 @@ remote_internal_helper() {
 usage() {
   cat <<'USAGE'
 Usage:
-  feishu-task-agent install         # bind multiple Agent-Bot pairs, then start them
-  feishu-task-agent start           # choose saved pairs to start
+  feishu-task-agent install         # 绑定 Agent-Bot，并通过 macOS 后台服务运行
+  feishu-task-agent start           # 启动已保存配置的 macOS 后台服务
+  feishu-task-agent start --foreground
+                                     # run in the current terminal for diagnostics
+  feishu-task-agent status          # show background or foreground runtime status
+  feishu-task-agent stop            # stop the managed service or a verified legacy foreground run
+  feishu-task-agent restart         # restart the macOS background service
+  feishu-task-agent logs            # show recent background service logs
   feishu-task-agent list            # list saved pairs
-  feishu-task-agent add             # bind and save more pairs without leaving bridges running
+  feishu-task-agent add             # bind, save, and start more pairs automatically
+  feishu-task-agent add --no-start  # bind and save without starting
   feishu-task-agent remove          # remove saved pairs without stopping running bridges
   feishu-task-agent update          # update the short command now
   feishu-task-agent help            # show this help
@@ -182,6 +206,8 @@ Options:
                                Use this Agent for every new binding in the command.
   --aamp-host URL            AAMP service URL. Default: https://meshmail.ai
   --debug                    Enable debug mode for bridge processes
+  --foreground               Keep install/start attached to the current terminal
+  --no-start                 Save add bindings without starting them
   -h, --help                 Show this help
 
 日志命令:
@@ -672,98 +698,57 @@ path_prepend() {
   esac
 }
 
-run_brew() {
-  # Feed one "yes" for Homebrew prompts such as dependency installation confirmation.
-  printf 'y\n' | HOMEBREW_NO_ENV_HINTS=1 brew "$@"
-}
-
 refresh_node_toolchain_bins() {
   NPM_BIN="$(command -v npm || true)"
   NPX_BIN="$(command -v npx || true)"
 }
 
-print_node_toolchain_help() {
+print_missing_node_help() {
   cat >&2 <<'HELP'
 
-Automatic Node.js/npm installation did not complete.
-Install it manually with one of these commands, then reopen the terminal or fix PATH:
-  Homebrew: brew install node
-  Volta:    volta install node npm
-  fnm:      fnm install --lts
-  nvm:      nvm install --lts
+未检测到 Node.js 环境。
+
+请安装 Node.js LTS：
+https://nodejs.org/en/download
+
+安装完成后：
+1. 重新打开终端
+2. 执行 node -v && npm -v 验证
+3. 重新运行本安装命令
 
 HELP
 }
 
-try_install_node_toolchain() {
-  local node_path
-  node_path="$(command -v node || true)"
+print_incomplete_node_help() {
+  cat >&2 <<'HELP'
 
-  if command -v volta >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.volta/"* ]]; }; then
-    agent_log "installing Node.js/npm with Volta"
-    volta install node npm
-    return $?
-  fi
+Node.js 环境不完整，缺少 npm。
 
-  if command -v fnm >/dev/null 2>&1 && { [ -z "$node_path" ] || [[ "$node_path" == *"/.fnm/"* ]]; }; then
-    agent_log "installing Node.js/npm with fnm"
-    fnm install --lts
-    eval "$(fnm env --shell bash)"
-    return 0
-  fi
+请重新安装 Node.js LTS：
+https://nodejs.org/en/download
 
-  local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
-  if [ -s "$nvm_dir/nvm.sh" ] && { [ -z "$node_path" ] || [[ "$node_path" == *"/.nvm/"* ]]; }; then
-    agent_log "installing Node.js/npm with nvm"
-    # shellcheck disable=SC1090
-    source "$nvm_dir/nvm.sh"
-    nvm install --lts
-    nvm use --lts
-    return 0
-  fi
+安装完成后：
+1. 重新打开终端
+2. 执行 node -v && npm -v 验证
+3. 重新运行本安装命令
 
-  if command -v brew >/dev/null 2>&1; then
-    local formula="node"
-    if brew list --versions node@22 >/dev/null 2>&1; then
-      formula="node@22"
-    elif brew list --versions node >/dev/null 2>&1; then
-      formula="node"
-    fi
-
-    if brew list --versions "$formula" >/dev/null 2>&1; then
-      agent_log "reinstalling $formula with Homebrew to restore npm/npx"
-      run_brew reinstall "$formula"
-    else
-      agent_log "installing Node.js/npm with Homebrew"
-      run_brew install "$formula"
-    fi
-    return $?
-  fi
-
-  agent_log "no supported Node.js installer found; tried Volta, fnm, nvm, and Homebrew"
-  return 1
+HELP
 }
 
 ensure_node_toolchain() {
+  if ! command -v node >/dev/null 2>&1; then
+    print_missing_node_help
+    agent_fail "未检测到 Node.js，请先安装 Node.js LTS"
+  fi
+
   refresh_node_toolchain_bins
-  if [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ]; then
+  if [ -n "$NPM_BIN" ]; then
     configure_npm_registry
     return 0
   fi
 
-  agent_log "npm/npx not found; installing Node.js/npm automatically"
-  if ! try_install_node_toolchain; then
-    print_node_toolchain_help
-    agent_fail "failed to install Node.js/npm automatically"
-  fi
-
-  hash -r 2>/dev/null || true
-  refresh_node_toolchain_bins
-  [ -n "$NPM_BIN" ] && [ -n "$NPX_BIN" ] || {
-    print_node_toolchain_help
-    agent_fail "npm/npx is still unavailable after installation"
-  }
-  configure_npm_registry
+  print_incomplete_node_help
+  agent_fail "Node.js 环境不完整，请重新安装 Node.js LTS"
 }
 
 configure_npm_registry() {
@@ -1331,13 +1316,8 @@ npm_install_register_helper() {
     }
 }
 
-aime_internal_network_reachable() {
-  command -v ping >/dev/null 2>&1 || return 1
-  if is_macos; then
-    ping -c 1 -W 1000 aime.bytedance.net >/dev/null 2>&1
-  else
-    ping -c 1 -W 1 aime.bytedance.net >/dev/null 2>&1
-  fi
+aime_tenant_available() {
+  [ "$AAMP_TASK_USER_TENANT_KEY" = "$AIME_ALLOWED_TENANT_KEY" ]
 }
 
 validate_agent_name() {
@@ -1349,8 +1329,8 @@ validate_agent_name() {
 
 ensure_agent_selection_available() {
   [ "$1" = "aime" ] || return 0
-  aime_internal_network_reachable \
-    || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
+  aime_tenant_available \
+    || agent_fail "AIME 仅对字节租户开放；当前飞书 CLI 登录账号不属于可用租户。"
 }
 
 agent_display_name() {
@@ -1392,7 +1372,7 @@ agent_cli_detected() {
       find_workbuddy_ai_cli >/dev/null 2>&1
       ;;
     aime)
-      aime_internal_network_reachable
+      aime_tenant_available
       ;;
     *)
       return 1
@@ -1632,6 +1612,7 @@ parse_args() {
   local restart_count=0
   local restart_index=0
   local restart_output_index=0
+  local no_start_arg="false"
 
   # Bash 3.2 with `set -u` treats an expanded empty array as unbound. Copy the
   # original positional parameters one by one so the no-argument help path
@@ -1647,7 +1628,7 @@ parse_args() {
   fi
 
   case "${1:-}" in
-    install|start|list|add|remove|update|help|__discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
+    install|start|status|stop|restart|logs|list|add|remove|update|help|__service-run|__discover-agents|__register-binding|__prepare-agent|__probe-profile|__ensure-profile)
       AAMP_TASK_ACTION="$1"
       shift
       ;;
@@ -1658,7 +1639,7 @@ parse_args() {
   fi
 
   case "$AAMP_TASK_ACTION" in
-    install|start|add)
+    install|start|add|__service-run)
       AAMP_TASK_START_MODE="start"
       ;;
     *)
@@ -1680,6 +1661,15 @@ parse_args() {
         DEBUG_MODE="true"
         shift
         ;;
+      --foreground)
+        AAMP_TASK_FOREGROUND="true"
+        shift
+        ;;
+      --no-start)
+        AAMP_TASK_NO_START="true"
+        no_start_arg="true"
+        shift
+        ;;
       --mock-fail-stage)
         AAMP_ONE_CLICK_MOCK_FAIL_STAGE="${2:-}"
         shift 2
@@ -1697,13 +1687,16 @@ parse_args() {
   if [ -n "$AGENT" ]; then
     validate_agent_name "$AGENT"
   fi
+  if [ "$no_start_arg" = "true" ] && [ "$AAMP_TASK_ACTION" != "add" ]; then
+    agent_fail "--no-start is only supported with add"
+  fi
 
   if [ "${restart_source[0]:-}" = "normal" ]; then
     restart_index=1
   fi
   RESTART_ARGS=()
   case "${restart_source[$restart_index]:-}" in
-    install|start|list|add|remove|update|help)
+    install|start|status|stop|restart|logs|list|add|remove|update|help)
       ;;
     *)
       RESTART_ARGS[0]="$AAMP_TASK_ACTION"
@@ -1805,12 +1798,13 @@ for (const bot of bots) {
   const profile = String(bot?.profile || "").trim();
   const name = String(bot?.display_name || appId).trim();
   const appSecret = String(bot?.app_secret || "").trim();
+  const tenantBrand = bot?.tenant_brand === "lark" ? "lark" : "feishu";
   if (!appId || !profile || seen.has(appId) || activeAppIds.has(appId)) continue;
   if (!appSecret) {
     continue;
   }
   seen.add(appId);
-  console.log([appId, name, profile, appSecret].join("\t"));
+  console.log([appId, name, profile, appSecret, tenantBrand].join("\t"));
 }
 '
 }
@@ -1993,7 +1987,12 @@ process.exit(bots.some((bot) => String(bot?.app_id || "").trim() && String(bot?.
 
 task_profile_name_for_app_id() {
   local app_id="$1"
-  printf 'aamp-feishu-task-%s' "$app_id"
+  local tenant_brand="${2:-feishu}"
+  case "$tenant_brand" in
+    feishu) printf 'aamp-feishu-task-%s' "$app_id" ;;
+    lark) printf 'aamp-feishu-task-%s-lark' "$app_id" ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
 }
 
 save_bot_config() {
@@ -2001,19 +2000,27 @@ save_bot_config() {
   local app_id="$2"
   local profile="$3"
   local app_secret="${4:-}"
+  local tenant_brand="${5:-feishu}"
   mkdir -p "$(dirname "$BOT_CONFIG_FILE")"
-  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" FEISHU_USER_AUTH_DOMAINS="$FEISHU_USER_AUTH_DOMAINS" node -e '
+  case "$tenant_brand" in
+    feishu|lark) ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
+  BOT_CONFIG_FILE="$BOT_CONFIG_FILE" BOT_NAME="$bot_name" BOT_APP_ID="$app_id" BOT_PROFILE="$profile" BOT_APP_SECRET="$app_secret" BOT_TENANT_BRAND="$tenant_brand" FEISHU_TASK_PROFILE_DOMAINS="$FEISHU_TASK_PROFILE_DOMAINS" FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" FEISHU_USER_AUTH_MODE="$FEISHU_USER_AUTH_MODE" node -e '
 const fs = require("fs");
 const file = process.env.BOT_CONFIG_FILE;
 const appSecret = String(process.env.BOT_APP_SECRET || "").trim();
 const next = {
   display_name: process.env.BOT_NAME || process.env.BOT_APP_ID,
   app_id: process.env.BOT_APP_ID,
+  tenant_brand: process.env.BOT_TENANT_BRAND || "feishu",
   ...(appSecret ? { app_secret: appSecret } : {}),
   profile: process.env.BOT_PROFILE,
   auth_mode: "lark-cli",
   capabilities: ["im", "task"],
-  domains: String(process.env.FEISHU_USER_AUTH_DOMAINS || "").split(",").map((item) => item.trim()).filter(Boolean),
+  domains: String(process.env.FEISHU_TASK_PROFILE_DOMAINS || "task").split(",").map((item) => item.trim()).filter(Boolean),
+  scope_manifest_version: Number(process.env.FEISHU_SCOPE_MANIFEST_VERSION || 0),
+  user_auth_mode: process.env.FEISHU_USER_AUTH_MODE || "optional",
   updated_at: new Date().toISOString(),
 };
 let parsed = { version: 1, profiles: [] };
@@ -2246,15 +2253,65 @@ ensure_lark_cli_min_version() {
   select_lark_cli_bin
 }
 
+feishu_scope_manifest_json() {
+  cat <<'JSON'
+{"version":2,"app":{"tenant":["im:message","im:message:send_as_bot","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"],"user":["im:message","im:message:readonly","im:resource","cardkit:card:write","task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]},"userAuth":{"core":[],"optional":["task:task","task:comment","task:task:readonly","task:comment:readonly","task:attachment:read","task:attachment:write","task:comment:read","task:comment:write","task:task:read","task:task:write","task:tasklist:read","task:tasklist:write","task:custom_field:read","task:custom_field:write","task:section:read","task:section:write"]}}
+JSON
+}
+
+initialize_feishu_scope_manifest() {
+  local manifest_values=()
+  local value
+
+  while IFS= read -r value; do
+    manifest_values+=("$value")
+  done < <(feishu_scope_manifest_json | node -e '
+const fs = require("fs");
+const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
+console.log(String(manifest.version));
+console.log(manifest.app.tenant.join(","));
+console.log(manifest.app.user.join(","));
+console.log(manifest.userAuth.core.join(" "));
+console.log(manifest.userAuth.optional.join(" "));
+')
+
+  [ "${#manifest_values[@]}" -eq 5 ] || agent_fail "invalid embedded Feishu scope manifest"
+  FEISHU_SCOPE_MANIFEST_VERSION="${FEISHU_SCOPE_MANIFEST_VERSION:-${manifest_values[0]}}"
+  FEISHU_APP_SCOPES_TENANT="${FEISHU_APP_SCOPES_TENANT:-${manifest_values[1]}}"
+  FEISHU_APP_SCOPES_USER="${FEISHU_APP_SCOPES_USER:-${manifest_values[2]}}"
+  FEISHU_USER_AUTH_CORE_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES:-${manifest_values[3]}}"
+  FEISHU_USER_AUTH_OPTIONAL_SCOPES="${FEISHU_USER_AUTH_OPTIONAL_SCOPES:-${manifest_values[4]}}"
+  if [ -n "${FEISHU_USER_AUTH_REQUIRED_SCOPES:-}" ]; then
+    FEISHU_USER_AUTH_CORE_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+  else
+    FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_CORE_SCOPES"
+  fi
+  if [ -z "${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}" ]; then
+    if [ -n "${AAMP_FEISHU_USER_AUTH_REQUIRED_SCOPES_OVERRIDE:-}" ]; then
+      FEISHU_USER_AUTH_REQUESTED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    else
+      FEISHU_USER_AUTH_REQUESTED_SCOPES="${FEISHU_USER_AUTH_CORE_SCOPES} ${FEISHU_USER_AUTH_OPTIONAL_SCOPES}"
+    fi
+  fi
+  export FEISHU_SCOPE_MANIFEST_VERSION
+  export FEISHU_APP_SCOPES_TENANT FEISHU_APP_SCOPES_USER
+  export FEISHU_USER_AUTH_CORE_SCOPES FEISHU_USER_AUTH_OPTIONAL_SCOPES
+  export FEISHU_USER_AUTH_REQUIRED_SCOPES FEISHU_USER_AUTH_REQUESTED_SCOPES
+}
+
 lark_cli_user_auth_satisfied() {
   local profile="$1"
+  local required_scopes="${2:-${FEISHU_USER_AUTH_REQUIRED_SCOPES:-${FEISHU_USER_AUTH_CORE_SCOPES:-}}}"
   local status_json auth_check
   LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
 
+  if [ -z "${required_scopes//[[:space:],]/}" ]; then
+    return 0
+  fi
   status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)" || return 1
 
   set +e
-  auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$FEISHU_USER_AUTH_REQUIRED_SCOPES" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
+  auth_check="$(AUTH_STATUS_JSON="$status_json" FEISHU_USER_AUTH_REQUIRED_SCOPES="$required_scopes" FEISHU_USER_AUTH_EXCLUDES="$FEISHU_USER_AUTH_EXCLUDES" node -e '
 function parseJsonOutput(value, label) {
   const raw = String(value || "");
   const start = raw.indexOf("{");
@@ -2295,10 +2352,133 @@ console.log("ok");
   return 1
 }
 
+lark_cli_user_tenant_key() {
+  local profile="$1"
+  local user_info_json tenant_key
+  LARK_CLI_CMD="${LARK_CLI_CMD:-lark-cli}"
+
+  if [ -n "${ONE_CLICK_LOG:-}" ]; then
+    user_info_json="$(
+      LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 \
+      LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+      "$LARK_CLI_CMD" --profile "$profile" api GET /open-apis/authen/v1/user_info \
+        --as user --format json 2>>"$ONE_CLICK_LOG"
+    )" || return 1
+  else
+    user_info_json="$(
+      LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 \
+      LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 \
+      "$LARK_CLI_CMD" --profile "$profile" api GET /open-apis/authen/v1/user_info \
+        --as user --format json 2>/dev/null
+    )" || return 1
+  fi
+
+  tenant_key="$(printf '%s' "$user_info_json" | node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const start = input.indexOf("{");
+  if (start < 0) process.exit(1);
+  let payload;
+  try { payload = JSON.parse(input.slice(start)); } catch { process.exit(1); }
+  const value = payload?.data?.tenant_key;
+  if (typeof value !== "string" || !value.trim()) process.exit(1);
+  process.stdout.write(value.trim());
+});
+')" || return 1
+  [ -n "$tenant_key" ] || return 1
+  printf '%s' "$tenant_key"
+}
+
+ensure_lark_cli_user_tenant_key() {
+  local profile="$1"
+  local tenant_key
+
+  APP_USER_TENANT_KEY=""
+  tenant_key="$(lark_cli_user_tenant_key "$profile" || true)"
+  if [ -z "$tenant_key" ]; then
+    agent_log "正在登录飞书 CLI 以确认当前租户..."
+    run_lark_cli_auth_login "$profile" "$FEISHU_USER_AUTH_EXCLUDES"
+    tenant_key="$(lark_cli_user_tenant_key "$profile" || true)"
+  fi
+  if [ -z "$tenant_key" ]; then
+    agent_log "无法识别当前租户，将隐藏 AIME；其他智能体仍可继续。"
+    return 0
+  fi
+  APP_USER_TENANT_KEY="$tenant_key"
+}
+
+write_lark_cli_auth_capability_snapshot() {
+  local profile="$1"
+  local status_json="{}"
+  local state_dir="$AAMP_FEISHU_AUTH_STATE_DIR"
+  local safe_profile state_file temp_file
+
+  set +e
+  status_json="$("$LARK_CLI_CMD" --profile "$profile" auth status --json 2>/dev/null)"
+  local status_code=$?
+  set -e
+  if [ "$status_code" -ne 0 ] || [ -z "$status_json" ]; then
+    status_json="{}"
+  fi
+
+  mkdir -p "$state_dir" || return 1
+  safe_profile="$(PROFILE="$profile" node -e 'process.stdout.write(String(process.env.PROFILE || "profile").replace(/[^A-Za-z0-9._-]/g, "_"))')" || return 1
+  state_file="$state_dir/$safe_profile.json"
+  temp_file="$(mktemp "$state_dir/.auth-capabilities.XXXXXX")" || return 1
+  if ! AUTH_STATUS_JSON="$status_json" \
+    AUTH_PROFILE="$profile" \
+    FEISHU_SCOPE_MANIFEST_VERSION="$FEISHU_SCOPE_MANIFEST_VERSION" \
+    FEISHU_USER_AUTH_CORE_SCOPES="$FEISHU_USER_AUTH_CORE_SCOPES" \
+    FEISHU_USER_AUTH_OPTIONAL_SCOPES="$FEISHU_USER_AUTH_OPTIONAL_SCOPES" \
+    node -e '
+const raw = String(process.env.AUTH_STATUS_JSON || "{}");
+const start = raw.indexOf("{");
+let status = {};
+try { status = JSON.parse(start >= 0 ? raw.slice(start) : "{}"); } catch {}
+const user = status?.identities?.user;
+const usable = Boolean(user?.available) && new Set(["valid", "needs_refresh"]).has(user?.tokenStatus);
+const split = (value) => [...new Set(String(value || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean))];
+const granted = new Set(split(user?.scope));
+const core = split(process.env.FEISHU_USER_AUTH_CORE_SCOPES);
+const optional = split(process.env.FEISHU_USER_AUTH_OPTIONAL_SCOPES);
+const missingCoreScopes = core.filter((scope) => !granted.has(scope));
+const missingOptionalScopes = optional.filter((scope) => !granted.has(scope));
+process.stdout.write(JSON.stringify({
+  schemaVersion: 1,
+  manifestVersion: Number(process.env.FEISHU_SCOPE_MANIFEST_VERSION || 0),
+  profile: process.env.AUTH_PROFILE,
+  tokenStatus: user?.tokenStatus || "missing",
+  grantedScopes: [...granted],
+  missingCoreScopes,
+  missingOptionalScopes,
+  capabilities: { task_user: usable && missingOptionalScopes.length === 0 },
+  checkedAt: new Date().toISOString(),
+}, null, 2));
+' >"$temp_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  if ! mv "$temp_file" "$state_file"; then
+    rm -f "$temp_file"
+    return 1
+  fi
+  chmod 600 "$state_file" 2>/dev/null || true
+}
+
+persist_lark_cli_auth_capability_snapshot() {
+  local profile="$1"
+  if ! write_lark_cli_auth_capability_snapshot "$profile"; then
+    agent_log "warning: unable to persist optional user capability snapshot for profile: $profile"
+  fi
+}
+
 normalize_lark_cli_auth_excludes() {
-  EXCLUDES="$1" node -e '
+  EXCLUDES="$1" REQUESTED_SCOPES="${2:-${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}}" node -e '
 const excludes = String(process.env.EXCLUDES || "").split(",").map((item) => item.trim()).filter(Boolean);
-console.log([...new Set(excludes)].join(","));
+const requested = new Set(String(process.env.REQUESTED_SCOPES || "").split(/[\s,]+/).map((item) => item.trim()).filter(Boolean));
+console.log([...new Set(excludes)].filter((scope) => requested.has(scope)).join(","));
 '
 }
 
@@ -2445,12 +2625,16 @@ run_lark_cli_auth_login_with_browser_open() {
 run_lark_cli_auth_login() {
   local profile="$1"
   local auth_excludes="$2"
+  local requested_scopes="${FEISHU_USER_AUTH_REQUESTED_SCOPES:-}"
 
-  auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes")"
+  [ -n "${requested_scopes//[[:space:],]/}" ] || return 0
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+    || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
+  auth_excludes="$(normalize_lark_cli_auth_excludes "$auth_excludes" "$requested_scopes")"
   if [ -z "$auth_excludes" ]; then
-    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --scope "$requested_scopes"
   else
-    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --domain "$FEISHU_USER_AUTH_DOMAINS" --scope "$FEISHU_USER_AUTH_REQUIRED_SCOPES" --exclude "$auth_excludes"
+    run_lark_cli_auth_login_with_browser_open "$LARK_CLI_CMD" --profile "$profile" auth login --scope "$requested_scopes" --exclude "$auth_excludes"
   fi
 }
 
@@ -2459,18 +2643,48 @@ ensure_lark_cli_profile() {
   with_lark_cli_config_lock ensure_lark_cli_profile_locked "$@"
 }
 
+validate_feishu_user_auth_mode() {
+  case "$FEISHU_USER_AUTH_MODE" in
+    optional|required|disabled) ;;
+    *) agent_fail "FEISHU_USER_AUTH_MODE must be optional, required, or disabled" ;;
+  esac
+}
+
 probe_lark_cli_profile_locked() {
   local profile="$1"
+  local required_scopes
+
+  initialize_feishu_scope_manifest
+  validate_feishu_user_auth_mode
   "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1 \
     || return 1
-  lark_cli_user_auth_satisfied "$profile"
+  if [ "$FEISHU_USER_AUTH_MODE" = "disabled" ]; then
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    return 0
+  fi
+  if [ "$FEISHU_USER_AUTH_MODE" = "required" ]; then
+    required_scopes="$FEISHU_USER_AUTH_REQUESTED_SCOPES"
+  else
+    required_scopes="$FEISHU_USER_AUTH_CORE_SCOPES"
+  fi
+  lark_cli_user_auth_satisfied "$profile" "$required_scopes" || return 1
+  persist_lark_cli_auth_capability_snapshot "$profile"
 }
 
 ensure_lark_cli_profile_locked() {
   local app_id="$1"
   local app_secret="$2"
   local profile="$3"
+  local tenant_brand="${4:-feishu}"
   local auth_excludes
+  local required_scopes
+
+  initialize_feishu_scope_manifest
+  validate_feishu_user_auth_mode
+  case "$tenant_brand" in
+    feishu|lark) ;;
+    *) agent_fail "unsupported tenant brand: $tenant_brand" ;;
+  esac
 
   if "$LARK_CLI_CMD" profile list 2>/dev/null | grep -F "\"$profile\"" >/dev/null 2>&1; then
     agent_detail "lark-cli profile already exists: $profile"
@@ -2480,16 +2694,42 @@ ensure_lark_cli_profile_locked() {
     printf '%s\n' "$app_secret" | "$LARK_CLI_CMD" profile add \
       --name "$profile" \
       --app-id "$app_id" \
+      --brand "$tenant_brand" \
       --app-secret-stdin
   fi
 
-  agent_detail "ensuring lark-cli user auth domains for profile: $profile"
-  auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
-  if lark_cli_user_auth_satisfied "$profile"; then
-    agent_detail "lark-cli user auth already has required scopes for profile: $profile"
-  else
-    run_lark_cli_auth_login "$profile" "$auth_excludes"
+  if [ "$FEISHU_USER_AUTH_MODE" = "disabled" ]; then
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    agent_log "Task bridge ready; optional user capabilities disabled for profile: $profile"
+    return 0
   fi
+
+  auth_excludes="$FEISHU_USER_AUTH_EXCLUDES"
+  if [ "$FEISHU_USER_AUTH_MODE" = "required" ]; then
+    required_scopes="$FEISHU_USER_AUTH_REQUESTED_SCOPES"
+    agent_detail "ensuring explicit lark-cli user auth scopes for profile: $profile"
+    if ! lark_cli_user_auth_satisfied "$profile" "$required_scopes"; then
+      run_lark_cli_auth_login "$profile" "$auth_excludes"
+      lark_cli_user_auth_satisfied "$profile" "$required_scopes" \
+        || agent_fail "lark-cli user authorization did not grant the required explicit scopes"
+    fi
+    persist_lark_cli_auth_capability_snapshot "$profile"
+    agent_detail "lark-cli user auth has the requested scopes for profile: $profile"
+    return 0
+  fi
+
+  if ! lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_CORE_SCOPES"; then
+    agent_detail "ensuring explicitly configured lark-cli core scopes for profile: $profile"
+    run_lark_cli_auth_login "$profile" "$auth_excludes"
+    lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_CORE_SCOPES" \
+      || agent_fail "lark-cli user authorization did not grant the configured core scopes"
+  fi
+  if lark_cli_user_auth_satisfied "$profile" "$FEISHU_USER_AUTH_OPTIONAL_SCOPES"; then
+    agent_detail "lark-cli optional user capabilities are available for profile: $profile"
+  else
+    agent_log "Task bridge ready; optional user capabilities unavailable for profile: $profile"
+  fi
+  persist_lark_cli_auth_capability_snapshot "$profile"
 }
 
 forget_current_bot_after_feishu_start_failure() {
@@ -2525,17 +2765,19 @@ select_existing_bot_or_create() {
   local names=()
   local profiles=()
   local app_secrets=()
+  local tenant_brands=()
   local bot_labels=()
-  local app_id name profile app_secret
+  local app_id name profile app_secret tenant_brand
   local index create_index selected
 
   acquire_bot_selection_lock
-  while IFS=$'\t' read -r app_id name profile app_secret; do
+  while IFS=$'\t' read -r app_id name profile app_secret tenant_brand; do
     [ -n "$app_id" ] || continue
     app_ids+=("$app_id")
     names+=("${name:-$app_id}")
     profiles+=("$profile")
     app_secrets+=("$app_secret")
+    tenant_brands+=("${tenant_brand:-feishu}")
     bot_labels+=("${name:-$app_id} ($app_id)")
   done < <(load_bot_configs)
 
@@ -2574,11 +2816,12 @@ select_existing_bot_or_create() {
   BOT_NAME="${names[$index]}"
   LARK_CLI_PROFILE="${profiles[$index]}"
   APP_SECRET="${app_secrets[$index]:-}"
+  APP_TENANT_BRAND="${tenant_brands[$index]:-feishu}"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$BOT_NAME"
   release_bot_selection_lock
   agent_detail "using Feishu bot: $BOT_NAME ($APP_ID, profile=$LARK_CLI_PROFILE)"
   agent_log "正在检查飞书授权..."
-  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
 }
 
 register_feishu_app() {
@@ -2590,6 +2833,8 @@ register_feishu_app() {
   local default_name
   local bot_name
 
+  initialize_feishu_scope_manifest
+
   workdir="$(mktemp -d "${TMPDIR:-/tmp}/aamp-register-feishu-app.XXXXXX")"
   register_script="$workdir/register-app.mjs"
   if [ -n "$AAMP_RUN_LOG_DIR" ]; then
@@ -2600,7 +2845,11 @@ register_feishu_app() {
   fi
   chmod 600 "$register_log" 2>/dev/null || true
   register_result_file="$workdir/register-app-result.json"
-  default_name="${AGENT} 飞书 CLI"
+  if [ -n "$AGENT" ]; then
+    default_name="${AGENT} 飞书 CLI"
+  else
+    default_name="AAMP 飞书 CLI"
+  fi
 
   agent_detail "preparing Feishu app registration helper"
   npm_install_register_helper "$workdir"
@@ -2626,6 +2875,7 @@ const userScopes = splitList(process.env.FEISHU_APP_SCOPES_USER);
 const tenantEvents = splitList(process.env.FEISHU_APP_EVENTS_TENANT);
 const userEvents = splitList(process.env.FEISHU_APP_EVENTS_USER);
 const appName = process.env.FEISHU_APP_PRESET_NAME || '飞书 CLI';
+let detectedTenantBrand = 'feishu';
 
 function userLog(message) {
   writeSync(5, `${message}\n`);
@@ -2678,15 +2928,24 @@ const result = await lark.registerApp({
   },
   onStatusChange(info) {
     if (info.status === 'polling') return;
+    if (info.status === 'domain_switched') detectedTenantBrand = 'lark';
     console.log(`[aamp-one-click] registerApp status: ${info.status}`);
   },
 });
 
-async function fetchRegisteredAppName(appId, appSecret) {
+const reportedTenantBrand = result?.user_info?.tenant_brand;
+const tenantBrand = reportedTenantBrand === undefined || reportedTenantBrand === null || reportedTenantBrand === ''
+  ? detectedTenantBrand
+  : reportedTenantBrand;
+const tenantBrandIsSupported = tenantBrand === 'feishu' || tenantBrand === 'lark';
+const openApiDomain = tenantBrand === 'lark' ? lark.Domain.Lark : lark.Domain.Feishu;
+
+async function fetchRegisteredAppName(appId, appSecret, domain) {
   try {
     const client = new lark.Client({
       appId,
       appSecret,
+      domain,
     });
     const response = await client.application.application.get({
       path: { app_id: appId },
@@ -2700,11 +2959,14 @@ async function fetchRegisteredAppName(appId, appSecret) {
   }
 }
 
-const registeredAppName = await fetchRegisteredAppName(result.client_id, result.client_secret);
+const registeredAppName = tenantBrandIsSupported
+  ? await fetchRegisteredAppName(result.client_id, result.client_secret, openApiDomain)
+  : '';
 const resultPayload = {
   app_id: result.client_id,
   app_secret: result.client_secret,
   app_name: registeredAppName || appName,
+  tenant_brand: tenantBrand,
 };
 await import('node:fs/promises').then(({ writeFile }) => writeFile(process.env.AAMP_REGISTER_APP_RESULT_FILE, JSON.stringify(resultPayload)));
 console.log(`[aamp-one-click] Feishu app registration completed: ${result.client_id}`);
@@ -2732,24 +2994,29 @@ NODE
   APP_ID="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_id || "")' "$register_result_file")"
   APP_SECRET="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_secret || "")' "$register_result_file")"
   bot_name="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.app_name || "")' "$register_result_file")"
+  APP_TENANT_BRAND="$(node -e 'const fs = require("fs"); const data = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(data.tenant_brand || "feishu")' "$register_result_file")"
   : >"$register_result_file"
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || agent_fail "Feishu app registration returned incomplete credentials"
+  case "$APP_TENANT_BRAND" in
+    feishu|lark) ;;
+    *) agent_fail "Feishu app registration returned unsupported tenant brand: $APP_TENANT_BRAND" ;;
+  esac
 
   bot_name="${bot_name:-$default_name}"
   BOT_NAME="$bot_name"
   if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
     LARK_CLI_PROFILE=""
   else
-    LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID")"
+    LARK_CLI_PROFILE="$(task_profile_name_for_app_id "$APP_ID" "$APP_TENANT_BRAND")"
     source_lark_env
-    ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+    ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
   fi
   if [ "$AAMP_TASK_INTERNAL" = "true" ]; then
     agent_detail "Feishu Bot 已授权：$BOT_NAME ($APP_ID)"
     return 0
   fi
   acquire_bot_selection_lock
-  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET"
+  save_bot_config "$bot_name" "$APP_ID" "$LARK_CLI_PROFILE" "$APP_SECRET" "$APP_TENANT_BRAND"
   reserve_selected_bot "$APP_ID" "$LARK_CLI_PROFILE" "$bot_name"
   release_bot_selection_lock
   agent_log "saved Feishu task profile config: $bot_name ($APP_ID, profile=$LARK_CLI_PROFILE)"
@@ -3309,8 +3576,6 @@ ensure_agent_cli() {
   fi
 
   if [ "$AGENT" = "aime" ]; then
-    aime_internal_network_reachable \
-      || agent_fail "AIME 仅在公司内网可用；当前无法 ping 通 aime.bytedance.net。"
     ensure_aime_acp_cli
     return 0
   fi
@@ -3657,6 +3922,10 @@ confirm_codex_cli_update() {
 ensure_codex_cli_updated() {
   [ "$AGENT" = "codex" ] || return 0
   [ "$CODEX_AUTO_UPDATE" = "true" ] || return 0
+  if [ "${AAMP_TASK_NON_INTERACTIVE:-false}" = "true" ]; then
+    agent_detail "skipping Codex CLI update check in non-interactive service worker"
+    return 0
+  fi
 
   local codex_bin version_before latest_version version_line comparison_status confirmation_status refreshed_bin version_after status update_log
   codex_bin="$(resolve_codex_cli_for_acp || true)"
@@ -3865,6 +4134,8 @@ maybe_upgrade_legacy_trae_cli() {
     return 0
   fi
 
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+    || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
   if confirm_trae_upgrade; then
     run_traex_installer || agent_fail "traex 安装失败。请手动执行：curl -fsSL $TRAEX_INSTALLER_URL | sh"
     hash -r 2>/dev/null || true
@@ -3890,6 +4161,8 @@ ensure_traex_login() {
     agent_fail "$(trae_login_status_timeout_message)"
   fi
   if [ "$trae_login_status" -ne 0 ]; then
+    [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] \
+      || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
     agent_log "Trae CLI Next（内部版）未登录，正在启动登录流程。"
     run_traex_login || agent_fail "Trae CLI Next（内部版）登录失败。请先执行 'traex login' 完成登录后重新运行脚本。"
     set +e
@@ -4202,6 +4475,7 @@ ensure_traecode_acp() {
   [ "$probe_status" -ne 124 ] || agent_fail "TraeCode CLI ACP 能力检查超时，请稍后重试。"
   [ "$probe_status" -eq 3 ] || agent_fail "无法检查 TraeCode CLI 的 ACP 能力。"
 
+  ensure_interactive_agent_recovery_allowed
   set +e; confirm_traecode_update; confirm_status=$?; set -e
   if [ "$confirm_status" -eq 2 ]; then
     agent_fail "当前 TraeCode CLI 需要升级。请在交互式终端执行 'traecli update' 后重试。"
@@ -4276,6 +4550,7 @@ process.stdin.on("end", () => {
   if [ "$auth_status" -eq 0 ] && [ "$auth_kind" = "authenticated" ]; then
     agent_detail "AIME managed-user authentication is ready"
   elif [ "$auth_status" -eq 1 ] && [ "$auth_kind" = "unauthenticated" ]; then
+    ensure_interactive_agent_recovery_allowed
     agent_log "AIME 尚未登录，正在启动独立登录流程。"
     set +e
     run_aime_auth_login
@@ -4302,11 +4577,16 @@ process.stdin.on("end", () => {
     || agent_fail "AIME doctor 未通过。请确认公司内网与账号状态，并执行 'aime-acp doctor --site cn --json' 查看安全诊断。"
 }
 
+ensure_interactive_agent_recovery_allowed() {
+  [ "${AAMP_TASK_NON_INTERACTIVE:-false}" != "true" ] || agent_fail "后台服务无法完成交互式准备。请在终端执行 'feishu-task-agent stop && feishu-task-agent start' 完成登录或升级后重试。"
+}
+
 ensure_agent_login() {
   case "$AGENT" in
     codex)
       clear_codex_quarantine
       if ! run_codex_login_status; then
+        ensure_interactive_agent_recovery_allowed
         agent_log "codex CLI 未登录，正在启动登录流程。"
         run_codex_login || agent_fail "codex CLI 登录失败。请先执行 'codex login' 完成登录后重新运行脚本。"
         run_codex_login_status || agent_fail "codex CLI 仍未登录。请先执行 'codex login' 完成登录后重新运行脚本。"
@@ -4317,6 +4597,7 @@ ensure_agent_login() {
       if run_cursor_login_status; then
         agent_detail "cursor CLI is already logged in"
       else
+        ensure_interactive_agent_recovery_allowed
         agent_log "cursor CLI 未登录，正在启动登录流程。"
         run_cursor_login || agent_fail "cursor CLI 登录失败。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
         run_cursor_login_status || agent_fail "cursor CLI 仍未登录。请先执行 'cursor login' 或 'agent login' 完成登录后重新运行脚本。"
@@ -4744,7 +5025,6 @@ process.stdout.write(JSON.stringify({ agents }));
 prepare_internal_agent_environment() {
   [ -n "$AGENT" ] || agent_fail "internal Agent preparation requires --agent"
   validate_agent_name "$AGENT"
-  ensure_agent_selection_available "$AGENT"
   load_agent_metadata
   if [ "$AGENT_EXECUTION_LOCATION" = "local" ]; then
     source_lark_env
@@ -4753,16 +5033,12 @@ prepare_internal_agent_environment() {
 }
 
 run_internal_register_binding() {
-  [ -n "$AGENT" ] || agent_fail "internal Bot registration requires --agent"
-  validate_agent_name "$AGENT"
-  ensure_agent_selection_available "$AGENT"
-  load_agent_metadata
+  local tenant_key
+  AGENT_EXECUTION_LOCATION="local"
   register_feishu_app
-  if [ "$AGENT_EXECUTION_LOCATION" = "remote" ]; then
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"auth_mode\":\"app-secret\"}"
-  else
-    emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
-  fi
+  ensure_lark_cli_user_tenant_key "$LARK_CLI_PROFILE"
+  tenant_key="$APP_USER_TENANT_KEY"
+  emit_internal_result "{\"app_id\":\"$(json_escape "$APP_ID")\",\"app_secret\":\"$(json_escape "$APP_SECRET")\",\"display_name\":\"$(json_escape "$BOT_NAME")\",\"tenant_brand\":\"$(json_escape "$APP_TENANT_BRAND")\",\"tenant_key\":\"$(json_escape "$tenant_key")\",\"lark_cli_profile\":\"$(json_escape "$LARK_CLI_PROFILE")\",\"auth_mode\":\"lark-cli\"}"
 }
 
 run_internal_prepare_agent() {
@@ -4820,11 +5096,13 @@ run_internal_ensure_profile() {
   APP_ID="$(binding_json_field bot.app_id)"
   APP_SECRET="$(binding_json_field bot.app_secret)"
   BOT_NAME="$(binding_json_field bot.display_name)"
+  APP_TENANT_BRAND="$(binding_json_field bot.tenant_brand)"
+  APP_TENANT_BRAND="${APP_TENANT_BRAND:-feishu}"
   LARK_CLI_PROFILE="$(binding_json_field bot.lark_cli_profile)"
   [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] && [ -n "$LARK_CLI_PROFILE" ] || agent_fail "binding is missing Feishu credentials or profile"
   AAMP_TASK_INTERNAL_BINDING_JSON=""
   source_lark_env
-  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE"
+  ensure_lark_cli_profile "$APP_ID" "$APP_SECRET" "$LARK_CLI_PROFILE" "$APP_TENANT_BRAND"
   APP_SECRET=""
   emit_internal_result "{\"lark_cli_bin\":\"$(json_escape "$LARK_CLI_CMD")\",\"lark_cli_config_dir\":\"$(json_escape "${LARKSUITE_CLI_CONFIG_DIR:-}")\"}"
 }
@@ -4974,6 +5252,8 @@ run_task_agent_controller() {
   export AAMP_TASK_DEFAULT_AGENT="$AGENT"
   export AAMP_TASK_AAMP_HOST="$AAMP_HOST"
   export AAMP_TASK_DEBUG_MODE="$DEBUG_MODE"
+  export AAMP_TASK_FOREGROUND
+  export AAMP_TASK_NO_START
   export AAMP_TASK_INSTALL_COMMAND="$install_command"
   export AAMP_TASK_NPM_REGISTRY="$NPM_REGISTRY"
   export AAMP_TASK_NPM_CACHE_DIR="$NPM_CACHE_DIR"
@@ -5034,10 +5314,6 @@ main() {
       return 0
       ;;
   esac
-
-  if [ "$AGENT" = "aime" ]; then
-    ensure_agent_selection_available "$AGENT"
-  fi
 
   trap cleanup EXIT INT TERM HUP
   init_log_run

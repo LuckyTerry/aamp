@@ -46,26 +46,28 @@ async function until(predicate, message, timeoutMs = 5_000) {
 
 function discoveryFunctions(source) {
   return [
-    optionalFunctionRange(source, 'aime_internal_network_reachable()', 'validate_agent_name()'),
+    optionalFunctionRange(source, 'aime_tenant_available()', 'validate_agent_name()'),
     functionRange(source, 'validate_agent_name()', 'read_tty_line()'),
     functionRange(source, 'agent_cli_detected()', 'move_agent_menu_cursor_up()'),
     functionRange(source, 'run_internal_discover_agents()', 'prepare_internal_agent_environment()'),
   ].join('\n')
 }
 
-function discoveryFixture(source, pingStatus, command) {
+function discoveryFixture(source, tenantKey, pingStatus, command) {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-discovery-'))
   const callLog = path.join(root, 'ping.log')
   return runShell([
     'set -euo pipefail',
-    'PING_STATUS="$1"',
-    'PING_LOG="$2"',
+    'AAMP_TASK_USER_TENANT_KEY="$1"',
+    'AIME_ALLOWED_TENANT_KEY="736588c9260f175d"',
+    'PING_STATUS="$2"',
+    'PING_LOG="$3"',
     'AGENT=""',
     'DETECTED_AGENTS=()',
     'AAMP_TASK_INTERNAL_RESULT_FD=3',
     'is_macos() { return 0; }',
     'ping() { printf "%s\\n" "$*" >> "$PING_LOG"; return "$PING_STATUS"; }',
-    'resolve_codex_cli_for_acp() { return 1; }',
+    'resolve_codex_cli_for_acp() { return 0; }',
     'find_cursor_agent_cli() { return 1; }',
     'find_traex_cli() { return 1; }',
     'find_legacy_trae_cli() { return 1; }',
@@ -75,7 +77,7 @@ function discoveryFixture(source, pingStatus, command) {
     'agent_fail() { printf "%s\\n" "$*" >&2; exit 64; }',
     discoveryFunctions(source),
     command,
-  ], [String(pingStatus), callLog])
+  ], [tenantKey, String(pingStatus), callLog])
 }
 
 function aimeInstallFunctions(source) {
@@ -198,6 +200,8 @@ function runControllerBootstrapHelper({
     aamp_host: 'https://meshmail.ai',
   },
   inputPayload,
+  helperEnv = {},
+  controllerArgs = [],
   env = {},
 }) {
   const runner = path.join(root, `controller-helper-${crypto.randomUUID()}.mjs`)
@@ -210,7 +214,7 @@ function runControllerBootstrapHelper({
   writeFileSync(runner, [
     `const controller = await import(${JSON.stringify(`${pathToFileURL(controller).href}?helper=${crypto.randomUUID()}`)})`,
     'try {',
-    `  const result = await controller.runBootstrapHelper(${JSON.stringify(action)}, ${JSON.stringify(binding)}, ${JSON.stringify(inputPayload === undefined ? {} : { AAMP_TASK_INTERNAL_BINDING_JSON: inputPayload })})`,
+    `  const result = await controller.runBootstrapHelper(${JSON.stringify(action)}, ${JSON.stringify(binding)}, ${JSON.stringify({ ...helperEnv, ...(inputPayload === undefined ? {} : { AAMP_TASK_INTERNAL_BINDING_JSON: inputPayload }) })})`,
     "  console.log(JSON.stringify({ type: 'helper.result', result }))",
     '} catch (error) {',
     "  console.error(JSON.stringify({ type: 'helper.error', message: error instanceof Error ? error.message : String(error) }))",
@@ -220,7 +224,7 @@ function runControllerBootstrapHelper({
     '}',
     '',
   ].join('\n'))
-  const result = spawnSync(process.execPath, [runner], {
+  const result = spawnSync(process.execPath, [runner, ...controllerArgs], {
     input: '',
     encoding: 'utf8',
     timeout: 20_000,
@@ -242,6 +246,49 @@ function runControllerBootstrapHelper({
     errorsLog: readFileSync(errorsLog, 'utf8'),
   }
 }
+
+test('non-interactive local bootstrap helper does not require a controlling terminal', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-local-helper-no-tty-'))
+  const helper = path.join(root, 'helper.sh')
+  writeExecutable(helper, [
+    'printf \'%s\n\' \'{"agent_type":"codex","acp_command":"codex-acp"}\' >&"$AAMP_TASK_INTERNAL_RESULT_FD"',
+  ].join('\n'))
+
+  const result = runControllerBootstrapHelper({
+    root,
+    helperBootstrap: helper,
+    binding: { agent_type: 'codex', aamp_host: 'https://meshmail.ai' },
+    helperEnv: { AAMP_TASK_NON_INTERACTIVE: 'true' },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stdout, /"agent_type":"codex"/)
+  assert.doesNotMatch(result.stderr, /交互操作需要终端|interactive input requires a terminal/)
+})
+
+test('service controller makes every local bootstrap helper non-interactive', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-service-helper-no-tty-'))
+  const helper = path.join(root, 'helper.sh')
+  writeExecutable(helper, [
+    'printf \'%s\n\' "${AAMP_TASK_NON_INTERACTIVE:-missing}" >"$SERVICE_FLAG_FILE"',
+    'printf \'%s\n\' \'{"ready":true,"lark_cli_bin":"/tmp/lark-cli"}\' >&"$AAMP_TASK_INTERNAL_RESULT_FD"',
+  ].join('\n'))
+  const serviceFlagFile = path.join(root, 'service-flag')
+
+  const result = runControllerBootstrapHelper({
+    root,
+    helperBootstrap: helper,
+    action: '__probe-profile',
+    binding: { agent_type: 'codex', aamp_host: 'https://meshmail.ai' },
+    inputPayload: '{}',
+    controllerArgs: ['__service-run'],
+    env: { SERVICE_FLAG_FILE: serviceFlagFile },
+  })
+
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(serviceFlagFile, 'utf8').trim(), 'true')
+  assert.doesNotMatch(result.stderr, /交互操作需要终端|interactive input requires a terminal/)
+})
 
 test('remote bootstrap preserves actionable failure text while redacting credentials', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'aamp-controller-remote-diagnostic-output-'))
@@ -295,68 +342,55 @@ function runAimeAuthFixture(source, { statusCode, statusKind, loginCode, doctorC
   return { ...result, calls }
 }
 
-test('AIME is discovered only when the internal host answers ping', () => {
+test('AIME discovery uses the authenticated ByteDance tenant instead of network reachability', () => {
   const source = readFileSync(bootstrap, 'utf8')
 
-  const interactive = discoveryFixture(
+  const byteDance = discoveryFixture(
     source,
-    0,
+    '736588c9260f175d',
+    1,
     'validate_agent_name aime; discover_interactive_agents; printf "%s" "${DETECTED_AGENTS[*]}"',
   )
-  assert.equal(interactive.status, 0, interactive.stderr)
-  assert.equal(interactive.stdout, 'aime')
+  assert.equal(byteDance.status, 0, byteDance.stderr)
+  assert.equal(byteDance.stdout, 'codex aime')
 
-  const internal = discoveryFixture(source, 0, 'exec 3>&1; run_internal_discover_agents')
+  const internal = discoveryFixture(
+    source,
+    '736588c9260f175d',
+    1,
+    'exec 3>&1; run_internal_discover_agents',
+  )
   assert.equal(internal.status, 0, internal.stderr)
-  assert.deepEqual(JSON.parse(internal.stdout), { agents: ['aime'] })
+  assert.deepEqual(JSON.parse(internal.stdout), { agents: ['codex', 'aime'] })
 
-  const unavailable = discoveryFixture(source, 1, 'discover_interactive_agents')
-  assert.equal(unavailable.status, 64)
-  assert.match(unavailable.stderr, /暂未检测到本地智能体/)
+  const external = discoveryFixture(
+    source,
+    'external-tenant-key',
+    0,
+    'discover_interactive_agents; printf "%s" "${DETECTED_AGENTS[*]}"',
+  )
+  assert.equal(external.status, 0, external.stderr)
+  assert.equal(external.stdout, 'codex')
 })
 
-test('explicit AIME selection fails before setup when the internal host is unreachable', () => {
+test('explicit AIME selection accepts only the authenticated ByteDance tenant', () => {
   const source = readFileSync(bootstrap, 'utf8')
-  const result = discoveryFixture(
+  const external = discoveryFixture(
     source,
+    'external-tenant-key',
+    0,
+    'validate_agent_name aime; ensure_agent_selection_available aime',
+  )
+  assert.equal(external.status, 64)
+  assert.match(external.stderr, /AIME.*字节租户/)
+
+  const byteDance = discoveryFixture(
+    source,
+    '736588c9260f175d',
     1,
     'validate_agent_name aime; ensure_agent_selection_available aime',
   )
-
-  assert.equal(result.status, 64)
-  assert.match(result.stderr, /AIME.*公司内网/)
-  assert.match(result.stderr, /aime\.bytedance\.net/)
-})
-
-test('explicit AIME entry fails before toolchain or one-click installation side effects', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'aamp-aime-entry-'))
-  const binDir = path.join(root, 'bin')
-  const sideEffectLog = path.join(root, 'side-effects.log')
-  mkdirSync(binDir)
-  writeExecutable(path.join(binDir, 'ping'), 'exit 1')
-  for (const command of ['node', 'npm', 'npx']) {
-    writeExecutable(
-      path.join(binDir, command),
-      `printf '%s\\n' ${JSON.stringify(command)} >> ${JSON.stringify(sideEffectLog)}\nexit 91`,
-    )
-  }
-
-  const result = spawnSync('bash', [bootstrap, 'install', '--agent', 'aime'], {
-    env: {
-      ...process.env,
-      HOME: root,
-      PATH: `${binDir}:/usr/bin:/bin`,
-      AAMP_TASK_AUTO_UPDATE: 'false',
-    },
-    encoding: 'utf8',
-    timeout: 10_000,
-  })
-
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /AIME.*公司内网/)
-  assert.match(result.stderr, /aime\.bytedance\.net/)
-  assert.equal(existsSync(sideEffectLog), false)
-  assert.equal(existsSync(path.join(root, '.aamp')), false)
+  assert.equal(byteDance.status, 0, byteDance.stderr)
 })
 
 test('AIME help remains side-effect light and does not ping', () => {
@@ -497,7 +531,6 @@ test('AIME preparation installs the fixed package into the isolated prefix and b
     'mkdir -p "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp" "$NPM_GLOBAL_PREFIX/bin"',
     'printf legacy > "$NPM_GLOBAL_PREFIX/lib/node_modules/aime-acp/package.json"',
     'printf legacy > "$NPM_GLOBAL_PREFIX/bin/aime-acp"',
-    'aime_internal_network_reachable() { return 0; }',
     'remote_internal_helper() { return 1; }',
     'sanitize_inherited_npm_exec_env() { :; }',
     'npm_log_indicates_cache_error() { return 1; }',
@@ -970,7 +1003,7 @@ test('bridge-only opt-in keeps the released AIME pin across outer controller and
   assert.equal(acpResult.status, 0, acpResult.stderr)
   assert.deepEqual(JSON.parse(acpResult.stdout), {
     acp: acpTgz,
-    feishu: '@luckyterry/aamp-feishu-bridge@0.1.52-dev.4',
+    feishu: '@iluolyx/aamp-feishu-bridge@0.1.52-dev.5',
     aime: '@tengchengwei/aime-acp@0.1.1-dev.1',
   })
 
@@ -993,11 +1026,12 @@ test('Task Agent controller explicitly propagates local AIME and bridge override
   const aimeTgz = path.join(root, 'aime.tgz')
   const feishuDir = path.join(root, 'feishu')
   writeExecutable(fakeNode, [
-    'printf "%s|%s|%s|%s" \\',
+    'printf "%s|%s|%s|%s|%s" \\',
     '  "$AAMP_TASK_ACP_BRIDGE_PKG" \\',
     '  "$AAMP_TASK_FEISHU_BRIDGE_PKG" \\',
     '  "$AAMP_TASK_AIME_ACP_PKG" \\',
-    '  "$AAMP_TASK_ALLOW_PACKAGE_OVERRIDES"',
+    '  "$AAMP_TASK_ALLOW_PACKAGE_OVERRIDES" \\',
+    '  "$AAMP_TASK_FOREGROUND"',
   ].join('\n'))
   writeFileSync(fakeController, '')
   writeFileSync(fakeBootstrap, '')
@@ -1024,6 +1058,7 @@ test('Task Agent controller explicitly propagates local AIME and bridge override
     'AGENT=aime',
     'AAMP_HOST=https://meshmail.ai',
     'DEBUG_MODE=false',
+    'AAMP_TASK_FOREGROUND=true',
     'NPM_REGISTRY=https://registry.npmjs.org/',
     'NPM_CACHE_DIR=/tmp/aamp-cache',
     'NPM_GLOBAL_PREFIX=/tmp/aamp-prefix',
@@ -1037,7 +1072,7 @@ test('Task Agent controller explicitly propagates local AIME and bridge override
   assert.equal(result.status, 0, result.stderr)
   assert.equal(
     result.stdout,
-    `${acpTgz}|file:${feishuDir}|${aimeTgz}|true`,
+    `${acpTgz}|file:${feishuDir}|${aimeTgz}|true|true`,
   )
 })
 
@@ -1162,9 +1197,11 @@ test('AIME initialization sends the exact remote Agent object to ACP init', asyn
     })
     const module = await import(`${pathToFileURL(controller).href}?aime-init=${Date.now()}`)
     const groups = await module.initializeAgentGroups([binding], {
-      runBootstrapHelper: async (action, candidate) => {
+      nonInteractive: true,
+      runBootstrapHelper: async (action, candidate, helperEnv) => {
         assert.equal(action, '__prepare-agent')
         assert.equal(candidate, binding)
+        assert.deepEqual(helperEnv, { AAMP_TASK_NON_INTERACTIVE: 'true' })
         return { agent_type: 'aime', acp_command: '/safe/bin/aime-acp --site cn' }
       },
     })
@@ -1239,14 +1276,16 @@ test('Feishu startup argv branches by execution metadata without leaking app sec
     '--target-agent', 'agent@meshmail.ai',
     '--app-id', 'cli_remote',
     '--bot-name', 'Remote AIME',
+    '--domain', 'https://open.feishu.cn',
     '--json',
   ])
   assert.doesNotMatch(remote.join(' '), /--use-feishu-cli|--feishu-cli-profile|--feishu-cli-bin|remote-app-secret-sentinel/)
 
   const local = module.feishuArgs(localBinding, '/safe/bin/lark-cli', target)
-  assert.deepEqual(local.slice(-10), [
+  assert.deepEqual(local.slice(-12), [
     '--app-id', 'cli_local',
     '--bot-name', 'Remote AIME',
+    '--domain', 'https://open.feishu.cn',
     '--use-feishu-cli',
     '--feishu-cli-profile', 'local-profile',
     '--feishu-cli-bin', '/safe/bin/lark-cli',
@@ -1254,6 +1293,39 @@ test('Feishu startup argv branches by execution metadata without leaking app sec
   ])
   assert.ok(local.includes('--agent-execution-location'))
   assert.equal(local[local.indexOf('--agent-execution-location') + 1], 'local')
+})
+
+test('Feishu startup argv selects the OpenAPI domain from the registered tenant brand', async () => {
+  const module = await import(pathToFileURL(controller).href)
+  const target = { agentTargetEmail: 'agent@meshmail.ai' }
+  const base = {
+    agent_type: 'aime',
+    aamp_host: 'https://meshmail.ai',
+    feishu_config_dir: '/safe/remote-feishu-config',
+    bot: {
+      app_id: 'cli_domain',
+      app_secret: 'domain-secret-sentinel',
+      display_name: 'Domain Bot',
+    },
+  }
+  const cases = [
+    ['lark', 'https://open.larksuite.com'],
+    ['feishu', 'https://open.feishu.cn'],
+    [undefined, 'https://open.feishu.cn'],
+  ]
+
+  for (const [tenantBrand, expectedDomain] of cases) {
+    const binding = {
+      ...base,
+      bot: {
+        ...base.bot,
+        ...(tenantBrand ? { tenant_brand: tenantBrand } : {}),
+      },
+    }
+    const args = module.feishuArgs(binding, '/safe/bin/lark-cli', target)
+    assert.equal(args[args.indexOf('--domain') + 1], expectedDomain, String(tenantBrand))
+    assert.doesNotMatch(args.join(' '), /domain-secret-sentinel/)
+  }
 })
 
 test('remote managed startup sanitizes real child output and uses location-aware startup copy', async () => {

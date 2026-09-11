@@ -6,7 +6,7 @@
     "README.md"
   ],
   "license": "MIT",
-  "version": "0.1.1-dev.1",
+  "version": "0.1.1-dev.7",
   "description": "One-click manager for local Agent and Feishu Bot bindings.",
   "type": "module",
   "bin": {

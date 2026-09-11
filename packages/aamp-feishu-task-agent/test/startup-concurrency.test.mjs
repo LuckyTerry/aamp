@@ -257,8 +257,9 @@ test('Agent preparation stays serial while ACP init and start are split at the o
     'async function orchestrateStartupBindings(',
     'async function dispatchStartupResult(',
   )
+  assert.match(orchestrator, /operations\.initializeAgentGroups\(\s*onlineBindings,\s*runtimeOptions,\s*\)/)
   assert.ok(
-    orchestrator.indexOf('operations.initializeAgentGroups(onlineBindings)')
+    orchestrator.indexOf('operations.initializeAgentGroups(')
       < orchestrator.indexOf('runOverlappedStartup(onlineBindings, groups, operations, profileProbes)'),
   )
 })
@@ -274,7 +275,7 @@ test('start and install share the same layered binding launcher', () => {
   assert.match(source, /const FEISHU_START_CONCURRENCY = 4/)
   assert.match(source, /async function startBindingsWithGroups\([\s\S]*?operations = bindingLauncherOperations,[\s\S]*?options = \{\},[\s\S]*?\) \{/)
   assert.match(source, /concurrency: FEISHU_START_CONCURRENCY/)
-  assert.match(source, /startSelectedBindings[\s\S]*orchestrateStartupBindings\(bindings, existingGroups\)/)
+  assert.match(source, /startSelectedBindings[\s\S]*options\.orchestrate \|\| orchestrateStartupBindings[\s\S]*orchestrate\(\s*bindings,\s*existingGroups,\s*undefined,\s*\{ nonInteractive: Boolean\(options\.serviceWorker\) \},\s*\)/)
   assert.match(source, /orchestrateStartupBindings[\s\S]*operations\.startBindingsWithGroups\(onlineBindings, groups, 'start'\)/)
   assert.match(source, /runBindingSession[\s\S]*startBindingsWithGroups\(acceptedBindings, groups, mode\)/)
   assert.match(source, /runInstall[\s\S]*reconcileStartupResults\(bound\.selectedBindings/)
@@ -366,17 +367,18 @@ test('ready execution stops its Feishu process when the running status write fai
 test('prepared startup dispatch and both callers use the shared launcher', () => {
   const dispatch = functionRange(
     'async function executePreparedBindingStart(',
-    'async function startSelectedBindings(bindings, existingGroups)',
+    'async function startSelectedBindings(bindings, existingGroups, options = {})',
   )
   assert.match(dispatch, /if \(!prepared\.pending\) return executePreparedReadyBindingStart\(prepared, operations\)/)
   assert.match(dispatch, /runPairingSerially\(pairingQueueKey\(prepared\)/)
   assert.match(dispatch, /executePreparedPendingBindingStart\(prepared, operations\)/)
 
   const start = functionRange(
-    'async function startSelectedBindings(bindings, existingGroups)',
+    'async function startSelectedBindings(bindings, existingGroups, options = {})',
     'async function markRuntimeFailed(binding, reason, component)',
   )
-  assert.match(start, /orchestrateStartupBindings\(bindings, existingGroups\)/)
+  assert.match(start, /options\.orchestrate \|\| orchestrateStartupBindings/)
+  assert.match(start, /orchestrate\(\s*bindings,\s*existingGroups,\s*undefined,\s*\{ nonInteractive: Boolean\(options\.serviceWorker\) \},\s*\)/)
   assert.match(start, /dispatchStartupResult\(result/)
   assert.doesNotMatch(start, /updateBinding|Promise\.all/)
 

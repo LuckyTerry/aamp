@@ -15,6 +15,11 @@ try {
   runtimeNetwork = undefined
 }
 
+test('controller leases use the OS process start time instead of Node runtime uptime', () => {
+  assert.match(controller, /readProcessIdentity\(process\.pid\)/)
+  assert.doesNotMatch(controller, /Date\.now\(\)\s*-\s*process\.uptime\(\)/)
+})
+
 test('network errors retain nested DNS and socket causes', () => {
   assert.equal(typeof runtimeNetwork?.describeNetworkError, 'function')
 
@@ -356,6 +361,15 @@ test('runtime session acquisition releases a lease completed after stop was requ
   const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
   const acquireBlock = controller.slice(acquireStart, acquireEnd)
   assert.match(acquireBlock, /heldLeases\.add\(lease\);\s*if \(stopRequested\) {\s*await releaseLease\(lease\);/)
+})
+
+test('duplicate runtime guidance uses lifecycle commands instead of requiring the old terminal', () => {
+  const acquireStart = controller.indexOf('async function acquireRuntimeSessionLease(action)')
+  const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
+  const acquireBlock = controller.slice(acquireStart, acquireEnd)
+  assert.match(acquireBlock, /feishu-task-agent status/)
+  assert.match(acquireBlock, /feishu-task-agent stop/)
+  assert.doesNotMatch(acquireBlock, /回到之前启动的终端|Ctrl\+C/)
 })
 
 test('install output keeps the final summary without redundant per-binding success lines', () => {

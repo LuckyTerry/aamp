@@ -4,21 +4,10 @@ import type { BridgeConfig as TaskBridgeConfig } from './task/types.js'
 export const TASK_PROFILE_FILENAME = 'task-profiles-v2.json'
 
 export const TASK_PROFILE_DOMAINS = [
-  'base',
-  'calendar',
-  'contact',
-  'docs',
-  'im',
-  'mail',
-  'mindnotes',
-  'minutes',
-  'note',
-  'sheets',
-  'slides',
   'task',
-  'vc',
-  'wiki',
 ] as const
+
+const TASK_PROFILE_DOMAIN_SET = new Set<string>(TASK_PROFILE_DOMAINS)
 
 export interface TaskProfileConfig {
   app_id: string
@@ -62,6 +51,10 @@ export function normalizeTaskProfile(input: TaskProfileInput): TaskProfileConfig
   const profile = authMode === 'lark-cli'
     ? input.profile?.trim() || resolveTaskProfileName(appId)
     : undefined
+  const requestedDomains = input.domains?.length ? input.domains : [...TASK_PROFILE_DOMAINS]
+  const domains = [...new Set(requestedDomains
+    .map((domain) => domain.trim())
+    .filter((domain) => domain && TASK_PROFILE_DOMAIN_SET.has(domain)))]
   return {
     app_id: appId,
     ...(appSecret ? { app_secret: appSecret } : {}),
@@ -69,7 +62,7 @@ export function normalizeTaskProfile(input: TaskProfileInput): TaskProfileConfig
     ...(input.display_name?.trim() ? { display_name: input.display_name.trim() } : {}),
     auth_mode: authMode,
     capabilities: [...new Set([...(input.capabilities ?? []), 'im', 'task'])] as Array<'im' | 'task'>,
-    domains: input.domains?.length ? [...new Set(input.domains.map((domain) => domain.trim()).filter(Boolean))] : [...TASK_PROFILE_DOMAINS],
+    domains: domains.length ? domains : [...TASK_PROFILE_DOMAINS],
     updated_at: input.updated_at || new Date().toISOString(),
   }
 }
