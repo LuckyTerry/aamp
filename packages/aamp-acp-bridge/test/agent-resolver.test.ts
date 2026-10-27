@@ -91,7 +91,7 @@ test('registers WorkBuddy and WorkBuddy AI as distinct canonical agents', () => 
   }
 })
 
-test('WorkBuddy products launch ACP with isolated config and no Marketplace initialization', () => {
+test('WorkBuddy products launch ACP with isolated config and no Marketplace initialization', { skip: process.platform === 'win32' ? 'macOS WorkBuddy command contract requires a POSIX shell; Windows detection remains unavailable' : false }, () => {
   const cases = [
     ['workbuddy', join(homedir(), '.workbuddy'), WORKBUDDY_APP_CLI],
     ['workbuddy_ai', join(homedir(), '.workbuddy-ai'), WORKBUDDY_AI_APP_CLI],

@@ -170,12 +170,20 @@ test('remote pending binding rejects a private pairing file outside its exact Ag
   assert.equal(harness.starts.length, 0)
 })
 
-test('remote pending binding rejects a symlinked trusted pairing file before launch', async () => {
+test('remote pending binding rejects a symlinked trusted pairing file before launch', async (t) => {
   const { pairingFile, prepared } = remotePrepared('symlinked-path')
   const symlinkTarget = path.join(root, 'outside-pairing.json')
   const externalSentinel = 'external-pairing-sentinel'
   writeFileSync(symlinkTarget, externalSentinel)
-  symlinkSync(symlinkTarget, pairingFile)
+  try {
+    symlinkSync(symlinkTarget, pairingFile)
+  } catch (error) {
+    if (process.platform === 'win32' && ['EPERM', 'EACCES'].includes(error.code)) {
+      t.skip('Windows account cannot create symlinks without Developer Mode or the symlink privilege')
+      return
+    }
+    throw error
+  }
   const harness = lifecycleOperations([{
     type: 'pairing.created',
     agent: 'aime',

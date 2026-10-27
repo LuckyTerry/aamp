@@ -375,6 +375,50 @@ test('OapiFeishuTaskClient uploads task delivery attachments through v2 attachme
   }
 })
 
+test('controlled write context reaches patch, steps, comment and multipart upload; legacy requests omit it', async () => {
+  const writes: Array<{ kind: string; data: Record<string, unknown> }> = []
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-execution-context-'))
+  const filePath = path.join(tempDir, 'result.md')
+  const client = new OapiFeishuTaskClient({ appId: 'cli_xxx', appSecret: 'secret', eventNames: [] }, {
+    logger: { log: () => {}, error: () => {} },
+  })
+  ;(client as unknown as { client: unknown }).client = {
+    domain: 'https://open.feishu.cn',
+    formatPayload: async (payload: { params: unknown; data: Record<string, unknown> }) => ({ ...payload, headers: {} }),
+    httpInstance: { request: async (payload: { data: Record<string, unknown> }) => {
+      writes.push({ kind: 'steps', data: payload.data })
+      return { data: {}, status: 200 }
+    } },
+    task: { v2: {
+      task: { patch: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'patch', data: payload.data }) } },
+      comment: { create: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'comment', data: payload.data }) } },
+      attachment: { upload: async (payload: { data: Record<string, unknown> }) => { writes.push({ kind: 'upload', data: payload.data }) } },
+    } },
+  }
+
+  try {
+    await writeFile(filePath, '# Result\n')
+    for (const context of [undefined, { executionId: 'run_1' }]) {
+      await client.markTaskInProgress('task_1', context)
+      await client.appendTextDeliveries('task_1', ['https://example.com/result'], context)
+      await client.appendTaskSteps('task_1', ['分析完成'], context)
+      await client.commentTask('task_1', '分析结果', context)
+      await client.uploadTaskDelivery('task_1', filePath, context)
+    }
+
+    assert.deepEqual(writes.map((write) => write.kind), [
+      'patch', 'patch', 'steps', 'comment', 'upload',
+      'patch', 'patch', 'steps', 'comment', 'upload',
+    ])
+    for (const write of writes.slice(0, 5)) assert.equal('execution_id' in write.data, false)
+    for (const write of writes.slice(5)) assert.equal(write.data.execution_id, 'run_1')
+    assert.equal(writes[9]?.data.resource_id, 'task_1')
+    assert.equal(typeof writes[9]?.data.file, 'object')
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})
+
 test('OapiFeishuTaskClient maps task attachments and attachment deliveries from v2 task get', async () => {
   const client = new OapiFeishuTaskClient({
     appId: 'cli_xxx',

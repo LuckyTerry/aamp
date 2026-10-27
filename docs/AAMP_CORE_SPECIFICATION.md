@@ -106,7 +106,7 @@ AAMP reserves headers for machine-readable metadata. Human-readable instructions
 | `X-AAMP-Session-Key` | `task.dispatch` | Stable conversation or routing key for runtimes that should reuse an underlying agent session across multiple task turns. |
 | `X-AAMP-Dispatch-Context` | `task.dispatch` | Percent-encoded semicolon-separated key-value pairs for portable routing or authorization context. |
 | `X-AAMP-ParentTaskId` | `task.dispatch` | Optional parent task identifier for nested workflows. |
-| `X-AAMP-Status` | `task.result`, `pair.respond` | Terminal status or pairing response status. This specification defines `completed` and `rejected`. |
+| `X-AAMP-Status` | `task.result`, `pair.respond` | Terminal status. `task.result` defines `completed`, `rejected`, and opt-in `cancelled`; `pair.respond` uses only `completed` or `rejected`. |
 | `X-AAMP-ErrorMsg` | `task.result`, `pair.respond` | Machine-readable or short human-readable rejection reason. |
 | `X-AAMP-StructuredResult` | `task.result` | Base64url-encoded UTF-8 JSON for machine-readable result payloads defined by an application profile. |
 | `X-AAMP-SuggestedOptions` | `task.help_needed` | Pipe-delimited suggested responses or next actions. |
@@ -158,12 +158,15 @@ A receiver MAY treat a follow-up dispatch in the same thread as additional instr
 
 - `completed`: The task was carried out successfully.
 - `rejected`: The task could not be accepted or could not be honorably completed as requested.
+- `cancelled`: A matching `task.cancel` stopped the task before an ordinary terminal response. This status is emitted only when `task.dispatch` opts in with `X-AAMP-Dispatch-Context: aamp_cancel_result=cancelled`; legacy dispatches retain the cancellation behavior of no `task.result`.
 
 The human-readable output or rejection explanation SHOULD appear in the body. Structured writeback data MAY be supplied in `X-AAMP-StructuredResult`.
 
 ### 6.5 task.cancel
 
 `task.cancel` withdraws a previously dispatched task. After validating that the cancellation belongs to the same task thread, the executor SHOULD suppress any later ordinary completion response if possible and SHOULD stop queued or active work when safe and practical.
+
+For an opted-in dispatch, the executor MAY answer with one `task.result` carrying `X-AAMP-Status: cancelled` after cancellation is confirmed. This result has no task output. A failed cancellation attempt MUST NOT be reported as `cancelled`.
 
 ### 6.6 pair.request
 

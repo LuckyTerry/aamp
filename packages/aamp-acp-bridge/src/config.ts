@@ -1,3 +1,4 @@
+import {missingConfigHint} from './platform-hints.js'
 import { z } from 'zod'
 import { readFileSync, existsSync } from 'node:fs'
 
@@ -113,7 +114,7 @@ export function normalizeAgentConfig(agent: AgentConfigInput): AgentConfig {
 
 export function loadConfig(path: string): BridgeConfig {
   if (!existsSync(path)) {
-    throw new Error(`Config file not found: ${path}. Run 'aamp-acp-bridge init' first.`)
+    throw new Error(missingConfigHint(path))
   }
   const raw = JSON.parse(readFileSync(path, 'utf-8'))
   const parsed = bridgeConfigSchema.parse(raw)

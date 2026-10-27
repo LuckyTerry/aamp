@@ -117,4 +117,4 @@ export type {
   PairedSenderPolicy,
 } from './pairing.js'
 
-export { AAMP_HEADER, AAMP_PROTOCOL_VERSION } from './types.js'
+export { AAMP_CANCEL_RESULT_CONTEXT_KEY, AAMP_HEADER, AAMP_PROTOCOL_VERSION } from './types.js'

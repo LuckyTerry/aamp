@@ -38,7 +38,14 @@ import type {
   FeishuTaskEvent,
   FeishuTaskEventKind,
   FeishuTaskSubscriptionState,
+  FeishuTaskWriteContext,
 } from './types.js'
+
+function taskWriteContext(taskState: BridgeTaskState, targetTaskGuid = taskState.taskGuid): FeishuTaskWriteContext | undefined {
+  if (targetTaskGuid !== taskState.taskGuid) return undefined
+  const executionId = taskState.executionId?.trim()
+  return executionId ? { executionId } : undefined
+}
 
 type Logger = Pick<Console, 'error' | 'log'>
 type LogLevel = 'debug' | 'error' | 'info'
@@ -410,6 +417,7 @@ function describeFeishuTaskSubscription(
 }
 
 type TaskResultDisposition =
+  | { kind: 'cancelled' }
   | { kind: 'succeeded'; summary: string; outputs: FeishuTaskResultOutput[] }
   | { kind: 'answered'; summary?: string; replyWritten?: boolean }
   | { kind: 'failure'; summary?: string; message: string }
@@ -567,6 +575,7 @@ function getReplyCommentOutputApplyKey(outputs: Extract<FeishuTaskResultOutput, 
 }
 
 function classifyTaskResult(result: TaskResult): TaskResultDisposition {
+  if (result.status === 'cancelled') return { kind: 'cancelled' }
   const output = result.output.trim()
   if (result.status === 'rejected') {
     return {
@@ -1658,7 +1667,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const stepsToFlush = buffer.steps.slice()
-    await this.feishu.appendTaskSteps(taskState.taskGuid, stepsToFlush.map((step) => step.content))
+    await this.feishu.appendTaskSteps(taskState.taskGuid, stepsToFlush.map((step) => step.content), taskWriteContext(taskState))
 
     const latestBuffer = this.streamStepBuffers.get(aampTaskId)
     if (latestBuffer) {
@@ -1729,7 +1738,7 @@ export class FeishuTaskBridgeRuntime {
         bridgeName: this.config.slug,
         eventKind: taskState.feishuEventKind,
         debug: this.config.behavior.debug,
-      }))
+      }), taskWriteContext(taskState))
 
       const updatedTaskState = markAckCommented(taskState, ack.taskId)
       this.state.tasks[ack.taskId] = ackCommentEventKey
@@ -1770,7 +1779,7 @@ export class FeishuTaskBridgeRuntime {
         || (help.blockedReason ?? '').trim()
         || '智能体需要更多信息才能继续处理该任务。'
       this.debugLog(`[aamp help ${help.taskId}] commenting on Feishu task ${latestTaskState.taskGuid}`)
-      await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment')
+      await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-comment', taskWriteContext(latestTaskState))
 
       const helpCommentedTaskIds = new Set(latestTaskState.helpCommentedTaskIds ?? [])
       helpCommentedTaskIds.add(help.taskId)
@@ -1812,6 +1821,22 @@ export class FeishuTaskBridgeRuntime {
 
       const disposition = classifyTaskResult(result)
       try {
+        if (disposition.kind === 'cancelled') {
+          // 当前 Feishu 接口没有停止流转；这里只记录 AAMP 的终态，不调用完成或失败写回。
+          const resultHandledTaskIds = new Set(flushedTaskState.resultHandledTaskIds ?? [])
+          resultHandledTaskIds.add(result.taskId)
+          this.state.tasks[result.taskId] = {
+            ...flushedTaskState,
+            status: 'cancelled',
+            resultHandledTaskIds: [...resultHandledTaskIds],
+            lastError: undefined,
+            updatedAt: new Date().toISOString(),
+          }
+          await this.persistState()
+          this.logger.log(`${formatTaskLogPrefix(flushedTaskState.taskGuid)} result closed aamp_task=${result.taskId} status=cancelled`)
+          return
+        }
+
         if (disposition.kind === 'answered') {
           if (disposition.replyWritten === false && disposition.summary) {
             await this.commentAnsweredResultOnce(result.taskId, flushedTaskState, disposition.summary)
@@ -1915,6 +1940,7 @@ export class FeishuTaskBridgeRuntime {
       await this.feishu.commentTask(
         (this.state.tasks[aampTaskId] ?? latestTaskState).taskGuid,
         buildFeishuWriteFailureNotice(error, completionError),
+        taskWriteContext(this.state.tasks[aampTaskId] ?? latestTaskState),
       )
     } catch (caughtError) {
       commentError = caughtError
@@ -2007,11 +2033,11 @@ export class FeishuTaskBridgeRuntime {
 
     const latestTaskState = this.state.tasks[aampTaskId] ?? taskState
     if (output.kind === 'link_delivery') {
-      await this.feishu.appendTextDeliveries(latestTaskState.taskGuid, [output.url])
+      await this.feishu.appendTextDeliveries(latestTaskState.taskGuid, [output.url], taskWriteContext(latestTaskState))
     } else if (output.kind === 'file_delivery') {
-      await this.uploadFileDelivery(latestTaskState.taskGuid, output.path)
+      await this.uploadFileDelivery(latestTaskState.taskGuid, output.path, taskWriteContext(latestTaskState))
     } else {
-      await this.uploadTextDelivery(latestTaskState.taskGuid, output)
+      await this.uploadTextDelivery(latestTaskState.taskGuid, output, taskWriteContext(latestTaskState))
     }
     await this.markResultOutputApplied(aampTaskId, latestTaskState, outputKey)
   }
@@ -2057,7 +2083,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting reply output on Feishu task ${latestTaskState.taskGuid}`)
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, content, 'reply-comment')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, content, 'reply-comment', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2073,9 +2099,9 @@ export class FeishuTaskBridgeRuntime {
     this.debugLog(`[aamp result ${aampTaskId}] commented reply output on Feishu task ${latestTaskState.taskGuid}`)
   }
 
-  private async uploadFileDelivery(taskGuid: string, filePath: string): Promise<void> {
+  private async uploadFileDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void> {
     await this.validateFileDeliveryPath(filePath)
-    await this.feishu.uploadTaskDelivery(taskGuid, filePath)
+    await this.feishu.uploadTaskDelivery(taskGuid, filePath, context)
   }
 
   private async validateFileDeliveryPath(filePath: string): Promise<void> {
@@ -2099,6 +2125,7 @@ export class FeishuTaskBridgeRuntime {
   private async uploadTextDelivery(
     taskGuid: string,
     output: Extract<FeishuTaskResultOutput, { kind: 'text_delivery' }>,
+    context?: FeishuTaskWriteContext,
   ): Promise<void> {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-delivery-'))
     const extension = output.format === 'plain_text' ? '.txt' : '.md'
@@ -2106,15 +2133,15 @@ export class FeishuTaskBridgeRuntime {
     const filePath = path.join(tempDir, fileName)
     try {
       await writeFile(filePath, output.content, 'utf8')
-      await this.feishu.uploadTaskDelivery(taskGuid, filePath)
+      await this.feishu.uploadTaskDelivery(taskGuid, filePath, context)
     } finally {
       await rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
   }
 
-  private async commentTaskOrUploadFallback(taskGuid: string, content: string, fallbackTitle: string): Promise<void> {
+  private async commentTaskOrUploadFallback(taskGuid: string, content: string, fallbackTitle: string, context?: FeishuTaskWriteContext): Promise<void> {
     if (isFeishuCommentWithinLimit(content)) {
-      await this.feishu.commentTask(taskGuid, content)
+      await this.feishu.commentTask(taskGuid, content, context)
       return
     }
 
@@ -2123,8 +2150,8 @@ export class FeishuTaskBridgeRuntime {
       title: fallbackTitle,
       format: 'markdown',
       content,
-    })
-    await this.feishu.commentTask(taskGuid, buildOversizedCommentDeliveryNotice(content))
+    }, context)
+    await this.feishu.commentTask(taskGuid, buildOversizedCommentDeliveryNotice(content), context)
   }
 
   private async commentHelpNeededOnce(aampTaskId: string, taskState: BridgeTaskState, message: string): Promise<void> {
@@ -2140,7 +2167,7 @@ export class FeishuTaskBridgeRuntime {
       message,
     ].join('\n')
     this.debugLog(`[aamp result ${aampTaskId}] commenting help-needed on Feishu task ${latestTaskState.taskGuid}`)
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'help-needed-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2161,7 +2188,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting answered result on Feishu task ${latestTaskState.taskGuid}`)
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, summary, 'answered-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2191,7 +2218,7 @@ export class FeishuTaskBridgeRuntime {
     ].join('\n')
 
     this.debugLog(`[aamp result ${aampTaskId}] commenting result on Feishu task ${latestTaskState.taskGuid}`)
-    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'failed-result')
+    await this.commentTaskOrUploadFallback(latestTaskState.taskGuid, comment, 'failed-result', taskWriteContext(latestTaskState))
 
     const resultCommentedTaskIds = new Set(latestTaskState.resultCommentedTaskIds ?? [])
     resultCommentedTaskIds.add(aampTaskId)
@@ -2234,7 +2261,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuInProgressInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] marking in progress for ${aampTaskId}`)
-      await this.feishu.markTaskInProgress(taskGuid)
+      await this.feishu.markTaskInProgress(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuInProgressTaskIds = new Set(latestTaskState.feishuInProgressTaskIds ?? [])
       feishuInProgressTaskIds.add(taskGuid)
@@ -2275,7 +2302,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuCompleteInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] completing for ${aampTaskId}`)
-      await this.feishu.completeTask(taskGuid)
+      await this.feishu.completeTask(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuCompletedTaskIds = new Set(latestTaskState.feishuCompletedTaskIds ?? [])
       feishuCompletedTaskIds.add(taskGuid)
@@ -2316,7 +2343,7 @@ export class FeishuTaskBridgeRuntime {
     this.feishuBlockInFlight.add(inFlightKey)
     try {
       this.debugLog(`[feishu task ${taskGuid}] marking blocked for ${aampTaskId}`)
-      await this.feishu.markTaskWaitingForHuman(taskGuid)
+      await this.feishu.markTaskWaitingForHuman(taskGuid, taskWriteContext(latestTaskState, taskGuid))
 
       const feishuBlockedTaskIds = new Set(latestTaskState.feishuBlockedTaskIds ?? [])
       feishuBlockedTaskIds.add(taskGuid)
@@ -2337,7 +2364,7 @@ export class FeishuTaskBridgeRuntime {
     const now = Date.now()
     let prunedCount = 0
     const terminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed')
+      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
 
     for (const [aampTaskId, taskState] of terminalTasks) {
       const updatedAt = Date.parse(taskState.updatedAt)
@@ -2352,7 +2379,7 @@ export class FeishuTaskBridgeRuntime {
     }
 
     const remainingTerminalTasks = Object.entries(this.state.tasks)
-      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed')
+      .filter(([, taskState]) => taskState.status === 'completed' || taskState.status === 'failed' || taskState.status === 'help_needed' || taskState.status === 'cancelled')
       .sort((a, b) => a[1].updatedAt.localeCompare(b[1].updatedAt))
     const overflow = remainingTerminalTasks.length - MAX_RETAINED_TERMINAL_TASKS
     if (overflow > 0) {

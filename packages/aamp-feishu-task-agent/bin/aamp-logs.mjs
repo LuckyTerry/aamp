@@ -1,10 +1,13 @@
 #!/usr/bin/env node
+import {cliName} from './platform-hints.mjs'
+import { followWindowsLogFiles } from './windows-log-tail.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   statSync,
@@ -12,6 +15,7 @@ import {
 } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const SENSITIVE_KEY_PATTERN = [
   'secret',
@@ -35,19 +39,19 @@ const FEISHU_TASK_ID_PREFIX = 'feishu-task-'
 function usage(exitCode = 0) {
   const stream = exitCode === 0 ? process.stdout : process.stderr
   stream.write(`Usage:
-  aamp-logs --version
-  aamp-logs collect --task-id <task-id>
-  aamp-logs collect --task-guid <task-guid>
-  aamp-logs collect --run-dir <run-dir>
-  aamp-logs collect --latest
-  aamp-logs collect --since <duration>
-  aamp-logs list-runs
-  aamp-logs tail --task-id <task-id>
-  aamp-logs tail --task-guid <task-guid>
-  aamp-logs tail -f [--task-id <task-id>|--task-guid <task-guid>|<task-id>]
+  ${cliName('aamp-logs')} --version
+  ${cliName('aamp-logs')} collect --task-id <task-id>
+  ${cliName('aamp-logs')} collect --task-guid <task-guid>
+  ${cliName('aamp-logs')} collect --run-dir <run-dir>
+  ${cliName('aamp-logs')} collect --latest
+  ${cliName('aamp-logs')} collect --since <duration>
+  ${cliName('aamp-logs')} list-runs
+  ${cliName('aamp-logs')} tail --task-id <task-id>
+  ${cliName('aamp-logs')} tail --task-guid <task-guid>
+  ${cliName('aamp-logs')} tail -f [--task-id <task-id>|--task-guid <task-guid>|<task-id>]
 
 Options:
-  --log-dir <dir>          Override AAMP log root. Defaults to AAMP_LOG_DIR or ~/.aamp/logs.
+  --log-dir <dir>          Override AAMP log root. Defaults to AAMP_LOG_DIR or ${process.platform === 'win32' ? path.join(os.homedir(), '.aamp', 'logs') : '~/.aamp/logs'}.
   --include-content        Include full matching run logs instead of matching fragments only.
   -f, --follow             Follow new log lines in real time. Without a selector, follows the latest run.
   -h, --help               Show this help.
@@ -264,7 +268,10 @@ function selectRuns(logRoot, options, matchValues) {
 }
 
 function ensureArchiveDir() {
-  const archiveDir = path.join(os.homedir(), 'Desktop')
+  const archiveDir = process.platform === 'win32'
+    ? execFileSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); [Environment]::GetFolderPath('Desktop')"], {encoding:'utf8',windowsHide:true,timeout:10000}).trim()
+    : path.join(os.homedir(), 'Desktop')
+  if (!archiveDir) throw new Error('Unable to resolve Desktop directory')
   mkdirSync(archiveDir, { recursive: true })
   return archiveDir
 }
@@ -342,7 +349,7 @@ function copyFilteredRun(runDir, targetDir, matchValues, includeWholeRun) {
   }
 }
 
-function createArchive(options, runDirs, taskIds, matchValues) {
+function createArchive(options, runDirs, taskIds, matchValues, archiveDirectory = ensureArchiveDir) {
   if (runDirs.length === 0) {
     throw new Error('No matching log runs found')
   }
@@ -359,14 +366,15 @@ function createArchive(options, runDirs, taskIds, matchValues) {
   writeReadme(path.join(bundleDir, 'README.txt'), options, runDirs, taskIds)
   writeBundleManifest(path.join(bundleDir, 'manifest.json'), options, runDirs, taskIds, matchValues)
 
-  const archiveDir = ensureArchiveDir()
+  const archiveDir = archiveDirectory()
+  mkdirSync(archiveDir, {recursive:true})
   const archivePath = path.join(archiveDir, `${bundleName}.tar.gz`)
-  execFileSync('tar', ['-czf', archivePath, '-C', stageRoot, bundleName])
+  execFileSync(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-czf', archivePath, '-C', stageRoot, bundleName])
   rmSync(stageRoot, { recursive: true, force: true })
   return archivePath
 }
 
-function collect(options) {
+function collect(options, archiveDirectory) {
   const logRoot = resolveLogRoot(options)
   let taskIds = []
   if (options.task_id) taskIds = [options.task_id]
@@ -385,7 +393,7 @@ function collect(options) {
   }
 
   const runDirs = selectRuns(logRoot, options, matchValues)
-  const archivePath = createArchive(options, runDirs, taskIds, matchValues)
+  const archivePath = createArchive(options, runDirs, taskIds, matchValues, archiveDirectory)
   process.stdout.write(`Created local logs bundle:\n${archivePath}\n`)
 }
 
@@ -440,6 +448,16 @@ function selectFollowRunDirs(logRoot, matchValues) {
 function followTailFiles(runDirs, matchValues) {
   const files = runDirs.flatMap((runDir) => textFiles(runDir).map((file) => ({ runDir, file })))
   if (files.length === 0) throw new Error('No log files found to follow')
+  if (process.platform === 'win32') {
+    const runForFile = new Map(files.map(({file,runDir}) => [file,runDir]))
+    const stop = followWindowsLogFiles(files.map(({file}) => file), (file,line) => {
+      if (!line || (matchValues.length && !lineHasAny(line,matchValues))) return
+      process.stdout.write(`${formatTailLine(runForFile.get(file),file,line)}\n`)
+    })
+    for (const signal of ['SIGINT','SIGTERM']) process.once(signal,()=>{stop();process.exit(0)})
+    return
+  }
+
 
   const children = []
   let liveChildren = files.length
@@ -493,15 +511,14 @@ function tail(options) {
   writeMatchingTailLines(listRunDirs(logRoot), matchValues)
 }
 
-function main() {
-  const args = process.argv.slice(2)
+export function main(args = process.argv.slice(2), {archiveDirectory = ensureArchiveDir} = {}) {
   if (args.length === 1 && (args[0] === '--version' || args[0] === '-v')) {
     process.stdout.write(`${packageVersion()}\n`)
     return
   }
   const options = parseArgs(args)
   if (options.command === 'collect') {
-    collect(options)
+    collect(options, archiveDirectory)
     return
   }
   if (options.command === 'list-runs') {
@@ -515,7 +532,9 @@ function main() {
   throw new Error(`Unknown command: ${options.command}`)
 }
 
-try {
+let isMain = false
+try { isMain = Boolean(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)) } catch {}
+if (isMain) try {
   main()
 } catch (error) {
   process.stderr.write(`aamp-logs: ${(error instanceof Error ? error.message : String(error))}\n`)

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+import {pathToFileURL} from 'node:url'
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import {
@@ -68,8 +70,11 @@ function makeFixture() {
 
 function runCli(args, logsRoot) {
   const homeDir = path.dirname(logsRoot)
-  return execFileSync(process.execPath, [bin, ...args], {
-    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir },
+  const commandArgs = process.platform === 'win32' && args[0] === 'collect'
+    ? ['--input-type=module','-e',`import {main} from ${JSON.stringify(pathToFileURL(bin).href)}; main(${JSON.stringify(args)}, {archiveDirectory:()=>${JSON.stringify(path.join(homeDir,'Desktop'))}});`]
+    : [bin, ...args]
+  return execFileSync(process.execPath, commandArgs, {
+    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir, USERPROFILE: homeDir },
     encoding: 'utf8',
   })
 }
@@ -83,40 +88,61 @@ test('prints the owning task-agent package version', () => {
 function spawnCli(args, logsRoot) {
   const homeDir = path.dirname(logsRoot)
   return spawn(process.execPath, [bin, ...args], {
-    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir },
+    env: { ...process.env, AAMP_LOG_DIR: logsRoot, HOME: homeDir, USERPROFILE: homeDir },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
 }
 
-function waitForOutput(child, pattern, timeoutMs = 2000) {
+function waitForOutput(child, pattern, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
     let stdout = ''
     let stderr = ''
+    const finish = (error) => {
+      clearTimeout(timer)
+      child.stdout.off('data', onOutput)
+      child.stderr.off('data', onErrorOutput)
+      child.off('exit', onExit)
+      if (error) reject(error)
+      else resolve(stdout)
+    }
+    const onOutput = (chunk) => {
+      stdout += chunk
+      if (pattern.test(stdout)) finish()
+    }
+    const onErrorOutput = (chunk) => { stderr += chunk }
+    const onExit = (code) => finish(new Error(`Process exited before matching ${pattern}. code=${code} stdout=${stdout} stderr=${stderr}`))
     const timer = setTimeout(() => {
-      reject(new Error(`Timed out waiting for ${pattern}. stdout=${stdout} stderr=${stderr}`))
+      finish(new Error(`Timed out waiting for ${pattern}. stdout=${stdout} stderr=${stderr}`))
     }, timeoutMs)
     child.stdout.setEncoding('utf8')
     child.stderr.setEncoding('utf8')
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk
-      if (pattern.test(stdout)) {
-        clearTimeout(timer)
-        resolve(stdout)
-      }
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      reject(new Error(`Process exited before matching ${pattern}. code=${code} stdout=${stdout} stderr=${stderr}`))
-    })
+    child.stdout.on('data', onOutput)
+    child.stderr.on('data', onErrorOutput)
+    child.on('exit', onExit)
   })
+}
+
+async function waitForLiveFollower(child, appendMarker) {
+  // The first echo could come from the CLI's initial history read. A new second
+  // round starts only after that echo, so only the live follower can acknowledge it.
+  for (let round = 0; round < 2; round++) {
+    const marker = `follower-ready-${randomUUID()}`
+    let sequence = 0
+    const echoed = waitForOutput(child, new RegExp(marker))
+    const append = () => appendMarker(`${marker}-${sequence++}`)
+    const timer = setInterval(append, 50)
+    try {
+      append()
+      await echoed
+    } finally {
+      clearInterval(timer)
+    }
+  }
 }
 
 function extractArchive(archivePath) {
   const outDir = mkdtempSync(path.join(tmpdir(), 'aamp-logs-extract-'))
-  execFileSync('tar', ['-xzf', archivePath, '-C', outDir])
+  execFileSync(process.platform === 'win32' ? 'tar.exe' : 'tar', ['-xzf', archivePath, '-C', outDir])
   return outDir
 }
 
@@ -298,17 +324,21 @@ test('tail -f --task-guid follows matching live lines', async () => {
   const child = spawnCli(['tail', '-f', '--task-guid', 'guid2'], logsRoot)
 
   try {
-    setTimeout(() => {
+    await waitForLiveFollower(child, marker => {
       appendFileSync(file, `${JSON.stringify({
-        level: 'info',
-        task_id: 'feishu-task-guid2-evt2',
-        task_guid: 'guid2',
-        msg: 'live task update',
-        access_token: 'live-token',
+        level: 'info', task_id: 'feishu-task-guid2-evt2', task_guid: 'guid2', msg: marker,
       })}\n`)
-    }, 150)
+    })
+    const received = waitForOutput(child, /live task update/)
+    appendFileSync(file, `${JSON.stringify({
+      level: 'info',
+      task_id: 'feishu-task-guid2-evt2',
+      task_guid: 'guid2',
+      msg: 'live task update',
+      access_token: 'live-token',
+    })}\n`)
 
-    const output = await waitForOutput(child, /live task update/)
+    const output = await received
     assert.match(output, /20260708T163012-67890\/feishu-bridge\.jsonl/)
     assert.doesNotMatch(output, /live-token/)
     assert.match(output, /<redacted>/)
@@ -323,11 +353,11 @@ test('tail -f without selector follows latest run live lines', async () => {
   const child = spawnCli(['tail', '-f'], logsRoot)
 
   try {
-    setTimeout(() => {
-      appendFileSync(file, 'latest run live line\n')
-    }, 150)
+    await waitForLiveFollower(child, marker => appendFileSync(file, `${marker}\n`))
+    const received = waitForOutput(child, /latest run live line/)
+    appendFileSync(file, 'latest run live line\n')
 
-    const output = await waitForOutput(child, /latest run live line/)
+    const output = await received
     assert.match(output, /20260708T163012-67890\/one-click\.log/)
     assert.doesNotMatch(output, /20260708T153012-12345/)
   } finally {

@@ -22,6 +22,7 @@ import type {
   FeishuTaskClient,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskWriteContext,
 } from './types.js'
 
 type AckHandler = (ack: TaskAck) => void
@@ -194,6 +195,11 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
   pointComments: Record<string, NonNullable<FeishuTaskDetails['comments']>[number]> = {}
   downloadedAttachments: Record<string, { content: Buffer; contentType?: string; attachment?: Partial<FeishuTaskAttachment> }> = {}
   appOwner: { ownerId: string } | null = { ownerId: 'ou_human' }
+  writes: Array<{ method: string; taskGuid: string; executionId?: string }> = []
+
+  private recordWrite(method: string, taskGuid: string, context?: FeishuTaskWriteContext): void {
+    this.writes.push({ method, taskGuid, executionId: context?.executionId })
+  }
 
   async start(onEvent: (event: FeishuTaskEvent) => Promise<void>): Promise<void> {
     this.lifecycle.push('start')
@@ -270,7 +276,8 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     }
   }
 
-  async commentTask(taskGuid: string, content: string): Promise<void> {
+  async commentTask(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('commentTask', taskGuid, context)
     if (this.commentTaskDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.commentTaskDelayMs))
     }
@@ -281,7 +288,8 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.comments.push({ taskGuid, content })
   }
 
-  async completeTask(taskGuid: string): Promise<void> {
+  async completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('completeTask', taskGuid, context)
     if (this.completeFailures > 0) {
       this.completeFailures -= 1
       throw new Error('complete failed')
@@ -289,7 +297,8 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.completedTaskGuids.push(taskGuid)
   }
 
-  async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
+  async markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('markTaskWaitingForHuman', taskGuid, context)
     if (this.blockFailures > 0) {
       this.blockFailures -= 1
       throw new Error('block failed')
@@ -297,11 +306,12 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.blockedTaskGuids.push(taskGuid)
   }
 
-  async appendTaskStep(taskGuid: string, content: string): Promise<void> {
-    await this.appendTaskSteps(taskGuid, [content])
+  async appendTaskStep(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
+    await this.appendTaskSteps(taskGuid, [content], context)
   }
 
-  async appendTaskSteps(taskGuid: string, contents: string[]): Promise<void> {
+  async appendTaskSteps(taskGuid: string, contents: string[], context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('appendTaskSteps', taskGuid, context)
     if (this.stepFailures > 0) {
       this.stepFailures -= 1
       throw new Error('append step failed')
@@ -310,7 +320,8 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.steps.push(...contents.map((content) => ({ taskGuid, content })))
   }
 
-  async appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void> {
+  async appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('appendTextDeliveries', taskGuid, context)
     if (this.textDeliveryFailures > 0) {
       this.textDeliveryFailures -= 1
       throw Object.assign(new Error('temporary text delivery failure'), { response: { status: 500 } })
@@ -318,12 +329,14 @@ class FakeFeishuTaskClient implements FeishuTaskClient {
     this.textDeliveries.push({ taskGuid, urls })
   }
 
-  async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
+  async uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('uploadTaskDelivery', taskGuid, context)
     this.uploadedDeliveries.push({ taskGuid, filePath })
     this.uploadedDeliveryContents.push(await readFile(filePath, 'utf8'))
   }
 
-  async markTaskInProgress(taskGuid: string): Promise<void> {
+  async markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
+    this.recordWrite('markTaskInProgress', taskGuid, context)
     this.inProgressTaskGuids.push(taskGuid)
   }
 
@@ -3598,6 +3611,128 @@ test('runtime comments rejected task.result error and completes the Feishu task'
     assert.equal(fakeFeishu.comments.length, 1)
     assert.match(fakeFeishu.comments[0]?.content ?? '', /ACP agent error: Internal error/)
     assert.deepEqual(fakeFeishu.completedTaskGuids, ['task_guid_rejected'])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime records cancelled result as stopped without completing or commenting on the Feishu task', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const taskId = 'feishu-task-task_guid_cancelled-evt_cancelled'
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_cancelled',
+      taskGuid: 'task_guid_cancelled',
+      eventTypes: ['task_create'],
+      timestamp: '1775793266157',
+    })
+
+    fakeAamp.emitResult(taskId, { status: 'cancelled' })
+    await waitFor(() => assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'cancelled'))
+    assert.deepEqual(runtime.getStateSnapshot().tasks[taskId]?.resultHandledTaskIds, [taskId])
+    assert.equal(runtime.getStateSnapshot().tasks[taskId]?.lastError, undefined)
+    assert.deepEqual(fakeFeishu.comments, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+    assert.deepEqual(fakeFeishu.blockedTaskGuids, [])
+    assert.equal((await loadBridgeState(configDir)).tasks[taskId]?.status, 'cancelled')
+
+    fakeAamp.emitResult(taskId, { status: 'completed', output: 'late result' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(runtime.getStateSnapshot().tasks[taskId]?.status, 'cancelled')
+    assert.deepEqual(fakeFeishu.comments, [])
+    assert.deepEqual(fakeFeishu.completedTaskGuids, [])
+  } finally {
+    await runtime.stop()
+    await rm(configDir, { recursive: true, force: true })
+  }
+})
+
+test('runtime passes a controlled execution ID to parent writes only', async () => {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), 'aamp-feishu-task-bridge-'))
+  const fakeAamp = new FakeAampClient()
+  const fakeFeishu = new FakeFeishuTaskClient()
+  const taskGuid = 'task_guid_controlled_writes'
+  const childTaskGuid = 'child_guid_controlled_writes'
+  fakeFeishu.tasks[taskGuid] = {
+    guid: taskGuid,
+    taskId: 't_controlled_writes',
+    summary: '整理交付物',
+    status: 'todo',
+    subtasks: [{ guid: childTaskGuid, summary: '检查交付物', status: 'todo' }],
+  }
+  const runtime = new FeishuTaskBridgeRuntime(buildConfig(), {
+    configDir,
+    aampClient: fakeAamp,
+    feishuClient: fakeFeishu,
+    logger: { log: () => {}, error: () => {} },
+  })
+  const aampTaskId = `feishu-task-${taskGuid}-evt_controlled_writes`
+
+  try {
+    await runtime.start()
+    await fakeFeishu.emit({
+      eventId: 'evt_controlled_writes',
+      taskGuid,
+      eventTypes: ['task_create'],
+      timestamp: '1775793266157',
+    })
+
+    // The controlled START event is not defined yet; seed only its already-known execution context.
+    const taskState = (runtime as unknown as { state: { tasks: Record<string, { executionId?: string }> } }).state.tasks[aampTaskId]
+    assert.ok(taskState)
+    assert.equal(taskState.executionId, undefined)
+    taskState.executionId = 'execution_1'
+
+    fakeAamp.emitAck(aampTaskId)
+    await waitFor(() => assert.ok(fakeFeishu.writes.some((write) => write.method === 'commentTask')))
+
+    fakeAamp.emitStreamOpened(aampTaskId, 'stream_controlled_writes')
+    await waitFor(() => assert.ok(fakeAamp.streamHandlers.stream_controlled_writes))
+    for (let index = 0; index < 4; index += 1) {
+      fakeAamp.emitStreamEvent('stream_controlled_writes', {
+        id: `controlled_step_${index}`,
+        taskId: aampTaskId,
+        seq: index + 1,
+        type: 'status',
+        payload: { label: `执行步骤 ${index + 1}` },
+      })
+    }
+    await waitFor(() => assert.ok(fakeFeishu.writes.some((write) => write.method === 'markTaskInProgress' && write.taskGuid === childTaskGuid)))
+    await waitFor(() => assert.ok(fakeFeishu.writes.some((write) => write.method === 'appendTaskSteps')))
+
+    fakeAamp.emitResult(aampTaskId, {
+      output: `FEISHU_TASK_RESULT_JSON: ${JSON.stringify({
+        schema: 'feishu_task_result.v2',
+        status: 'succeeded',
+        summary: '已完成交付。',
+        outputs: [
+          { kind: 'reply_comment', content: '交付物已完成。' },
+          { kind: 'link_delivery', url: 'https://example.com/result' },
+          { kind: 'text_delivery', title: '报告', format: 'markdown', content: '# 报告' },
+        ],
+      })}`,
+    })
+    await waitFor(() => assert.deepEqual(fakeFeishu.completedTaskGuids, [childTaskGuid, taskGuid]))
+
+    const parentWrites = fakeFeishu.writes.filter((write) => write.taskGuid === taskGuid)
+    for (const method of ['commentTask', 'appendTaskSteps', 'appendTextDeliveries', 'uploadTaskDelivery', 'markTaskInProgress', 'completeTask']) {
+      assert.ok(parentWrites.some((write) => write.method === method), `missing ${method}`)
+    }
+    assert.ok(parentWrites.every((write) => write.executionId === 'execution_1'))
+    const childWrites = fakeFeishu.writes.filter((write) => write.taskGuid === childTaskGuid)
+    assert.deepEqual(childWrites.map((write) => write.method), ['markTaskInProgress', 'completeTask'])
+    assert.ok(childWrites.every((write) => write.executionId === undefined))
   } finally {
     await runtime.stop()
     await rm(configDir, { recursive: true, force: true })

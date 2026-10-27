@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -8,6 +8,7 @@ import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
 import type { BridgeConfig, BridgeState } from './types.js'
 import { resolveFeishuCliCredentials } from './feishu-cli.js'
+import { renameAtomic } from './rename-atomic.js'
 
 const CONFIG_FILENAME = 'config.json'
 const STATE_FILENAME = 'state.json'
@@ -54,7 +55,7 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
   await mkdir(parentDir, { recursive: true })
   const tempPath = path.join(parentDir, `.${path.basename(filePath)}.${randomUUID()}.tmp`)
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  await rename(tempPath, filePath)
+  await renameAtomic(tempPath, filePath)
 }
 
 export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig | null> {

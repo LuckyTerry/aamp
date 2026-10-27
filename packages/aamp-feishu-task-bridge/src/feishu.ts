@@ -17,6 +17,7 @@ import type {
   FeishuTaskComment,
   FeishuTaskDetails,
   FeishuTaskEvent,
+  FeishuTaskWriteContext,
   FeishuTaskOrigin,
   FeishuTaskOriginReferResource,
   FeishuTaskOriginSourceMessage,
@@ -32,7 +33,13 @@ type TaskStepPayload = {
   data: {
     task_guid: string
     task_steps: Array<{ quote: string; content: string; timestamp: number }>
+    execution_id?: string
   }
+}
+
+function executionIdData(context?: FeishuTaskWriteContext): { execution_id?: string } {
+  const executionId = context?.executionId.trim()
+  return executionId ? { execution_id: executionId } : {}
 }
 type RegisterAgentPayload = {
   params: Record<string, never>
@@ -555,41 +562,41 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     }
   }
 
-  async commentTask(taskGuid: string, content: string): Promise<void> {
+  async commentTask(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
-    await this.commentV2Task(taskGuid, normalizedContent)
+    await this.commentV2Task(taskGuid, normalizedContent, context)
   }
 
-  async appendTaskStep(taskGuid: string, content: string): Promise<void> {
+  async appendTaskStep(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
     if (!content.trim()) return
     this.logger.log(`[feishu task ${taskGuid}] append step via v2`)
-    await this.appendV2TaskSteps(taskGuid, [content])
+    await this.appendV2TaskSteps(taskGuid, [content], context)
   }
 
-  async appendTaskSteps(taskGuid: string, contents: string[]): Promise<void> {
+  async appendTaskSteps(taskGuid: string, contents: string[], context?: FeishuTaskWriteContext): Promise<void> {
     const stepContents = contents.filter((content) => content.trim())
     if (stepContents.length === 0) return
     this.logger.log(`[feishu task ${taskGuid}] append ${stepContents.length} step(s) via v2`)
-    await this.appendV2TaskSteps(taskGuid, stepContents)
+    await this.appendV2TaskSteps(taskGuid, stepContents, context)
   }
 
-  async completeTask(taskGuid: string): Promise<void> {
+  async completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] complete via v2 agent_task_status`)
-    await this.completeV2AgentTask(taskGuid)
+    await this.completeV2AgentTask(taskGuid, context)
   }
 
-  async markTaskInProgress(taskGuid: string): Promise<void> {
+  async markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] mark in progress via v2 agent_task_status`)
-    await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行')
+    await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行', context)
   }
 
-  async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
+  async markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] block via v2 agent_task_status`)
-    await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认')
+    await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认', context)
   }
 
-  async appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void> {
+  async appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void> {
     const textDeliveries = urls
       .map((url) => normalizeFeishuWriteText(url).trim())
       .filter(Boolean)
@@ -601,11 +608,12 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       data: {
         task: { text_deliveries: textDeliveries },
         update_fields: ['text_deliveries'],
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `task.patch text_deliveries task=${taskGuid}`)
   }
 
-  async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
+  async uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] upload task delivery via v2 attachment`)
     await withRetry(() => this.client.task.v2.attachment.upload({
       params: { user_id_type: this.config.userIdType },
@@ -613,7 +621,8 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
         resource_type: 'task_delivery',
         resource_id: taskGuid,
         file: createReadStream(filePath),
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `attachment.upload task=${taskGuid}`)
   }
 
@@ -657,24 +666,26 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     return mapped
   }
 
-  private async commentV2Task(taskGuid: string, content: string): Promise<void> {
+  private async commentV2Task(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
     await withRetry(() => this.client.task.v2.comment.create({
       params: { user_id_type: this.config.userIdType },
       data: {
         content,
         resource_type: 'task',
         resource_id: taskGuid,
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `comment.create task=${taskGuid}`)
   }
 
-  private async appendV2TaskSteps(taskGuid: string, contents: string[]): Promise<void> {
+  private async appendV2TaskSteps(taskGuid: string, contents: string[], context?: FeishuTaskWriteContext): Promise<void> {
     const timestamp = Math.floor(Date.now() / 1000)
     const payload: TaskStepPayload = {
       params: { user_id_type: this.config.userIdType },
       data: {
         task_guid: taskGuid,
         task_steps: contents.map((content) => ({ quote: '', content, timestamp })),
+        ...executionIdData(context),
       },
     }
 
@@ -741,11 +752,11 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     }), this.retry, this.logger, 'task_subscription')
   }
 
-  private async completeV2AgentTask(taskGuid: string): Promise<void> {
-    await this.patchV2AgentTaskStatus(taskGuid, 4, '执行完成')
+  private async completeV2AgentTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
+    await this.patchV2AgentTaskStatus(taskGuid, 4, '执行完成', context)
   }
 
-  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number, agentTaskProgress?: string): Promise<void> {
+  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number, agentTaskProgress?: string, context?: FeishuTaskWriteContext): Promise<void> {
     const task = {
       agent_task_status: agentTaskStatus,
       ...(agentTaskProgress ? { agent_task_progress: agentTaskProgress } : {}),
@@ -760,7 +771,8 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       data: {
         task,
         update_fields: updateFields,
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `task.patch agent_task_status task=${taskGuid}`)
   }
 

@@ -1,3 +1,4 @@
+import { assertPrivateFile } from './private-json-test-support.js'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
@@ -42,22 +43,7 @@ test('normalizeTaskProfile derives lark-cli profile config', () => {
     display_name: '飞书 CLI',
     auth_mode: 'lark-cli',
     capabilities: ['im', 'task'],
-    domains: [
-      'base',
-      'calendar',
-      'contact',
-      'docs',
-      'im',
-      'mail',
-      'mindnotes',
-      'minutes',
-      'note',
-      'sheets',
-      'slides',
-      'task',
-      'vc',
-      'wiki',
-    ],
+    domains: ['task'],
     updated_at: profile.updated_at,
   })
   assert.match(profile.updated_at, /^\d{4}-\d{2}-\d{2}T/)
@@ -240,12 +226,13 @@ test('normalizeTaskRuntimeBotForExecution converts saved lark-cli selection with
   })
 })
 
-test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark-cli and with mode 0600', async () => {
+test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark-cli and with private permissions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-'))
   const agentEmail = 'aime@meshmail.test'
   const appId = 'cli_remote'
   const instanceId = `aime-${createHash('sha256').update(agentEmail).digest('hex').slice(0, 8)}-cli-remote`
   const imDir = join(root, 'task-runtime', 'instances', instanceId, 'im')
+  const taskDir = join(root, 'task-runtime', 'instances', instanceId, 'task')
   const mailbox = {
     email: 'bridge@meshmail.test',
     mailboxToken: 'mailbox-token',
@@ -254,6 +241,7 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
   }
   try {
     await mkdir(imDir, { recursive: true })
+    await mkdir(taskDir, { recursive: true })
     await writeFile(join(imDir, 'config.json'), JSON.stringify({
       version: 1,
       aampHost: 'https://meshmail.test',
@@ -262,6 +250,19 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
       feishu: { appId, appSecret: 'remote-secret' },
       mailbox,
       behavior: { streamThrottleMs: 700, streamThrottleChars: 40 },
+    }))
+    const controlledFeedback = {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/custom_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/custom_execution_state',
+    }
+    await writeFile(join(taskDir, 'config.json'), JSON.stringify({
+      version: 1,
+      aampHost: 'https://meshmail.test',
+      targetAgentEmail: agentEmail,
+      slug: instanceId,
+      feishu: { appId, appSecret: 'remote-secret', controlledFeedback },
+      mailbox,
+      behavior: { ackComment: true },
     }))
 
     const selection = {
@@ -283,12 +284,13 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
     const savedTaskConfig = JSON.parse(await readFile(join(second.taskDir, 'config.json'), 'utf8'))
     const savedImConfig = JSON.parse(await readFile(join(second.imDir, 'config.json'), 'utf8'))
 
-    assert.equal((await stat(join(first.taskDir, 'config.json'))).mode & 0o777, 0o600)
-    assert.equal((await stat(join(first.imDir, 'config.json'))).mode & 0o777, 0o600)
+    await assertPrivateFile(join(first.taskDir, 'config.json'))
+    await assertPrivateFile(join(first.imDir, 'config.json'))
     assert.deepEqual(savedTaskConfig.agent, { type: 'aime', executionLocation: 'remote' })
     assert.equal(savedTaskConfig.feishu.authMode, 'app-secret')
     assert.equal(savedTaskConfig.feishu.cliProfile, undefined)
     assert.equal(savedTaskConfig.feishu.cliBin, undefined)
+    assert.deepEqual(savedTaskConfig.feishu.controlledFeedback, controlledFeedback)
     assert.equal(savedImConfig.feishu.authMode, 'app-secret')
     assert.equal(savedImConfig.feishu.cliProfile, undefined)
     assert.equal(savedImConfig.feishu.cliBin, undefined)
@@ -297,7 +299,75 @@ test('ensureTaskRuntimeInstanceConfigs persists remote Task configs without lark
   }
 })
 
-test('saveTaskRuntimeBots persists app-secret profiles with mode 0600 after replacement', async () => {
+test('new combined Task runtime writes standard controlled feedback paths only to Task config', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-new-feedback-'))
+  const selection = {
+    agent: {
+      type: 'aime', display_name: 'Aime', target_agent_email: 'aime@meshmail.test',
+      execution_location: 'remote' as const, updated_at: '2026-08-14T00:00:00.000Z',
+    },
+    bot: normalizeTaskProfile({ app_id: 'cli_remote', app_secret: 'remote-secret', auth_mode: 'app-secret' }),
+  }
+  const mailbox = {
+    email: 'bridge@meshmail.test', mailboxToken: 'mailbox-token',
+    smtpPassword: 'smtp-password', baseUrl: 'https://meshmail.test',
+  }
+  try {
+    const configured = await ensureTaskRuntimeInstanceConfigs(selection, { configDir: root }, {
+      registerMailbox: async () => mailbox,
+      sendPairRequestIfNeeded: async () => {},
+    })
+    const savedTask = JSON.parse(await readFile(join(configured.taskDir, 'config.json'), 'utf8'))
+    const savedIm = JSON.parse(await readFile(join(configured.imDir, 'config.json'), 'utf8'))
+    assert.deepEqual(savedTask.feishu.controlledFeedback, {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+    })
+    assert.equal(savedIm.feishu.controlledFeedback, undefined)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('combined Task runtime upgrades an existing config without feedback paths', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-upgrade-feedback-'))
+  const agentEmail = 'aime@meshmail.test'
+  const appId = 'cli_remote'
+  const instanceId = `aime-${createHash('sha256').update(agentEmail).digest('hex').slice(0, 8)}-cli-remote`
+  const taskDir = join(root, 'task-runtime', 'instances', instanceId, 'task')
+  const mailbox = {
+    email: 'bridge@meshmail.test', mailboxToken: 'mailbox-token',
+    smtpPassword: 'smtp-password', baseUrl: 'https://meshmail.test',
+  }
+  try {
+    await mkdir(taskDir, { recursive: true })
+    await writeFile(join(taskDir, 'config.json'), JSON.stringify({
+      version: 1, aampHost: 'https://meshmail.test', targetAgentEmail: agentEmail,
+      slug: instanceId, agent: { type: 'aime', executionLocation: 'remote' },
+      feishu: { appId, appSecret: 'remote-secret', eventNames: ['task.task.update_user_access_v2'] },
+      mailbox, behavior: { ackComment: true },
+    }))
+    const selection = {
+      agent: {
+        type: 'aime', display_name: 'Aime', target_agent_email: agentEmail,
+        execution_location: 'remote' as const, updated_at: '2026-08-14T00:00:00.000Z',
+      },
+      bot: normalizeTaskProfile({ app_id: appId, app_secret: 'remote-secret', auth_mode: 'app-secret' }),
+    }
+    const configured = await ensureTaskRuntimeInstanceConfigs(selection, { configDir: root }, {
+      sendPairRequestIfNeeded: async () => {},
+    })
+    const savedTask = JSON.parse(await readFile(join(configured.taskDir, 'config.json'), 'utf8'))
+    assert.deepEqual(savedTask.feishu.controlledFeedback, {
+      commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+      executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+    })
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('saveTaskRuntimeBots persists app-secret profiles with private permissions after replacement', async () => {
   const root = await mkdtemp(join(tmpdir(), 'aamp-feishu-runtime-profiles-'))
   const target = join(root, 'task-runtime', 'task-profiles-v2.json')
   try {
@@ -312,7 +382,7 @@ test('saveTaskRuntimeBots persists app-secret profiles with mode 0600 after repl
       auth_mode: 'app-secret',
     })], root)
 
-    assert.equal((await stat(target)).mode & 0o777, 0o600)
+    await assertPrivateFile(target)
     const saved = JSON.parse(await readFile(target, 'utf8'))
     assert.equal(saved.profiles[0].app_secret, 'second-secret')
     assert.equal(saved.profiles[0].auth_mode, 'app-secret')

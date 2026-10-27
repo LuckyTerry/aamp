@@ -1,5 +1,6 @@
 import {
   AampClient,
+  AAMP_CANCEL_RESULT_CONTEXT_KEY,
   type TaskDispatch,
   type AampAttachment,
   type ReceivedAttachment,
@@ -13,6 +14,7 @@ import {
   type AcpPlanEntry,
   type AcpTextChunk,
   type AcpToolUpdate,
+  type AcpPromptControl,
 } from './acpx-client.js'
 import { buildPrompt, parseResponse, type ResultAttachmentRef } from './prompt-builder.js'
 import {
@@ -48,6 +50,8 @@ const IDENTITY_AUTH_RETRY_DELAY_MS = 1_000
 const SESSION_KEY_DISPATCH_CONTEXT_KEY = 'aamp_session_key'
 const ACP_AUTH_FAILURE_PATTERN = /authentication (?:required|failed)/i
 const TASK_LIFECYCLE_HISTORY_LIMIT = 256
+const TASK_EXECUTION_POLICY_KEY = 'task_execution_policy'
+const TASK_EXECUTION_CREATED_AT_KEY = 'task_execution_created_at'
 
 export interface AgentIdentity {
   email: string
@@ -64,13 +68,48 @@ type TaskTerminalOutcome = 'completed' | 'help_needed' | 'rejected'
 
 interface ActiveTaskSession {
   readonly agent: string
-  readonly sessionName: string
+  sessionName: string
+  readonly dispatcherEmail: string
+  readonly reportCancellation: boolean
   readonly sessionWaitController: AbortController
-  phase: 'active' | 'cancelled' | 'terminal'
+  readonly controlledExecution?: ControlledExecution
+  readonly finished: Promise<void>
+  readonly finish: () => void
+  readonly supersede: () => void
+  phase: 'active' | 'cancelled' | 'superseded' | 'terminal'
   terminalOutcome?: TaskTerminalOutcome
   promptStarted: boolean
   cancelForwarded: boolean
+  cancelPromise?: Promise<void>
+  promptControl?: AcpPromptControl
   clearPendingText?: () => void
+}
+
+interface ControlledExecution {
+  readonly key: string
+  readonly executionId: string
+  readonly createdAt?: number
+  readonly replacePrevious: boolean
+}
+
+function controlledExecution(task: TaskDispatch): ControlledExecution | undefined {
+  const context = task.dispatchContext
+  const key = resolveTaskSessionKey(task)
+  const executionId = context?.execution_id?.trim()
+  if (!key || !executionId || context?.source !== 'feishu-task') return undefined
+  const value = context[TASK_EXECUTION_CREATED_AT_KEY]?.trim()
+  // Feishu event timestamps are epoch seconds/milliseconds; ISO also permits
+  // callers to retain the original timestamp without lossy conversion.
+  const numeric = value && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN
+  const createdAt = Number.isFinite(numeric)
+    ? (numeric < 100_000_000_000 ? numeric * 1_000 : numeric)
+    : value ? Date.parse(value) : NaN
+  return {
+    key: `${task.from.trim().toLowerCase()}\n${key}`,
+    executionId,
+    replacePrevious: context[TASK_EXECUTION_POLICY_KEY] === 'replace_previous',
+    ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+  }
 }
 
 class BoundedStringMap<Value> {
@@ -497,8 +536,15 @@ export function stripAampInternalDispatchContext<T extends { dispatchContext?: R
   task: T,
 ): T {
   const context = task.dispatchContext
-  if (!context || !(SESSION_KEY_DISPATCH_CONTEXT_KEY in context)) return task
-  const { [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey, ...publicContext } = context
+  if (!context || (![SESSION_KEY_DISPATCH_CONTEXT_KEY, AAMP_CANCEL_RESULT_CONTEXT_KEY,
+    TASK_EXECUTION_POLICY_KEY, TASK_EXECUTION_CREATED_AT_KEY].some((key) => key in context))) return task
+  const {
+    [SESSION_KEY_DISPATCH_CONTEXT_KEY]: _sessionKey,
+    [AAMP_CANCEL_RESULT_CONTEXT_KEY]: _cancelResult,
+    [TASK_EXECUTION_POLICY_KEY]: _executionPolicy,
+    [TASK_EXECUTION_CREATED_AT_KEY]: _executionCreatedAt,
+    ...publicContext
+  } = context
   const stripped = { ...task }
   if (Object.keys(publicContext).length > 0) {
     stripped.dispatchContext = publicContext
@@ -522,6 +568,11 @@ function isClosedStreamAppendError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return message.includes('AAMP stream append failed: 409')
     && message.includes('Task stream is already closed')
+}
+
+function isRateLimitedStreamAppendError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /^AAMP stream append failed: 429(?:\s|$)/.test(message)
 }
 
 function isStreamServiceUnavailableError(err: unknown): boolean {
@@ -679,8 +730,10 @@ function acquireTaskExecutionLock(taskId: string): string | null {
   const locksDir = join(getBridgeHomeDir(), 'task-locks')
   const lockDir = join(locksDir, `${taskLockName(taskId)}.lock`)
   mkdirSync(locksDir, { recursive: true })
+  let created = false
   try {
     mkdirSync(lockDir)
+    created = true
     writeFileSync(join(lockDir, 'owner.json'), `${JSON.stringify({
       pid: process.pid,
       taskId,
@@ -689,7 +742,13 @@ function acquireTaskExecutionLock(taskId: string): string | null {
     return lockDir
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code === 'EEXIST') return null
+    if (!created && code === 'EEXIST') return null
+    if (created) {
+      try { rmSync(lockDir, { recursive: true, force: true }) }
+      catch (cleanupError) {
+        console.warn(`Failed to clean incomplete task lock ${taskId}: ${(cleanupError as Error).message}`)
+      }
+    }
     throw error
   }
 }
@@ -717,9 +776,12 @@ export class AgentBridge {
   private transportMode: 'connecting' | 'websocket' | 'polling' | 'disconnected' = 'connecting'
   private senderPolicies: SenderPolicy[] = []
   private readonly activeTaskSessions = new Map<string, ActiveTaskSession>()
-  private readonly earlyCancelledTaskIds = new BoundedStringMap<true>(TASK_LIFECYCLE_HISTORY_LIMIT)
+  private readonly earlyCancelledTaskIds = new BoundedStringMap<string>(TASK_LIFECYCLE_HISTORY_LIMIT)
   private readonly settledTaskLifecycles = new BoundedStringMap<string>(TASK_LIFECYCLE_HISTORY_LIMIT)
   private readonly sessionMutex = new FairKeyedMutex()
+  private readonly latestControlledExecutions = new BoundedStringMap<ControlledExecution>(TASK_LIFECYCLE_HISTORY_LIMIT)
+  private readonly replacementSessionNames = new Map<string, string>()
+  private readonly unsafeSessions = new Set<string>()
   private stopping = false
   private stopped = false
   private isHistoricalReconcile = false
@@ -762,6 +824,100 @@ export class AgentBridge {
     if (!stickyValue) return this.sessionName
     const suffix = this.sanitizeSessionSuffix(stickyValue)
     return suffix ? `${this.sessionName}-${suffix}` : this.sessionName
+  }
+
+  private async waitForTaskCleanup(session: ActiveTaskSession): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        session.finished,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Previous ACP execution has not finished cleanup')), 5_000)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private cancelActivePrompt(session: ActiveTaskSession, replacement: boolean): Promise<void> {
+    if (session.cancelPromise) return session.cancelPromise
+    if (!session.promptStarted) return Promise.resolve()
+    session.cancelForwarded = true
+    const key = session.controlledExecution?.key
+    session.cancelPromise = (async () => {
+      if (session.promptControl) {
+        const { forced } = await session.promptControl.cancelAndWait()
+        if (forced && key) {
+          // A killed prompt may have damaged the ACP session. Keep the new alias
+          // for all subsequent comments in the replacement execution as well.
+          this.replacementSessionNames.set(key, `${this.sessionName}-replacement-${createHash('sha256')
+            .update(`${key}:${Date.now()}:${session.controlledExecution?.executionId}`)
+            .digest('hex').slice(0, 20)}`)
+        }
+        return
+      }
+      if (replacement) throw new Error('ACP prompt does not expose targeted cancellation')
+      await this.acpx.cancel(session.agent, session.sessionName)
+    })().catch((error) => {
+      if (key) this.unsafeSessions.add(key)
+      throw error
+    })
+    return session.cancelPromise
+  }
+
+  private async replacePreviousExecution(current: ActiveTaskSession): Promise<boolean> {
+    const execution = current.controlledExecution
+    if (!execution) return true
+    if (this.unsafeSessions.has(execution.key)) throw new Error('Previous ACP execution could not be safely stopped')
+    let latest = this.latestControlledExecutions.get(execution.key)
+    // History is bounded, but live ownership is not. An LRU eviction must never
+    // let an older dispatch cancel a newer execution that is still running.
+    for (const session of this.activeTaskSessions.values()) {
+      const candidate = session.controlledExecution
+      if (session === current || candidate?.key !== execution.key) continue
+      if (!latest || (candidate.createdAt !== undefined
+        && (latest.createdAt === undefined || candidate.createdAt > latest.createdAt))) latest = candidate
+    }
+    if (!execution.replacePrevious) {
+      // Remember an old controlled turn so a newly upgraded dispatcher can
+      // replace it, but an unmarked dispatch never gains cancellation powers.
+      if (!latest || (execution.createdAt !== undefined
+        && (latest.createdAt === undefined || execution.createdAt > latest.createdAt))) {
+        this.latestControlledExecutions.set(execution.key, execution)
+      }
+      return true
+    }
+    if (latest && latest.executionId !== execution.executionId) {
+      if (latest.createdAt !== undefined
+        && (execution.createdAt === undefined || execution.createdAt <= latest.createdAt)) return false
+    }
+    this.latestControlledExecutions.set(execution.key,
+      latest?.executionId === execution.executionId && latest.createdAt !== undefined
+        ? { ...execution, createdAt: latest.createdAt }
+        : execution)
+    const previous = [...this.activeTaskSessions.values()].filter((session) =>
+      session !== current && session.controlledExecution?.key === execution.key
+      && session.controlledExecution.executionId !== execution.executionId,
+    )
+    // Mark every old turn before awaiting cancellation so queued comment turns
+    // cannot acquire the mutex and start in between two replacement requests.
+    for (const session of previous) {
+      session.phase = 'superseded'
+      session.supersede()
+      session.sessionWaitController.abort()
+      session.clearPendingText?.()
+    }
+    try {
+      await Promise.all(previous.map(async (session) => {
+        await this.cancelActivePrompt(session, true)
+        await this.waitForTaskCleanup(session)
+      }))
+    } catch (error) {
+      this.unsafeSessions.add(execution.key)
+      throw error
+    }
+    return true
   }
 
   private getConfiguredCardText(): string | undefined {
@@ -1121,6 +1277,7 @@ export class AgentBridge {
    */
   private async handleTask(task: TaskDispatch, options: HandleEventOptions = {}): Promise<void> {
     if (!this.client || this.stopping) return
+    const reportCancellation = task.dispatchContext?.[AAMP_CANCEL_RESULT_CONTEXT_KEY] === 'cancelled'
 
     const settledMessageId = this.settledTaskLifecycles.get(task.taskId)
     if (settledMessageId !== undefined) {
@@ -1134,10 +1291,27 @@ export class AgentBridge {
       return
     }
 
-    if (this.earlyCancelledTaskIds.take(task.taskId)) {
-      this.settledTaskLifecycles.set(task.taskId, task.messageId)
-      console.warn(`[${this.name}] Dropping first delivery for early-cancelled task ${task.taskId}`)
-      return
+    const earlyCancelSender = this.earlyCancelledTaskIds.take(task.taskId)
+    if (earlyCancelSender !== undefined) {
+      if (!reportCancellation || this.normalizeEmail(earlyCancelSender) === this.normalizeEmail(task.from)) {
+        this.settledTaskLifecycles.set(task.taskId, task.messageId)
+        console.warn(`[${this.name}] Dropping first delivery for early-cancelled task ${task.taskId}`)
+        if (reportCancellation) {
+          try {
+            await this.client.sendResult({
+              to: task.from,
+              taskId: task.taskId,
+              status: 'cancelled',
+              output: '',
+              inReplyTo: task.messageId,
+            })
+          } catch (error) {
+            console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
+          }
+        }
+        return
+      }
+      console.warn(`[${this.name}] Ignoring task.cancel from a different sender for controlled task ${task.taskId}`)
     }
 
     if (task.expiresAt && new Date(task.expiresAt).getTime() <= Date.now()) {
@@ -1160,10 +1334,26 @@ export class AgentBridge {
       })
     }
 
-    const taskSessionName = this.resolveTaskSessionName(task)
+    const logicalSessionName = this.resolveTaskSessionName(task)
+    let taskSessionName = logicalSessionName
+    let finish!: () => void
+    const finished = new Promise<void>((resolve) => { finish = resolve })
+    let supersede!: () => void
+    const superseded = new Promise<void>((resolve) => { supersede = resolve })
+    const supersededWork = superseded.then(() => { throw new Error('Task execution was superseded') })
+    // Only abandon network/preparation waits. The prompt itself must finish
+    // targeted process cleanup before this Task releases its mutex.
+    void supersededWork.catch(() => {})
+    const waitUnlessSuperseded = <T>(work: Promise<T>): Promise<T> => Promise.race([work, supersededWork])
     const activeTaskSession: ActiveTaskSession = {
       agent: this.agentConfig.acpCommand,
       sessionName: taskSessionName,
+      dispatcherEmail: task.from,
+      reportCancellation,
+      controlledExecution: controlledExecution(task),
+      finished,
+      finish,
+      supersede,
       sessionWaitController: new AbortController(),
       phase: 'active',
       promptStarted: false,
@@ -1177,16 +1367,51 @@ export class AgentBridge {
       activeTaskSession.promptStarted = false
       return true
     }
-    const isCancelled = (): boolean => activeTaskSession.phase === 'cancelled'
+    const isSuperseded = (): boolean => activeTaskSession.phase === 'superseded'
+    const isCancelled = (): boolean => activeTaskSession.phase === 'cancelled' || isSuperseded()
     const isBridgeStopping = (): boolean => this.stopping || this.client === null
     const shouldStopTask = (): boolean => isBridgeStopping() || isCancelled()
     let taskLockDir: string | null = null
     let releaseSessionMutex: SessionMutexRelease | undefined
     let activeTaskCounted = false
     let incomingAttachmentDirectory: string | undefined
+    let historicalTerminalResult = false
+    let cancellationResult: Promise<void> | undefined
+    const mayReportCancellation = () => reportCancellation && activeTaskSession.phase === 'cancelled'
+      && !historicalTerminalResult && !isBridgeStopping()
+    const reportCancellationOnce = (): Promise<void> => {
+      if (!mayReportCancellation()) return Promise.resolve()
+      cancellationResult ??= (async () => {
+        try {
+          // Before prompt startup there is no process to stop. After startup,
+          // never claim STOPPED if targeted cancellation could not finish.
+          await activeTaskSession.cancelPromise
+        } catch (error) {
+          console.warn(`[${this.name}] ACP cancellation failed for ${task.taskId}: ${(error as Error).message}`)
+          return
+        }
+        const resultClient = this.client
+        if (!resultClient || !mayReportCancellation()) return
+        try {
+          await waitUnlessSuperseded(resultClient.sendResult({
+            to: task.from,
+            taskId: task.taskId,
+            status: 'cancelled',
+            output: '',
+            inReplyTo: task.messageId,
+          }))
+        } catch (error) {
+          // One delivery attempt per local lifecycle, including uncertain network
+          // failures; finally must not duplicate a possibly accepted result.
+          console.error(`[${this.name}] Cancelled result delivery failed for ${task.taskId}: ${(error as Error).message}`)
+        }
+      })()
+      return cancellationResult
+    }
 
     try {
-      const hydratedTask = await this.client.hydrateTaskDispatch(task).catch((err) => {
+      const hydratedTask = await waitUnlessSuperseded(this.client.hydrateTaskDispatch(task).catch((err) => {
+        if (isSuperseded()) return null
         if (!options.historical) {
           console.warn(`[${this.name}] Failed to load thread history for ${task.taskId}: ${(err as Error).message}`)
         }
@@ -1196,13 +1421,24 @@ export class AgentBridge {
           threadHistory: [],
           threadContextText: '',
         }
+      })).catch((error) => {
+        if (isSuperseded()) return null
+        throw error
       })
 
+      historicalTerminalResult = (hydratedTask?.threadHistory ?? []).some((event) =>
+        event.intent === 'task.result' || event.intent === 'task.help_needed')
       if (!hydratedTask || shouldStopTask()) {
         return
       }
 
-      if (threadAlreadyTerminal(hydratedTask.threadHistory)) {
+      const terminalHistory = reportCancellation
+        ? hydratedTask.threadHistory.filter((event) => event.intent !== 'task.cancel'
+          || this.normalizeEmail(event.from) === this.normalizeEmail(task.from)
+            && this.normalizeEmail(event.to) === this.normalizeEmail(task.to))
+        : hydratedTask.threadHistory
+      if (threadAlreadyTerminal(terminalHistory)) {
+        if (reportCancellation && !historicalTerminalResult) activeTaskSession.phase = 'cancelled'
         if (shouldLogTask) {
           console.log(`[${this.name}] Skipping task ${task.taskId} because the thread already reached a terminal state`)
         }
@@ -1258,8 +1494,27 @@ export class AgentBridge {
         return
       }
 
+      try {
+        if (!await this.replacePreviousExecution(activeTaskSession)) {
+          activeTaskSession.phase = 'superseded'
+          return
+        }
+      } catch (error) {
+        if (!claimTerminal('rejected')) return
+        await this.client.sendResult({
+          to: task.from, taskId: task.taskId, status: 'rejected', output: '',
+          errorMsg: `Cannot replace previous execution: ${(error as Error).message}`,
+          inReplyTo: task.messageId,
+        })
+        return
+      }
+      if (shouldStopTask()) return
+      const controlled = activeTaskSession.controlledExecution
+      taskSessionName = (controlled && this.replacementSessionNames.get(controlled.key)) || logicalSessionName
+      activeTaskSession.sessionName = taskSessionName
+
       releaseSessionMutex = await this.sessionMutex.acquire(
-        taskSessionName,
+        logicalSessionName,
         activeTaskSession.sessionWaitController.signal,
       ) ?? undefined
       if (!releaseSessionMutex || shouldStopTask()) return
@@ -1278,12 +1533,26 @@ export class AgentBridge {
       timer?: ReturnType<typeof setTimeout>
     } | null = null
 
+    const handleStreamAppendFailure = (err: unknown): boolean => {
+      if (isClosedStreamAppendError(err)) {
+        streamClosed = true
+        return true
+      }
+      if (isRateLimitedStreamAppendError(err)) {
+        // 进度流限流时停用本轮展示，任务结果仍通过独立消息交付。
+        streamClosed = true
+        console.warn(`[${this.name}] AAMP stream rate limited for ${task.taskId}; continuing without realtime stream`)
+        return true
+      }
+      return false
+    }
+
     const queueStreamAppend = (
       type: 'text.delta' | 'todo' | 'tool_call' | 'artifact' | 'status',
       payload: Record<string, unknown>,
     ) => {
       const client = this.client
-      if (!client || this.stopping || !activeStream || streamClosed) return
+      if (!client || shouldStopTask() || !activeStream || streamClosed) return
       const streamId = activeStream.streamId
 
       let write: Promise<void>
@@ -1294,10 +1563,7 @@ export class AgentBridge {
       })
         .then(() => undefined)
         .catch((err) => {
-          if (isClosedStreamAppendError(err)) {
-            streamClosed = true
-            return
-          }
+          if (handleStreamAppendFailure(err)) return
           console.warn(
             `[${this.name}] Failed to append ${type} stream event for ${task.taskId}: ${(err as Error).message}`,
           )
@@ -1348,7 +1614,7 @@ export class AgentBridge {
     }
 
     const queueTextDelta = (payload: Record<string, unknown>) => {
-      if (isBridgeStopping()) return
+      if (shouldStopTask()) return
       const text = typeof payload.text === 'string' ? payload.text : ''
       if (!text) return
 
@@ -1386,7 +1652,7 @@ export class AgentBridge {
     const flushStreamWrites = async () => {
       flushPendingTextDelta()
       while (pendingStreamWrites.size > 0) {
-        await Promise.allSettled([...pendingStreamWrites])
+        await waitUnlessSuperseded(Promise.allSettled([...pendingStreamWrites]))
       }
     }
 
@@ -1400,44 +1666,68 @@ export class AgentBridge {
       const client = this.client
       if (!client || shouldStopTask() || !activeStream || streamClosed) return
       try {
-        await client.appendStreamEvent({
+        await waitUnlessSuperseded(client.appendStreamEvent({
           streamId: activeStream.streamId,
           type: type as never,
           payload,
-        })
+        }))
       } catch (err) {
-        if (isClosedStreamAppendError(err)) {
-          streamClosed = true
-          return
-        }
+        if (handleStreamAppendFailure(err)) return
         throw err
       }
     }
 
     const closeStream = async (payload: Record<string, unknown>) => {
-      if (isBridgeStopping() || !activeStream || streamClosed) return
+      if (isBridgeStopping() || isSuperseded() || !activeStream || streamClosed) return
       await flushStreamWrites()
       const client = this.client
-      if (!client || isBridgeStopping() || !activeStream || streamClosed) return
-      await client.closeStream({
-        streamId: activeStream.streamId,
-        payload,
-      })
-      streamClosed = true
+      if (!client || isBridgeStopping() || isSuperseded() || !activeStream || streamClosed) return
+      try {
+        await waitUnlessSuperseded(client.closeStream({
+          streamId: activeStream.streamId,
+          payload,
+        }))
+      } catch (err) {
+        // 关闭进度流失败不能阻断已经确定的结果、求助或取消消息。
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[${this.name}] Failed to close stream for ${task.taskId}; continuing terminal delivery: ${message}`)
+      } finally {
+        streamClosed = true
+      }
     }
 
     const finishCancelledTask = (): Promise<void> | null => {
       if (!shouldStopTask()) return null
+      if (activeTaskSession.phase === 'superseded') {
+        activeTaskSession.clearPendingText?.()
+        streamClosed = true
+        return (async () => {
+          // Local settlement only: the replacement must not report STOPPED or
+          // a terminal result for the old Task execution.
+          await activeTaskSession.cancelPromise
+        })()
+      }
       if (isBridgeStopping()) {
         console.warn(`[${this.name}] Dropping task ${task.taskId} because the bridge is stopping`)
         return Promise.resolve()
       }
       console.warn(`[${this.name}] Dropping task ${task.taskId} because the task was cancelled`)
-      return closeStream({ reason: 'task.cancelled', status: 'cancelled' }).catch((err) => {
-        console.warn(
-          `[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(err as Error).message}`,
-        )
-      })
+      return (async () => {
+        let cancelForwarded = true
+        try {
+          await activeTaskSession.cancelPromise
+        } catch (error) {
+          cancelForwarded = false
+          console.warn(`[${this.name}] ACP cancellation failed for ${task.taskId}: ${(error as Error).message}`)
+        }
+        try {
+          await closeStream({ reason: 'task.cancelled', status: 'cancelled' })
+        } catch (error) {
+          console.warn(`[${this.name}] Failed to close cancelled stream for ${task.taskId}: ${(error as Error).message}`)
+          return
+        }
+        if (cancelForwarded) await reportCancellationOnce()
+      })()
     }
 
     const queuePhaseStatus = (channel: AcpTextChunk['channel']) => {
@@ -1454,10 +1744,10 @@ export class AgentBridge {
       try {
         const streamClient = this.client
         if (!streamClient || shouldStopTask()) return
-        activeStream = await streamClient.createStream({
+        activeStream = await waitUnlessSuperseded(streamClient.createStream({
           taskId: task.taskId,
           peerEmail: task.from,
-        })
+        }))
         const cancellationAfterStreamCreate = finishCancelledTask()
         if (cancellationAfterStreamCreate) {
           await cancellationAfterStreamCreate
@@ -1465,12 +1755,12 @@ export class AgentBridge {
         }
         const openedClient = this.client
         if (!openedClient) return
-        await openedClient.sendStreamOpened({
+        await waitUnlessSuperseded(openedClient.sendStreamOpened({
           to: task.from,
           taskId: task.taskId,
           streamId: activeStream.streamId,
           inReplyTo: task.messageId,
-        })
+        }))
         const cancellationAfterStreamOpened = finishCancelledTask()
         if (cancellationAfterStreamOpened) {
           await cancellationAfterStreamOpened
@@ -1496,10 +1786,13 @@ export class AgentBridge {
         await cancellationBeforeAttachments
         return
       }
-      const materializedAttachments = await this.materializeIncomingAttachments(
+      const materializedAttachments = await waitUnlessSuperseded(this.materializeIncomingAttachments(
         publicHydratedTask,
         shouldStopTask,
-      )
+      ).then((materialized) => {
+        if (isSuperseded() && materialized.directory) rmSync(materialized.directory, { recursive: true, force: true })
+        return materialized
+      }))
       const attachmentPromptLines = materializedAttachments.promptLines
       incomingAttachmentDirectory = materializedAttachments.directory
       const cancellationAfterAttachments = finishCancelledTask()
@@ -1537,7 +1830,7 @@ export class AgentBridge {
         await cancellationBeforeSession
         return
       }
-      await this.ensureAcpSession(taskSessionName)
+      await waitUnlessSuperseded(this.ensureAcpSession(taskSessionName))
       const cancellationAfterSession = finishCancelledTask()
       if (cancellationAfterSession) {
         await cancellationAfterSession
@@ -1556,7 +1849,9 @@ export class AgentBridge {
       activeTaskSession.promptStarted = true
       try {
         result = await this.acpx.prompt(this.agentConfig.acpCommand, taskSessionName, prompt, {
+          onControl: (control) => { activeTaskSession.promptControl = control },
           onTextChunk: (chunk) => {
+            if (shouldStopTask()) return
             queuePhaseStatus(chunk.channel)
             const rendered = renderTextChunk(chunk, streamTextState)
             if (!rendered) return
@@ -1566,6 +1861,7 @@ export class AgentBridge {
             })
           },
           onToolUpdate: (update) => {
+            if (shouldStopTask()) return
             flushPendingTextDelta()
             queueStreamAppend('tool_call', {
               toolCallId: update.toolCallId ?? update.title ?? buildToolProgressLabel(update),
@@ -1575,6 +1871,7 @@ export class AgentBridge {
             })
           },
           onPlanUpdate: (entries) => {
+            if (shouldStopTask()) return
             flushPendingTextDelta()
             queueStreamAppend('todo', buildTodoPayloadFromPlan(entries))
           },
@@ -1642,14 +1939,14 @@ export class AgentBridge {
         }
         const helpClient = this.client
         if (!helpClient) return
-        await helpClient.sendHelp({
+        await waitUnlessSuperseded(helpClient.sendHelp({
           to: task.from,
           taskId: task.taskId,
           question: parsed.question ?? 'Agent needs more information',
           blockedReason: 'ACP agent requested clarification',
           suggestedOptions: [],
           inReplyTo: task.messageId,
-        })
+        }))
         console.log(`[${this.name}] -> task.help_needed  ${task.taskId}`)
         this.emit({
           type: 'task.completed',
@@ -1713,7 +2010,7 @@ export class AgentBridge {
         }
         const resultClient = this.client
         if (!resultClient) return
-        await resultClient.sendResult({
+        await waitUnlessSuperseded(resultClient.sendResult({
           to: task.from,
           taskId: task.taskId,
           status: 'completed',
@@ -1721,7 +2018,7 @@ export class AgentBridge {
           structuredResult,
           inReplyTo: task.messageId,
           attachments: attachments.length > 0 ? attachments : undefined,
-        })
+        }))
         console.log(`[${this.name}] -> task.result  ${task.taskId}  completed${structuredResult?.length ? ` (${structuredResult.length} structured field(s))` : ''}${attachments.length ? ` (${attachments.length} attachment(s))` : ''}`)
         this.emit({
           type: 'task.completed',
@@ -1764,14 +2061,14 @@ export class AgentBridge {
         }
         const rejectedClient = this.client
         if (!rejectedClient) return
-        await rejectedClient.sendResult({
+        await waitUnlessSuperseded(rejectedClient.sendResult({
           to: task.from,
           taskId: task.taskId,
           status: 'rejected',
           output: '',
           errorMsg: `ACP agent error: ${errorMsg}`,
           inReplyTo: task.messageId,
-        })
+        }))
       } catch (deliveryError) {
         console.error(
           `[${this.name}] Task ${task.taskId} rejected delivery failed: ${(deliveryError as Error).message}`,
@@ -1790,7 +2087,31 @@ export class AgentBridge {
       activeTaskSession.clearPendingText?.()
       activeTaskSession.clearPendingText = undefined
     }
+    } catch (error) {
+      // Local preparation (including lock creation) runs before the stream/prompt
+      // error handler. Controlled dispatches still need one rejection receipt.
+      if (!reportCancellation || historicalTerminalResult || shouldStopTask()
+        || !claimTerminal('rejected')) throw error
+      const rejectedClient = this.client
+      if (!rejectedClient) throw error
+      const errorMsg = formatTaskAgentError(this.name, error, this.agentConfig.executionLocation)
+      console.error(`[${this.name}] Task ${task.taskId} preparation failed: ${errorMsg}`)
+      try {
+        await waitUnlessSuperseded(rejectedClient.sendResult({
+          to: task.from,
+          taskId: task.taskId,
+          status: 'rejected',
+          output: '',
+          errorMsg: `ACP task preparation failed: ${errorMsg}`,
+          inReplyTo: task.messageId,
+        }))
+      } catch (deliveryError) {
+        console.error(`[${this.name}] Task ${task.taskId} rejected delivery failed: ${(deliveryError as Error).message}`)
+      }
     } finally {
+      // Hydration, terminal-history checks and mutex waits can all return before
+      // finishCancelledTask is in scope. They still owe the controlled STOP receipt.
+      await reportCancellationOnce()
       if (activeTaskCounted) {
         this.activeTaskCount = Math.max(0, this.activeTaskCount - 1)
       }
@@ -1805,6 +2126,7 @@ export class AgentBridge {
           releaseTaskExecutionLock(taskLockDir)
         } finally {
           releaseSessionMutex?.()
+          activeTaskSession.finish()
         }
       }
     }
@@ -1812,7 +2134,11 @@ export class AgentBridge {
 
   private async handleCancel(task: TaskCancel): Promise<void> {
     const active = this.activeTaskSessions.get(task.taskId)
-    if (active?.phase === 'terminal') return
+    if (active?.phase === 'terminal' || active?.phase === 'superseded') return
+    if (active?.reportCancellation && this.normalizeEmail(task.from) !== this.normalizeEmail(active.dispatcherEmail)) {
+      console.warn(`[${this.name}] Ignoring task.cancel from a different sender for controlled task ${task.taskId}`)
+      return
+    }
 
     console.warn(`[${this.name}] <- task.cancel  ${task.taskId}  from=${task.from}`)
     if (active) {
@@ -1820,13 +2146,13 @@ export class AgentBridge {
       active.phase = 'cancelled'
       active.sessionWaitController.abort()
       if (!active.promptStarted || active.cancelForwarded) return
-      active.cancelForwarded = true
-      await this.acpx.cancel(active.agent, active.sessionName)
+      active.cancelPromise = this.cancelActivePrompt(active, false)
+      await active.cancelPromise
       return
     }
 
     if (this.settledTaskLifecycles.get(task.taskId) !== undefined) return
-    this.earlyCancelledTaskIds.set(task.taskId, true)
+    this.earlyCancelledTaskIds.set(task.taskId, task.from)
   }
 
   private async rejectAttachmentsIfRequired(task: TaskDispatch): Promise<boolean> {

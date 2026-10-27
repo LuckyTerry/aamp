@@ -9,6 +9,7 @@ export const TASK_AGENT_METADATA = Object.freeze({
   traecli: Object.freeze({ executionLocation: 'local' }),
   workbuddy: Object.freeze({ executionLocation: 'local' }),
   workbuddy_ai: Object.freeze({ executionLocation: 'local' }),
+  codebuddy: Object.freeze({ executionLocation: 'local' }),
   aime: Object.freeze({
     executionLocation: 'remote',
     attachmentPolicy: 'reject',

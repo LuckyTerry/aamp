@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import {cliName, npxBridgeHint} from './platform-hints.js'
 import { readFileSync } from 'node:fs'
 import { AampClient } from 'aamp-sdk'
 import { loadConfig, type AgentConfig, type BridgeConfig } from './config.js'
@@ -220,7 +221,7 @@ async function main() {
       if (!initialized) break
       if (args.includes('--no-start')) {
         console.log(`Bridge not started because --no-start was provided.`)
-        console.log(`Run: npx aamp-acp-bridge start\n`)
+        console.log(`Run: ${npxBridgeHint()} start\n`)
         break
       }
       await startBridge(configPath, {
@@ -402,27 +403,27 @@ async function main() {
 AAMP ACP Bridge -- Connect ACP agents to the AAMP email network
 
 Usage:
-  aamp-acp-bridge init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]  Interactive setup wizard, then start bridge
-  aamp-acp-bridge init --json --input -  Non-interactive setup for desktop clients
-  aamp-acp-bridge start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ~/.aamp/acp-bridge/config.json)
-  aamp-acp-bridge pair --agent NAME [--config X] [--no-start] [--json] [--debug]  Show a pairing QR code, then start that agent
-  aamp-acp-bridge list  [--config X]   List configured agents
-  aamp-acp-bridge discover [--config X] [--json]  Discover local ACP agent candidates
-  aamp-acp-bridge status               Show live connection status
-  aamp-acp-bridge directory-list --agent NAME [--config X] [--include-self] [--limit N]
-  aamp-acp-bridge directory-search --agent NAME --query TEXT [--config X] [--include-self] [--limit N]
-  aamp-acp-bridge directory-update --agent NAME [--config X] [--summary TEXT] [--card-text TEXT] [--card-file PATH]
-  aamp-acp-bridge help                 Show this help
+  ${cliName('aamp-acp-bridge')} init [--agent NAME] [--aamp-host URL] [--connection-setup METHOD] [--no-start] [--debug]  Interactive setup wizard, then start bridge
+  ${cliName('aamp-acp-bridge')} init --json --input -  Non-interactive setup for desktop clients
+  ${cliName('aamp-acp-bridge')} start [--agent NAME] [--config X] [--json] [--debug]  Start the bridge (default: ${process.platform === 'win32' ? configPath : '~/.aamp/acp-bridge/config.json'})
+  ${cliName('aamp-acp-bridge')} pair --agent NAME [--config X] [--no-start] [--json] [--debug]  Show a pairing QR code, then start that agent
+  ${cliName('aamp-acp-bridge')} list  [--config X]   List configured agents
+  ${cliName('aamp-acp-bridge')} discover [--config X] [--json]  Discover local ACP agent candidates
+  ${cliName('aamp-acp-bridge')} status               Show live connection status
+  ${cliName('aamp-acp-bridge')} directory-list --agent NAME [--config X] [--include-self] [--limit N]
+  ${cliName('aamp-acp-bridge')} directory-search --agent NAME --query TEXT [--config X] [--include-self] [--limit N]
+  ${cliName('aamp-acp-bridge')} directory-update --agent NAME [--config X] [--summary TEXT] [--card-text TEXT] [--card-file PATH]
+  ${cliName('aamp-acp-bridge')} help                 Show this help
 
 Examples:
-  npx aamp-acp-bridge init --agent claude
-  npx aamp-acp-bridge init --agent codex --aamp-host https://meshmail.ai --connection-setup pairing-code
-  npx aamp-acp-bridge init --agent claude --no-start
-  npx aamp-acp-bridge pair --agent claude
-  npx aamp-acp-bridge start
-  npx aamp-acp-bridge start --debug
-  npx aamp-acp-bridge start --config production.json
-  npx aamp-acp-bridge directory-search --agent claude --query reviewer
+  ${npxBridgeHint()} init --agent claude
+  ${npxBridgeHint()} init --agent codex --aamp-host https://meshmail.ai --connection-setup pairing-code
+  ${npxBridgeHint()} init --agent claude --no-start
+  ${npxBridgeHint()} pair --agent claude
+  ${npxBridgeHint()} start
+  ${npxBridgeHint()} start --debug
+  ${npxBridgeHint()} start --config production.json
+  ${npxBridgeHint()} directory-search --agent claude --query reviewer
 `)
       break
   }

@@ -7,6 +7,7 @@ type FeishuTaskComment = NonNullable<FeishuTaskDetails['comments']>[number]
 type FeishuTaskAttachment = NonNullable<FeishuTaskDetails['attachments']>[number]
 
 export interface FeishuTaskDispatchOptions {
+  platform?: NodeJS.Platform
   agentExecutionLocation?: AgentExecutionLocation
   feishuAppId?: string
   feishuAppOwnerId?: string
@@ -21,8 +22,9 @@ function stableIdPart(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._:-]+/g, '_') || 'unknown'
 }
 
-export function buildFeishuTaskId(event: Pick<FeishuTaskEvent, 'taskGuid' | 'eventId'>): string {
-  return `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(event.eventId)}`
+export function buildFeishuTaskId(event: Pick<FeishuTaskEvent, 'taskGuid' | 'eventId' | 'eventTypes' | 'executionId'>): string {
+  const controlled = event.eventTypes.includes('task_agent_start') || event.eventTypes.includes('task_agent_stop')
+  return `feishu-task-${stableIdPart(event.taskGuid)}-${stableIdPart(controlled && event.executionId ? event.executionId : event.eventId)}`
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -156,6 +158,10 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
+function powershellQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
 function renderLarkCliCommand(cliBin: string | undefined): string {
   const normalized = cliBin?.trim()
   return normalized ? shellQuote(normalized) : 'lark-cli'
@@ -233,9 +239,31 @@ function renderContextCompressionContract(): string[] {
   ]
 }
 
-function renderFeishuLarkCliProfileRules(profile: string | undefined, cliBin?: string): string[] {
+function renderFeishuLarkCliProfileRules(
+  profile: string | undefined,
+  cliBin?: string,
+  platform: NodeJS.Platform = process.platform,
+): string[] {
   const normalized = profile?.trim()
   if (!normalized) return []
+  if (platform === 'win32') {
+    const larkCli = powershellQuote(cliBin?.trim() || 'lark-cli')
+    const quotedProfile = powershellQuote(normalized)
+    const executable = /\.(?:js|cjs|mjs)$/i.test(cliBin?.trim() || '')
+      ? `${powershellQuote(process.execPath)} ${larkCli}`
+      : larkCli
+    const command = `& ${executable} --profile ${quotedProfile}`
+    return [
+      'Feishu lark-cli profile rules:',
+      `- This task came through a Feishu bot bound to lark-cli profile \`${normalized}\`.`,
+      `- Whenever you run any lark-cli command for this task, use the PowerShell invocation operator with the prefix \`${command}\` followed by the lark-cli subcommand and arguments.`,
+      `- For example, check auth status with \`${command} auth status --json\`.`,
+      `- The lark-cli binary for this task is ${larkCli}, selected during one-click startup.`,
+      '- Do not use the active/default lark-cli profile for this task.',
+      `- If you ask the user to authorize or rerun a lark-cli command, include the same \`${command}\` prefix in the exact command.`,
+      '',
+    ]
+  }
   const larkCli = renderLarkCliCommand(cliBin)
   return [
     'Feishu lark-cli profile rules:',
@@ -400,7 +428,11 @@ function renderLocalExecutionRules(options?: FeishuTaskDispatchOptions): string 
     '- Do not reconstruct missing intent from unrelated local files, account state, mailbox, credentials, or remote services.',
     '',
     'Feishu/Lark Authorization Rules:',
-    ...renderFeishuLarkCliProfileRules(options?.feishuLarkCliProfile, options?.feishuLarkCliBin),
+    ...renderFeishuLarkCliProfileRules(
+      options?.feishuLarkCliProfile,
+      options?.feishuLarkCliBin,
+      options?.platform,
+    ),
     '- Before using Feishu/Lark APIs or lark-cli capabilities, inspect the current granted user scopes for the provided lark-cli profile and treat those granted scopes as the hard capability boundary.',
     '- If a lark-cli profile is provided by the bridge, run lark-cli commands through the exact lark-cli binary shown in the profile rules and check its auth status before choosing Feishu/Lark data sources.',
     '- Do not run lark-cli auth login, do not request additional OAuth scopes, and do not ask the user to grant new Feishu/Lark permissions for this task.',
@@ -409,6 +441,7 @@ function renderLocalExecutionRules(options?: FeishuTaskDispatchOptions): string 
     '',
     'Intent Rules:',
     '- For task_create or task_reminder_fire, execute the original delegated task intent. For task_reminder_fire, do not treat it as a follow-up question.',
+    '- For task_agent_start, execute the current delegated task intent for this execution.',
     '- For task_comment, treat the latest effective comment as the new instruction for this delegated task; Task source context remains original background for the delegated task.',
     '- Child tasks are context only: do not write child steps or child deliverables directly.',
     '- If the intent is ambiguous or missing required information, use status=need_help.',

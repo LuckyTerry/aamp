@@ -1,3 +1,4 @@
+import {existingRuntimeHint} from '../bin/platform-hints.mjs'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -14,6 +15,11 @@ try {
 } catch {
   runtimeNetwork = undefined
 }
+
+test('controller leases use the OS process start time instead of Node runtime uptime', () => {
+  assert.match(controller, /readProcessIdentity\(process\.pid\)/)
+  assert.doesNotMatch(controller, /Date\.now\(\)\s*-\s*process\.uptime\(\)/)
+})
 
 test('network errors retain nested DNS and socket causes', () => {
   assert.equal(typeof runtimeNetwork?.describeNetworkError, 'function')
@@ -277,7 +283,11 @@ test('endpoint probe records DNS, proxy presence, HTTP status, and retries', asy
   ])
 })
 
-test('endpoint probe bounds DNS diagnostics and releases response bodies', { timeout: 500 }, async () => {
+test('endpoint probe bounds DNS diagnostics and releases response bodies', { timeout: 500 }, async (t) => {
+  // A pending real DNS request owns a referenced handle. The never-resolving
+  // Promise mock needs one too, because detached diagnostic timers are unref'd.
+  const pendingLookupHandle = setTimeout(() => {}, 1000)
+  t.after(() => clearTimeout(pendingLookupHandle))
   assert.equal(typeof runtimeNetwork?.probeEndpoint, 'function')
 
   await assert.rejects(
@@ -356,6 +366,20 @@ test('runtime session acquisition releases a lease completed after stop was requ
   const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
   const acquireBlock = controller.slice(acquireStart, acquireEnd)
   assert.match(acquireBlock, /heldLeases\.add\(lease\);\s*if \(stopRequested\) {\s*await releaseLease\(lease\);/)
+})
+
+test('duplicate runtime guidance uses lifecycle commands instead of requiring the old terminal', () => {
+  const acquireStart = controller.indexOf('async function acquireRuntimeSessionLease(action)')
+  const acquireEnd = controller.indexOf('\nfunction emptyStore()', acquireStart)
+  const acquireBlock = controller.slice(acquireStart, acquireEnd)
+  assert.match(acquireBlock, /existingRuntimeHint\(action\)/)
+  assert.match(acquireBlock, /includes\('正在被另一个 feishu-task-agent 进程使用'\)/)
+  for (const platform of ['darwin', 'win32']) {
+    const hint = existingRuntimeHint('install', platform)
+    assert.match(hint, /feishu-task-agent(?:\.cmd)? status/)
+    assert.match(hint, /feishu-task-agent(?:\.cmd)? stop/)
+  }
+  assert.doesNotMatch(acquireBlock, /回到之前启动的终端|Ctrl\+C/)
 })
 
 test('install output keeps the final summary without redundant per-binding success lines', () => {

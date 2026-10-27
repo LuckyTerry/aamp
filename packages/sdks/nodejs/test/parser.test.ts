@@ -476,6 +476,24 @@ describe('round-trip: build headers then parse them', () => {
     expect(parsed.output).toBe('Done')
   })
 
+  it('round-trips an opted-in cancellation result', () => {
+    const built = buildResultHeaders({ taskId: 'task-controlled-cancel', status: 'cancelled', output: '' })
+
+    const parsed = parseAampHeaders({
+      from: 'agent@aamp.example.com',
+      to: 'coordinator@aamp.example.com',
+      messageId: 'msg-controlled-cancel',
+      subject: '[AAMP Result] Task task-controlled-cancel — cancelled',
+      headers: built as Record<string, string>,
+      bodyText: 'AAMP Task Result\n\nTask ID: task-controlled-cancel\nStatus: cancelled',
+    })
+
+    if (parsed?.intent !== 'task.result') throw new Error('expected task.result')
+    expect(parsed.taskId).toBe('task-controlled-cancel')
+    expect(parsed.status).toBe('cancelled')
+    expect(parsed.output).toBe('')
+  })
+
   it('round-trips task.help_needed', () => {
     const built = buildHelpHeaders({
       taskId: 'task-rt-3',

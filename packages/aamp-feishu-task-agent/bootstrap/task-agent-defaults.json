@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "packages": {
+    "acpBridge": "@zhengqilin/aamp-acp-bridge@0.1.29-dev.3",
+    "feishuBridge": "@zhengqilin/aamp-feishu-bridge@0.1.52-dev.8",
+    "aimeAcp": "@tengchengwei/aime-acp@0.1.1-dev.1",
+    "codexAcp": "@agentclientprotocol/codex-acp@1.0.2",
+    "codexCli": "@openai/codex",
+    "registerAppSdk": "@larksuiteoapi/node-sdk@1.68.0"
+  },
+  "larkCli": { "package": "@larksuite/cli@latest", "minVersion": "1.0.64", "configDirName": ".lark-cli-aamp-one-click-v1" },
+  "scopeManifest": {
+    "version": 2,
+    "app": {
+      "tenant": ["im:message", "im:message:send_as_bot", "im:message:readonly", "im:resource", "cardkit:card:write", "task:task", "task:comment", "task:task:readonly", "task:comment:readonly", "task:attachment:read", "task:attachment:write", "task:comment:read", "task:comment:write", "task:task:read", "task:task:write", "task:tasklist:read", "task:tasklist:write", "task:custom_field:read", "task:custom_field:write", "task:section:read", "task:section:write"],
+      "user": ["im:message", "im:message:readonly", "im:resource", "cardkit:card:write", "task:task", "task:comment", "task:task:readonly", "task:comment:readonly", "task:attachment:read", "task:attachment:write", "task:comment:read", "task:comment:write", "task:task:read", "task:task:write", "task:tasklist:read", "task:tasklist:write", "task:custom_field:read", "task:custom_field:write", "task:section:read", "task:section:write"]
+    },
+    "userAuth": { "core": [], "optional": ["task:task", "task:comment", "task:task:readonly", "task:comment:readonly", "task:attachment:read", "task:attachment:write", "task:comment:read", "task:comment:write", "task:task:read", "task:task:write", "task:tasklist:read", "task:tasklist:write", "task:custom_field:read", "task:custom_field:write", "task:section:read", "task:section:write"] }
+  },
+  "events": { "tenant": ["task.task.update_user_access_v2"], "user": ["task.task.update_user_access_v2"] },
+  "userAuth": { "mode": "optional", "excludes": [] },
+  "profile": { "domains": ["task"] },
+  "aime": { "allowedTenantKey": "736588c9260f175d" }
+}

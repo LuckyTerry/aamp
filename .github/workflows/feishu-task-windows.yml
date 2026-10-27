@@ -1,0 +1,107 @@
+name: Feishu Task native platforms
+on:
+  pull_request:
+    paths:
+      - 'packages/aamp-feishu-task-agent/**'
+      - 'packages/aamp-acp-bridge/**'
+      - 'packages/aamp-feishu-bridge/**'
+      - 'packages/sdks/nodejs/**'
+      - '.github/workflows/feishu-task-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: feishu-task-native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        node: ['22', '24']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: ${{ matrix.os == 'windows-latest' && 'powershell' || 'pwsh' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install package dependencies
+        run: |
+          foreach ($name in @('aamp-feishu-task-agent','aamp-acp-bridge','aamp-feishu-bridge')) {
+            Push-Location "packages/$name"
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Pop-Location
+          }
+      - name: Build local SDK for source tests
+        run: |
+          Push-Location packages/sdks/nodejs
+          if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/typescript/bin/tsc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          foreach ($name in @('aamp-acp-bridge','aamp-feishu-bridge')) {
+            Copy-Item -Path packages/sdks/nodejs/dist/* -Destination "packages/$name/node_modules/aamp-sdk/dist" -Recurse -Force
+          }
+      - name: Task Agent platform tests
+        working-directory: packages/aamp-feishu-task-agent
+        run: |
+          node scripts/sync-bootstrap-defaults.mjs --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/run-platform-tests.mjs
+      - name: ACP tests and types
+        working-directory: packages/aamp-acp-bridge
+        run: |
+          if (($env:OS -eq 'Windows_NT')) { npm.cmd test } else { npm test }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/typescript/bin/tsc --noEmit
+      - name: Feishu tests and types
+        working-directory: packages/aamp-feishu-bridge
+        run: |
+          node --import tsx --test 'src/**/*.test.ts'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node node_modules/typescript/bin/tsc --noEmit
+      - name: Pack Task Agent artifact
+        working-directory: packages/aamp-feishu-task-agent
+        run: |
+          New-Item -ItemType Directory -Force ../../artifacts | Out-Null
+          if (($env:OS -eq 'Windows_NT')) { npm.cmd pack --json --pack-destination ../../artifacts } else { npm pack --json --pack-destination ../../artifacts }
+          exit $LASTEXITCODE
+      - name: Windows PowerShell 5.1 packaged help
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $package = Get-ChildItem artifacts/larktask-aamp-feishu-task-agent-*.tgz
+          if ($package.Count -ne 1) { throw 'Expected one Task Agent artifact' }
+          npm.cmd install --prefix "$env:RUNNER_TEMP/aamp-native-install" $package.FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$env:RUNNER_TEMP/aamp-native-install/node_modules/.bin/feishu-task-agent.cmd" help
+          exit $LASTEXITCODE
+      - name: Verify published SDK dependency before packing
+        run: |
+          foreach ($name in @('aamp-acp-bridge','aamp-feishu-bridge')) {
+            Push-Location "packages/$name"
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd ci } else { npm ci }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node --input-type=module -e "const sdk = await import('aamp-sdk'); if (sdk.AAMP_CANCEL_RESULT_CONTEXT_KEY !== 'aamp_cancel_result') { console.error('Pinned aamp-sdk lacks controlled cancellation; publish and pin a compatible SDK before packing.'); process.exit(1) }"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Pop-Location
+          }
+      - name: Pack Bridge artifacts
+        run: |
+          foreach ($name in @('aamp-acp-bridge','aamp-feishu-bridge')) {
+            Push-Location "packages/$name"
+            if (($env:OS -eq 'Windows_NT')) { npm.cmd pack --json --pack-destination ../../artifacts } else { npm pack --json --pack-destination ../../artifacts }
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Pop-Location
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feishu-task-${{ matrix.os }}-node${{ matrix.node }}
+          path: artifacts/*.tgz

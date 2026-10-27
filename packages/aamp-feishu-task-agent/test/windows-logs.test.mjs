@@ -1,0 +1,21 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+const mod=await import('../bin/windows-log-tail.mjs').catch(()=>({}));
+test('Node log follower preserves split UTF-8 and resumes after truncation',async t=>{
+ assert.equal(typeof mod.followWindowsLogFiles,'function');
+ const dir=await fs.mkdtemp(path.join(os.tmpdir(),'aamp-tail-'));t.after(()=>fs.rm(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'中文 file.log');await fs.writeFile(file,'old\n');
+ const lines=[];const stop=mod.followWindowsLogFiles([file],(_file,line)=>lines.push(line),{intervalMs:10});t.after(stop);
+ const bytes=Buffer.from('中文\r\n');await fs.appendFile(file,bytes.subarray(0,2));
+ await new Promise(r=>setTimeout(r,40));assert.deepEqual(lines,[]);
+ await fs.appendFile(file,bytes.subarray(2));
+ for(let i=0;i<100&&!lines.length;i++)await new Promise(r=>setTimeout(r,10));
+ assert.deepEqual(lines,['中文']);
+ await fs.writeFile(file,'');await new Promise(r=>setTimeout(r,40));await fs.appendFile(file,'next\n');
+ for(let i=0;i<100&&lines.length<2;i++)await new Promise(r=>setTimeout(r,10));
+ assert.deepEqual(lines,['中文','next']);
+ stop();await fs.appendFile(file,'ignored\n');await new Promise(r=>setTimeout(r,40));assert.equal(lines.length,2);
+});

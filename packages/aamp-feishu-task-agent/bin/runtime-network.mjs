@@ -179,6 +179,21 @@ export function launchDetachedDiagnostic(operation, onError) {
     });
 }
 
+export function codexSessionFailure(events) {
+  const last = [...(events || [])].reverse().find(event => event.agent === 'codex'
+    && ['agent.session.deferred', 'agent.session.ready'].includes(event.type));
+  if (last?.type === 'agent.session.ready') return undefined;
+  return `Codex 会话初始化失败：${last?.message || '未收到适配器会话就绪事件'}`;
+}
+
+export function localAgentSessionFailure(events, agent) {
+  if (agent === 'codex') return codexSessionFailure(events)
+  const last = [...(events || [])].reverse().find(event => event.agent === agent
+    && ['agent.session.deferred', 'agent.session.ready'].includes(event.type))
+  return last?.type === 'agent.session.deferred'
+    ? `${agent} 会话初始化失败：${last.message || '未就绪'}` : undefined
+}
+
 export function agentStartRetryError(events, expectedAgentNames, attempt, maxAttempts) {
   if (Number(attempt) >= Number(maxAttempts)) return undefined;
   const expected = new Set(expectedAgentNames || []);

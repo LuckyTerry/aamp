@@ -366,10 +366,13 @@ test('controller displays a saved Coco binding as its raw type in list and start
   )
   const bindingLabel = new Function(`${labelHelpers}\nreturn bindingLabel;`)()
   assert.equal(bindingLabel(binding), 'coco ↔ cli_test_app (cli_test_app)')
-  assert.match(
+  const startFlow = functionRange(
     controllerSource,
-    /chooseMany\('请选择要启动的绑定配置：', store\.bindings, bindingLabel\)/,
+    'async function runStart(',
+    'async function runServiceWorker(',
   )
+  assert.match(startFlow, /chooseMany\(prompt, bindings, bindingLabel\)/)
+  assert.match(startFlow, /chooseBindings\('请选择要启动的绑定配置：', availableBindings\)/)
 })
 
 test('Trae one-click source records the released ACP identity at the source package version', () => {
@@ -382,9 +385,11 @@ test('Trae one-click source records the released ACP identity at the source pack
   assert.equal(acpLock.packages[''].version, acpPackage.version)
   assert.equal(taskLock.version, packageJson.version)
   assert.equal(taskLock.packages[''].version, packageJson.version)
-  const pinnedAcp = `@luckyterry/aamp-acp-bridge@${acpPackage.version}`
+  const pinnedAcp = `@zhengqilin/aamp-acp-bridge@${acpPackage.version}`
   assert.equal(bootstrapSource.includes(`ACP_BRIDGE_PKG="\${ACP_BRIDGE_PKG:-${pinnedAcp}}"`), true)
-  assert.equal(controllerSource.includes(pinnedAcp), true)
+  const defaults = JSON.parse(readFileSync(path.resolve(__dirname, '../bootstrap/task-agent-defaults.json'), 'utf8'))
+  assert.equal(defaults.packages.acpBridge, pinnedAcp)
+  assert.match(controllerSource, /process\.env\.AAMP_TASK_ACP_BRIDGE_PKG \|\| TASK_DEFAULTS\.packages\.acpBridge/)
 })
 
 test('Trae one-click user-facing agent guidance is not stale', () => {

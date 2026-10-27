@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { bridgeCommand } from './platform-hints.js'
 import { inspect } from 'node:util'
 import {
   ensureBridgeHomeDir,
@@ -108,11 +109,11 @@ function printUsage(): void {
   console.log(`AAMP Feishu Bridge
 
 Usage:
-  aamp-feishu-bridge init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
-  aamp-feishu-bridge start [--config-dir DIR] [--json]
-  aamp-feishu-bridge start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--agent-execution-location local|remote] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
-  aamp-feishu-bridge status [--config-dir DIR] [--json]
-  aamp-feishu-bridge remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
+  ${bridgeCommand()} init [--config-dir DIR] [--aamp-host URL] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--app-secret SECRET] [--use-feishu-cli] [--feishu-cli-new] [--feishu-cli-open] [--feishu-cli-profile NAME] [--slug NAME] [--domain DOMAIN] [--no-start] [--json]
+  ${bridgeCommand()} start [--config-dir DIR] [--json]
+  ${bridgeCommand()} start --enable-task [--config-dir DIR] [--aamp-host URL] [--agent NAME] [--agent-execution-location local|remote] [--target-agent EMAIL|--pairing-url URL] [--app-id ID] [--use-feishu-cli] [--feishu-cli-profile NAME] [--feishu-cli-bin PATH] [--domain DOMAIN] [--boe|--pre] [--env NAME] [--debug] [--json]
+  ${bridgeCommand()} status [--config-dir DIR] [--json]
+  ${bridgeCommand()} remove [--config-dir DIR] (--target-agent EMAIL|--slug NAME) [--json]
 
 Aliases:
   run    Alias for start
@@ -267,7 +268,7 @@ async function runBridge(args: ParsedArgs): Promise<void> {
   }
   const entries = await loadBridgeConfigEntries(configDir)
   if (entries.length === 0) {
-    throw new Error(`No bridge config found in ${getBridgeHomeDir(configDir)}. Run "aamp-feishu-bridge init" first.`)
+    throw new Error(`No bridge config found in ${getBridgeHomeDir(configDir)}. Run "${bridgeCommand()} init" first.`)
   }
 
   const runtimes = entries.map((entry) => ({

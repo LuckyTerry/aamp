@@ -13,7 +13,7 @@ const metadataBin = join(packageDir, 'bin', 'agent-metadata.mjs')
 
 test('known agents have one execution policy and Aime is the only remote agent', () => {
   assert.deepEqual(TASK_AGENT_TYPES, [
-    'codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'aime',
+    'codex', 'cursor', 'coco', 'traex', 'traecli', 'workbuddy', 'workbuddy_ai', 'codebuddy', 'aime',
   ])
   for (const type of TASK_AGENT_TYPES.filter((value) => value !== 'aime')) {
     assert.deepEqual(resolveTaskAgentMetadata(type), { executionLocation: 'local' })

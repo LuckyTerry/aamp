@@ -1,6 +1,8 @@
+import { bridgeCommand } from '../platform-hints.js'
+import { renameAtomic } from '../rename-atomic.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import readline from 'node:readline/promises'
@@ -8,6 +10,7 @@ import { stdin as input, stdout as output } from 'node:process'
 import { AampClient, isPairingUrl, parsePairingUrl } from 'aamp-sdk'
 import { writePrivateJsonAtomic } from '../private-json.js'
 import type { BridgeConfig, BridgeState } from './types.js'
+import { normalizeControlledFeedbackPaths } from './controlled-feedback.js'
 
 const CONFIG_FILENAME = 'config.json'
 const STATE_FILENAME = 'state.json'
@@ -49,7 +52,7 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
   await mkdir(parentDir, { recursive: true })
   const tempPath = path.join(parentDir, `.${path.basename(filePath)}.${randomUUID()}.tmp`)
   await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  await rename(tempPath, filePath)
+  await renameAtomic(tempPath, filePath)
 }
 
 export async function loadBridgeConfig(customDir?: string): Promise<BridgeConfig | null> {
@@ -243,7 +246,7 @@ export function normalizeBridgeConfig(
   fallbackAgentType = 'agent',
 ): BridgeConfig {
   if (!config.aampHost || !config.targetAgentEmail || !config.slug || !config.feishu || !config.mailbox) {
-    throw new Error('Bridge config is incomplete. Run "aamp-feishu-bridge start --enable-task" again.')
+    throw new Error(`Bridge config is incomplete. Run "${bridgeCommand()} start --enable-task" again.`)
   }
   const executionLocation = config.agent?.executionLocation ?? 'local'
   if (executionLocation !== 'local' && executionLocation !== 'remote') {
@@ -254,6 +257,7 @@ export function normalizeBridgeConfig(
   if (executionLocation === 'remote' && !appSecret) {
     throw new Error('Feishu App Secret is required for remote Task execution.')
   }
+  const controlledFeedback = normalizeControlledFeedbackPaths(config.feishu.controlledFeedback)
   return {
     version: 1,
     aampHost: config.aampHost,
@@ -270,6 +274,7 @@ export function normalizeBridgeConfig(
       ...(config.feishu.headers ? { headers: config.feishu.headers } : {}),
       userIdType: config.feishu.userIdType ?? 'open_id',
       eventNames: normalizeConfiguredEventNames(config.feishu.eventNames),
+      ...(controlledFeedback ? { controlledFeedback } : {}),
     },
     mailbox: config.mailbox,
     behavior: {
@@ -342,6 +347,7 @@ export async function initializeBridgeConfig(options: InitBridgeOptions): Promis
       appSecret,
       userIdType,
       eventNames,
+      ...(existing?.feishu.controlledFeedback ? { controlledFeedback: existing.feishu.controlledFeedback } : {}),
     },
     mailbox: {
       email: mailbox.email,

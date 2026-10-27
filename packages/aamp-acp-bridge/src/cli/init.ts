@@ -1,3 +1,4 @@
+import {cliName} from '../platform-hints.js'
 import { createInterface, emitKeypressEvents } from 'node:readline'
 import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -520,7 +521,7 @@ export function resolveInitScanTargets(agent?: string): string[] {
 
 export function noAgentsFoundMessage(agent?: string): string {
   if (agent) return `No ACP agent found. ${missingAgentWarning(agent)}`
-  return 'No ACP agents found. Install an agent first (e.g. npm i -g @anthropic-ai/claude-code).'
+  return `No ACP agents found. Install an agent first (e.g. ${cliName('npm')} i -g @anthropic-ai/claude-code).`
 }
 
 export async function runInit(configPath: string, opts: RunInitOptions = {}): Promise<boolean> {

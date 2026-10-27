@@ -33,11 +33,21 @@ test('normalizeTaskProfile defaults legacy profiles to lark-cli', () => {
 
   assert.equal(local.profile, 'aamp-feishu-task-cli_local')
   assert.equal(local.auth_mode, 'lark-cli')
+  assert.deepEqual(local.domains, ['task'])
   assert.deepEqual(buildTaskProfileTaskFeishuConfig(local), {
     appId: 'cli_local',
     authMode: 'lark-cli',
     cliProfile: 'aamp-feishu-task-cli_local',
   })
+})
+
+test('normalizeTaskProfile removes legacy non-Task domains during migration', () => {
+  const local = normalizeTaskProfile({
+    app_id: 'cli_legacy',
+    domains: ['base', 'calendar', 'mail', 'task', 'vc'],
+  })
+
+  assert.deepEqual(local.domains, ['task'])
 })
 
 test('normalizeTaskProfile rejects app-secret profiles without an App Secret', () => {

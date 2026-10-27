@@ -1,0 +1,5 @@
+# Preserve the actual npm-generated Windows shim fixture.
+test/fixtures/npm-cmd-shim.cmd -text whitespace=cr-at-eol
+# Keep generated Bash and its embedded registration source byte-identical on Windows.
+bootstrap/*.sh text eol=lf
+bootstrap/register-feishu-app.mjs text eol=lf

@@ -9,6 +9,41 @@ const mailbox = {
   baseUrl: 'https://meshmail.test',
 }
 
+const feedbackPaths = {
+  commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+  executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+}
+
+test('controlled feedback requires two safe Task OpenAPI paths or remains disabled', () => {
+  const base = {
+    version: 1 as const,
+    aampHost: 'https://meshmail.test',
+    targetAgentEmail: 'agent@meshmail.test',
+    slug: 'feishu-runtime',
+    feishu: { appId: 'cli_test', appSecret: 'secret', eventNames: ['task.task.update_user_access_v2'] },
+    mailbox,
+    behavior: { ackComment: true },
+  }
+
+  assert.equal(normalizeBridgeConfig(base).feishu.controlledFeedback, undefined)
+  assert.deepEqual(normalizeBridgeConfig({
+    ...base,
+    feishu: { ...base.feishu, controlledFeedback: feedbackPaths },
+  }).feishu.controlledFeedback, feedbackPaths)
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    feishu: { ...base.feishu, controlledFeedback: { commandResultPath: feedbackPaths.commandResultPath } as typeof feedbackPaths },
+  }), /both.*path/i)
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    feishu: { ...base.feishu, controlledFeedback: { ...feedbackPaths, commandResultPath: 'https://untrusted.example/report' } },
+  }), /Task OpenAPI path/i)
+  assert.throws(() => normalizeBridgeConfig({
+    ...base,
+    feishu: { ...base.feishu, controlledFeedback: { ...feedbackPaths, executionStatePath: '/open-apis/task/v2/../steal' } },
+  }), /Task OpenAPI path/i)
+})
+
 test('normalizeBridgeConfig migrates a legacy Task config to a local fallback agent', () => {
   const legacy = normalizeBridgeConfig({
     version: 1,
@@ -83,5 +118,7 @@ test('normalizeBridgeConfig rejects invalid execution locations and remote confi
 })
 
 test('normalizeBridgeConfig directs stale configs to the merged package command', () => {
-  assert.throws(() => normalizeBridgeConfig({}), /aamp-feishu-bridge start --enable-task/)
+  assert.throws(() => normalizeBridgeConfig({}), {
+    message: `Bridge config is incomplete. Run "aamp-feishu-bridge${process.platform === 'win32' ? '.cmd' : ''} start --enable-task" again.`,
+  })
 })

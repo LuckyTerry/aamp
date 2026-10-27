@@ -1,8 +1,356 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { promisify } from 'node:util'
+import { ensureWindowsAgentConfig, parseWindowsAgentArgv, windowsAgentAlias } from './windows-agent-config.js'
+import { execFile, execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { join, win32, posix } from 'node:path'
+import { resolveNativeCommand } from './native-command.js'
+
+export interface WindowsProcessIdentity {
+  pid: number
+  creationDate: string
+  executablePath: string
+  ownerSid: string
+}
+
+const WINDOWS_SNAPSHOT_OWNER = String.raw`
+function Test-SnapshotProcessStillCurrent($snapshot) {
+  $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+  if ($null -eq $current) { return $false }
+  if ($null -eq $snapshot.CreationDate -or $null -eq $current.CreationDate) {
+    throw 'unable to verify process creation identity'
+  }
+  return ([int]$current.ProcessId -eq [int]$snapshot.ProcessId -and
+    $current.CreationDate.ToUniversalTime().Ticks -eq $snapshot.CreationDate.ToUniversalTime().Ticks)
+}
+function Read-VerifiedSnapshotOwner($snapshot) {
+  try {
+    $owner = Invoke-CimMethod -InputObject $snapshot -MethodName GetOwnerSid
+    if ($owner.ReturnValue -ne 0 -or [string]::IsNullOrWhiteSpace($owner.Sid)) {
+      throw ('unable to read process owner SID; return value ' + $owner.ReturnValue)
+    }
+  } catch {
+    $ownerFailure = $_
+    if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+    throw $ownerFailure
+  }
+  if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+  return $owner
+}
+function Read-VerifiedSnapshot($snapshot) {
+  $owner = Read-VerifiedSnapshotOwner $snapshot
+  if ($null -eq $owner) { return $null }
+  # CIM may retain incomplete metadata briefly while a process starts or exits.
+  # Retry only this missing field, and recheck identity on every bounded attempt.
+  for ($attempt = 0; [string]::IsNullOrWhiteSpace($snapshot.ExecutablePath) -and $attempt -lt 5; $attempt++) {
+    if ($attempt -gt 0) { Start-Sleep -Milliseconds 100 }
+    $current = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$snapshot.ProcessId)
+    if ($null -eq $current) { return $null }
+    if ($null -eq $current.CreationDate -or $null -eq $snapshot.CreationDate) {
+      throw 'unable to verify process creation identity'
+    }
+    if ([int]$current.ProcessId -ne [int]$snapshot.ProcessId -or
+      $current.CreationDate.ToUniversalTime().Ticks -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+    $snapshot = $current
+  }
+  $executablePath = [string]$snapshot.ExecutablePath
+  if ([string]::IsNullOrWhiteSpace($executablePath)) {
+    $native = $null
+    try {
+      try { $native = [System.Diagnostics.Process]::GetProcessById([int]$snapshot.ProcessId) }
+      catch [System.ArgumentException] { return $null }
+      # Pin a native handle while comparing creation identity and reading its image.
+      $null = $native.Handle
+      if ($native.HasExited) { return $null }
+      $nativeTicks = $native.StartTime.ToUniversalTime().Ticks
+      # CIM timestamps have microsecond precision; native FILETIME has 100ns precision.
+      if (($nativeTicks - ($nativeTicks % 10)) -ne $snapshot.CreationDate.ToUniversalTime().Ticks) { return $null }
+      $executablePath = [string]$native.MainModule.FileName
+      if (-not (Test-SnapshotProcessStillCurrent $snapshot)) { return $null }
+      if ([string]::IsNullOrWhiteSpace($executablePath)) {
+        throw 'unable to read process executable path for a verified live process'
+      }
+    } finally { if ($null -ne $native) { $native.Dispose() } }
+  }
+  return @{ process = $snapshot; owner = $owner; executablePath = $executablePath }
+}
+`
+
+export const WINDOWS_PROCESS_IDENTITY_SCRIPT = WINDOWS_SNAPSHOT_OWNER + String.raw`
+$ErrorActionPreference = 'Stop'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
+$processId = [uint32]$config.pid
+$process = Get-CimInstance Win32_Process -Filter "ProcessId = $processId"
+if ($null -eq $process) { exit 3 }
+$verified = Read-VerifiedSnapshot $process
+if ($null -eq $verified) { exit 3 }
+$process = $verified.process
+$owner = $verified.owner
+[pscustomobject]@{
+  pid = [uint32]$process.ProcessId
+  creationDate = $process.CreationDate.ToString('o')
+  executablePath = [string]$verified.executablePath
+  ownerSid = [string]$owner.Sid
+} | ConvertTo-Json -Compress
+`
+
+export const WINDOWS_PROCESS_TREE_SCRIPT = WINDOWS_SNAPSHOT_OWNER + String.raw`
+$ErrorActionPreference = 'Stop'
+$config = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:AAMP_ACP_WINDOWS_INPUT_BASE64)) | ConvertFrom-Json
+$rootPid = [uint32]$config.pid
+$all = @(Get-CimInstance Win32_Process)
+$byPid = @{}
+foreach ($process in $all) { $byPid[[uint32]$process.ProcessId] = $process }
+$selected = New-Object 'System.Collections.Generic.HashSet[uint32]'
+[void]$selected.Add($rootPid)
+do {
+  $changed = $false
+  foreach ($process in $all) {
+    $parentPid = [uint32]$process.ParentProcessId
+    $parent = $byPid[$parentPid]
+    if ($selected.Contains($parentPid) -and $null -ne $parent -and $process.CreationDate -ge $parent.CreationDate -and $selected.Add([uint32]$process.ProcessId)) {
+      $changed = $true
+    }
+  }
+} while ($changed)
+$identities = @()
+foreach ($process in $all) {
+  if (-not $selected.Contains([uint32]$process.ProcessId)) { continue }
+  $verified = Read-VerifiedSnapshot $process
+  if ($null -eq $verified) { continue }
+  $process = $verified.process
+  $owner = $verified.owner
+  $identities += [pscustomobject]@{
+    pid = [uint32]$process.ProcessId
+    parentPid = [uint32]$process.ParentProcessId
+    creationDate = $process.CreationDate.ToString('o')
+    executablePath = [string]$verified.executablePath
+    ownerSid = [string]$owner.Sid
+  }
+}
+[pscustomobject]@{ processes = $identities } | ConvertTo-Json -Compress -Depth 3
+`
+
+const execFileAsync = promisify(execFile)
+const WINDOWS_CIM_TIMEOUT_MS = 10_000
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000
+
+const WINDOWS_PROCESS_INPUT_KEY = 'AAMP_ACP_WINDOWS_INPUT_BASE64'
+
+function windowsProcessEnvironment(pid: number): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    [WINDOWS_PROCESS_INPUT_KEY]: Buffer.from(JSON.stringify({ pid }), 'utf8').toString('base64'),
+  }
+}
+
+type WindowsIdentityRead =
+  | { status: 'found'; identity: WindowsProcessIdentity }
+  | { status: 'gone' }
+  | { status: 'unknown'; reason?: 'incomplete-metadata' | 'query-timeout' | 'query-failed' }
+
+function inspectWindowsProcessIdentity(pid: number): WindowsIdentityRead {
+  try {
+    const value = JSON.parse(execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_IDENTITY_SCRIPT,
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(pid) })) as Partial<WindowsProcessIdentity>
+    if (value.pid !== pid || !value.creationDate || !value.executablePath || !value.ownerSid) return { status: 'unknown', reason: 'incomplete-metadata' }
+    return { status: 'found', identity: value as WindowsProcessIdentity }
+  } catch (error) {
+    return (error as { status?: number }).status === 3 ? { status: 'gone' } : { status: 'unknown', reason: (error as { code?: string }).code === 'ETIMEDOUT' ? 'query-timeout' : 'query-failed' }
+  }
+}
+
+export function readWindowsProcessIdentity(pid: number): WindowsProcessIdentity | undefined {
+  const result = inspectWindowsProcessIdentity(pid)
+  if (result.status === 'unknown') console.warn(`Windows process ownership unconfirmed for PID ${pid}: ${result.reason ?? 'identity-unavailable'}`)
+  return result.status === 'found' ? result.identity : undefined
+}
+
+export async function snapshotOwnedWindowsTree(root: WindowsProcessIdentity, execute = execFileAsync): Promise<WindowsProcessIdentity[]> {
+  try {
+    const { stdout } = await execute('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command', WINDOWS_PROCESS_TREE_SCRIPT,
+    ], { encoding: 'utf8', windowsHide: true, timeout: WINDOWS_CIM_TIMEOUT_MS, maxBuffer: 1024 * 1024, env: windowsProcessEnvironment(root.pid) })
+    const value = JSON.parse(stdout) as { processes?: unknown }
+    if (!Array.isArray(value.processes)) return []
+    const identities = value.processes.filter((candidate): candidate is WindowsProcessIdentity => {
+      if (!candidate || typeof candidate !== 'object') return false
+      const identity = candidate as Partial<WindowsProcessIdentity>
+      return Number.isSafeInteger(identity.pid) && (identity.pid ?? 0) > 0
+        && Number.isSafeInteger((candidate as Partial<WindowsProcessRecord>).parentPid)
+        && typeof identity.creationDate === 'string' && Boolean(identity.creationDate)
+        && typeof identity.executablePath === 'string' && Boolean(identity.executablePath)
+        && typeof identity.ownerSid === 'string' && Boolean(identity.ownerSid)
+    })
+    return selectOwnedWindowsTree(root, identities as WindowsProcessRecord[])
+  } catch {
+    return []
+  }
+}
+
+export interface WindowsProcessRecord extends WindowsProcessIdentity { parentPid: number }
+
+export function selectOwnedWindowsTree(
+  root: WindowsProcessIdentity,
+  records: readonly WindowsProcessRecord[],
+): WindowsProcessIdentity[] {
+  const rootRecord = records.find((record) => record.pid === root.pid)
+  if (!rootRecord || !sameWindowsProcessIdentity(root, rootRecord)) return []
+  const selected = new Map<number, WindowsProcessRecord>([[root.pid, rootRecord]])
+  let changed = true
+  while (changed && selected.size < 256) {
+    changed = false
+    for (const record of records) {
+      if (selected.has(record.pid) || record.ownerSid !== root.ownerSid) continue
+      const parent = selected.get(record.parentPid)
+      if (!parent) continue
+      if (Date.parse(record.creationDate) < Date.parse(parent.creationDate)) continue
+      selected.set(record.pid, record)
+      changed = true
+      if (selected.size >= 256) break
+    }
+  }
+  return [...selected.values()]
+}
+
+function sameWindowsProcessIdentity(a: WindowsProcessIdentity, b: WindowsProcessIdentity): boolean {
+  return a.pid === b.pid
+    && a.creationDate === b.creationDate
+    && a.executablePath.toLowerCase() === b.executablePath.toLowerCase()
+    && a.ownerSid === b.ownerSid
+}
+
+interface WindowsOwnedProcessTreeOptions {
+  snapshot?: (root: WindowsProcessIdentity) => WindowsProcessIdentity[] | Promise<WindowsProcessIdentity[]>
+  terminate?: (identity: WindowsProcessIdentity) => WindowsTerminationOutcome
+  setTimeoutFn?: (callback: () => void, intervalMs: number) => NodeJS.Timeout
+  clearTimeoutFn?: (timer: NodeJS.Timeout) => void
+  intervalMs?: number
+}
+
+export class WindowsOwnedProcessTree {
+  private retained = new Map<number, WindowsProcessIdentity>()
+  private timer: NodeJS.Timeout | undefined
+  private sampling: Promise<void> | undefined
+  private cleanup: Promise<void> | undefined
+  private polling = false
+  private readonly snapshot: NonNullable<WindowsOwnedProcessTreeOptions['snapshot']>
+  private readonly terminate: NonNullable<WindowsOwnedProcessTreeOptions['terminate']>
+  private readonly setTimeoutFn: NonNullable<WindowsOwnedProcessTreeOptions['setTimeoutFn']>
+  private readonly clearTimeoutFn: NonNullable<WindowsOwnedProcessTreeOptions['clearTimeoutFn']>
+  private readonly intervalMs: number
+
+  constructor(private readonly root: WindowsProcessIdentity, options: WindowsOwnedProcessTreeOptions = {}) {
+    this.retained.set(root.pid, root)
+    this.snapshot = options.snapshot ?? snapshotOwnedWindowsTree
+    this.terminate = options.terminate ?? ((identity) => terminateWindowsProcessTree(identity))
+    this.setTimeoutFn = options.setTimeoutFn ?? ((callback, delay) => setTimeout(callback, delay))
+    this.clearTimeoutFn = options.clearTimeoutFn ?? ((timer) => clearTimeout(timer))
+    this.intervalMs = options.intervalMs ?? 500
+  }
+
+  start(): void {
+    if (this.polling || this.cleanup) return
+    this.polling = true
+    void this.refresh()
+  }
+
+  refresh(): Promise<void> {
+    if (this.sampling) return this.sampling
+    if (this.cleanup) return Promise.resolve()
+    if (this.timer) this.clearTimeoutFn(this.timer)
+    this.timer = undefined
+    this.sampling = Promise.resolve().then(() => this.snapshot(this.root)).then(identities => {
+      const observedRoot = identities.find(identity => identity.pid === this.root.pid)
+      if (!observedRoot || !sameWindowsProcessIdentity(this.root, observedRoot)) return
+      for (const identity of identities.slice(0, 256)) {
+        if (identity.ownerSid === this.root.ownerSid) this.retained.set(identity.pid, identity)
+      }
+    }).catch(() => {
+      // Unavailable/failed sampling cannot revoke previously verified ownership.
+    }).finally(() => {
+      this.sampling = undefined
+      if (this.polling) {
+        this.timer = this.setTimeoutFn(() => {
+          this.timer = undefined
+          if (this.polling) void this.refresh()
+        }, this.intervalMs)
+        this.timer.unref?.()
+      }
+    })
+    return this.sampling
+  }
+
+  stopPolling(): void {
+    this.polling = false
+    if (this.timer) this.clearTimeoutFn(this.timer)
+    this.timer = undefined
+  }
+
+  terminateRetained(): Promise<void> {
+    this.stopPolling()
+    if (this.cleanup) return this.cleanup
+    // A sample already in flight may contain verified descendants. Drain it
+    // before cleanup, and never schedule another sample after stopping.
+    this.cleanup = Promise.resolve(this.sampling).then(() => {
+      const identities = [...this.retained.values()].sort((a, b) => b.pid - a.pid)
+      for (const identity of identities) {
+        let outcome: WindowsTerminationOutcome = 'unconfirmed'
+        try { outcome = this.terminate(identity) } catch { /* retain unconfirmed identity */ }
+        if (outcome === 'gone' || outcome === 'identity-changed') this.retained.delete(identity.pid)
+      }
+    }).finally(() => { this.cleanup = undefined })
+    return this.cleanup
+  }
+}
+
+export type WindowsTerminationOutcome = 'termination-requested' | 'gone' | 'identity-changed' | 'unconfirmed'
+
+export function terminateWindowsProcessTree(
+  expected: WindowsProcessIdentity,
+  inspectIdentity: (pid: number) => WindowsIdentityRead = inspectWindowsProcessIdentity,
+  taskkill: typeof execFileSync = execFileSync,
+): WindowsTerminationOutcome {
+  const before = inspectIdentity(expected.pid)
+  if (before.status === 'gone') return 'gone'
+  if (before.status !== 'found') {
+    console.warn(`Windows cleanup unconfirmed for PID ${expected.pid}: ${before.reason ?? 'identity-unavailable'}`)
+    return 'unconfirmed'
+  }
+  if (!sameWindowsProcessIdentity(expected, before.identity)) return 'identity-changed'
+  try {
+    taskkill('taskkill.exe', ['/pid', String(expected.pid), '/t', '/f'], {
+      stdio: 'ignore', windowsHide: true, timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+    })
+  } catch {
+    return 'unconfirmed'
+  }
+  const after = inspectIdentity(expected.pid)
+  if (after.status === 'gone') return 'gone'
+  if (after.status === 'found' && !sameWindowsProcessIdentity(expected, after.identity)) return 'identity-changed'
+  return after.status === 'unknown' ? 'unconfirmed' : 'termination-requested'
+}
+
+export function buildAcpxEnvironment(
+  cwd: string,
+  source: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  const env = { ...source }
+  if (platform !== 'win32') {
+    env.PATH = [posix.join(cwd, 'node_modules', '.bin'), source.PATH ?? ''].filter(Boolean).join(':')
+    return env
+  }
+  const pathKeys = Object.keys(env).filter((key) => key.toLowerCase() === 'path')
+  const pathKey = pathKeys[0] ?? 'Path'
+  const existingPath = pathKeys.map((key) => env[key]).find((value) => value !== undefined) ?? ''
+  for (const key of pathKeys) delete env[key]
+  env[pathKey] = [win32.join(cwd, 'node_modules', '.bin'), existingPath]
+    .filter(Boolean).join(';')
+  return env
+}
 
 export interface AcpEvent {
   eventVersion?: number
@@ -13,6 +361,11 @@ export interface AcpEvent {
   messageId?: string
   content?: unknown
   [key: string]: unknown
+}
+
+export interface AcpxClientRuntime {
+  platform?: NodeJS.Platform
+  resolveCommand?: typeof resolveNativeCommand
 }
 
 export type AcpTextChunkChannel = 'assistant' | 'thought'
@@ -39,10 +392,16 @@ export interface AcpPlanEntry {
 }
 
 export interface AcpPromptHandlers {
+  onControl?: (control: AcpPromptControl) => void
   onEvent?: (event: AcpEvent) => void
   onTextChunk?: (chunk: AcpTextChunk) => void
   onToolUpdate?: (update: AcpToolUpdate) => void
   onPlanUpdate?: (entries: AcpPlanEntry[]) => void
+}
+
+export interface AcpPromptControl {
+  /** Cancels this prompt only; resolves after both prompt and cancel children exit. */
+  cancelAndWait: () => Promise<{ forced: boolean }>
 }
 
 export interface AcpResult {
@@ -71,6 +430,8 @@ export interface AcpAgentProbeOptions {
 
 interface AcpxProcessControl {
   cancel: () => Promise<void>
+  exited: Promise<void>
+  killAndWait: () => Promise<void>
 }
 
 interface AcpxExecution<T> extends AcpxProcessControl {
@@ -365,21 +726,41 @@ function throwIfAuthenticationFailure(...values: unknown[]): void {
  * Wrapper around acpx CLI.
  * Invokes acpx as a subprocess and parses NDJSON output.
  */
+function windowsPromptInput(text: string): string {
+  // acpx --file accepts ACP blocks. Wrap text so a prompt beginning with '['
+  // cannot become structured input; match its existing argv whitespace trim.
+  // ASCII JSON also survives upstream Buffer-to-string chunk decoding intact.
+  return JSON.stringify([{ type: 'text', text: text.trim() }])
+    .replace(/[\u007f-\uffff]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
+}
+
 export class AcpxClient {
   private cwd: string
   private activeProcesses = new Map<ChildProcessWithoutNullStreams, Promise<void>>()
   private stopInFlight: Promise<void> | undefined
+  private windowsProcessIdentities = new WeakMap<ChildProcessWithoutNullStreams, WindowsProcessIdentity>()
+  private exitedProcesses = new WeakSet<ChildProcessWithoutNullStreams>()
+  private windowsProcessTrees = new WeakMap<ChildProcessWithoutNullStreams, WindowsOwnedProcessTree>()
+  private platform: NodeJS.Platform
+  private resolveCommand: typeof resolveNativeCommand
 
-  constructor(cwd?: string) {
+  constructor(cwd?: string, runtime: AcpxClientRuntime = {}) {
     this.cwd = cwd ?? process.cwd()
+    this.platform = runtime.platform ?? process.platform
+    this.resolveCommand = runtime.resolveCommand ?? resolveNativeCommand
   }
 
   private isRawAgentCommand(agent: string): boolean {
     return /\s/.test(agent.trim())
   }
 
-  private buildAcpxArgs(agent: string, args: string[], globalArgs: string[] = []): string[] {
+  private buildAcpxArgs(agent: string, args: string[], globalArgs: string[] = [], prepare = true): string[] {
     if (this.isRawAgentCommand(agent)) {
+      if (this.platform === 'win32') {
+        const argv = parseWindowsAgentArgv(agent)
+        const alias = prepare ? ensureWindowsAgentConfig(this.cwd, argv) : windowsAgentAlias(argv)
+        return ['--approve-all', '--cwd', this.cwd, ...globalArgs, alias, ...args]
+      }
       return ['--approve-all', '--cwd', this.cwd, ...globalArgs, '--agent', agent, ...args]
     }
     return ['--approve-all', '--cwd', this.cwd, ...globalArgs, agent, ...args]
@@ -392,13 +773,13 @@ export class AcpxClient {
   }
 
   private formatFailedCommand(agent: string, args: string[], globalArgs: string[] = []): string {
-    return ['acpx', ...this.buildAcpxArgs(agent, args, globalArgs)]
+    return ['acpx', ...this.buildAcpxArgs(agent, args, globalArgs, false)]
       .map((arg) => this.formatArgForLog(arg))
       .join(' ')
   }
 
   private acpxEnv(): NodeJS.ProcessEnv {
-    const env = { ...process.env }
+    const env = buildAcpxEnvironment(this.cwd)
     const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/'
     const cache = env.npm_config_cache || env.NPM_CONFIG_CACHE || `${tmpdir()}/aamp-acpx-npm-cache`
 
@@ -418,10 +799,6 @@ export class AcpxClient {
     }
 
     mkdirSync(cache, { recursive: true })
-    env.PATH = [
-      join(this.cwd, 'node_modules', '.bin'),
-      process.env.PATH ?? '',
-    ].filter(Boolean).join(delimiter)
     env.npm_config_registry = registry
     env.NPM_CONFIG_REGISTRY = registry
     env.npm_config_cache = cache
@@ -430,23 +807,44 @@ export class AcpxClient {
   }
 
   private spawnAcpx(args: string[]): ChildProcessWithoutNullStreams {
-    return spawn('acpx', args, {
+    const env = this.acpxEnv()
+    const executable = this.resolveCommand('acpx', { env })
+    return this.trackWindowsProcess(spawn(executable.command, [...executable.argsPrefix, ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
-      env: this.acpxEnv(),
+      env,
       detached: process.platform !== 'win32',
       windowsHide: true,
-    })
+    }))
   }
 
   private spawnNpxAcpx(args: string[]): ChildProcessWithoutNullStreams {
-    return spawn('npx', ['-y', 'acpx', ...args], {
+    const env = this.acpxEnv()
+    const executable = this.resolveCommand('npx', { env })
+    return this.trackWindowsProcess(spawn(executable.command, [...executable.argsPrefix, '-y', 'acpx', ...args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: this.cwd,
-      env: this.acpxEnv(),
+      env,
       detached: process.platform !== 'win32',
       windowsHide: true,
-    })
+    }))
+  }
+
+  private trackWindowsProcess(proc: ChildProcessWithoutNullStreams): ChildProcessWithoutNullStreams {
+    if (process.platform === 'win32' && proc.pid) {
+      const identity = readWindowsProcessIdentity(proc.pid)
+      if (identity) {
+        this.windowsProcessIdentities.set(proc, identity)
+        const tree = new WindowsOwnedProcessTree(identity)
+        this.windowsProcessTrees.set(proc, tree)
+        tree.start()
+      }
+      proc.once('exit', () => {
+        this.exitedProcesses.add(proc)
+        this.windowsProcessTrees.get(proc)?.stopPolling()
+      })
+    }
+    return proc
   }
 
   private isSpawnNotFoundError(err: unknown): boolean {
@@ -461,10 +859,12 @@ export class AcpxClient {
       onClose: (code: number | null) => void
       onError: (err: Error) => void
     },
+    input?: string,
   ): AcpxProcessControl {
     let startedFallback = false
     let settled = false
     let cancelled = false
+    let cancellationCleanup: Promise<void> | undefined
     const ownedProcesses = new Set<ChildProcessWithoutNullStreams>()
     const forcedKillTimers = new Map<ChildProcessWithoutNullStreams, NodeJS.Timeout>()
     let resolveExited: (() => void) | undefined
@@ -480,38 +880,68 @@ export class AcpxClient {
       let processErrored = false
       ownedProcesses.add(proc)
       this.activeProcesses.set(proc, closed)
+      let closeCleanup: Promise<void> | undefined
       const forgetProcess = () => {
-        if (closeObserved) return
+        if (closeObserved) return closeCleanup
         closeObserved = true
         const forcedKillTimer = forcedKillTimers.get(proc)
         if (forcedKillTimer) clearTimeout(forcedKillTimer)
         forcedKillTimers.delete(proc)
-        ownedProcesses.delete(proc)
-        this.activeProcesses.delete(proc)
-        resolveClosed()
+        const release = () => {
+          ownedProcesses.delete(proc)
+          this.activeProcesses.delete(proc)
+          resolveClosed()
+        }
+        const tree = this.windowsProcessTrees.get(proc)
+        if (tree) {
+          closeCleanup = tree.terminateRetained().then(release)
+          return closeCleanup
+        }
+        release()
+      }
+      if (input !== undefined) {
+        // Wait for a real spawn so ENOENT can select npx before any stdin write.
+        // The same payload is supplied afresh to each fallback child.
+        proc.stdin.on('error', (error: NodeJS.ErrnoException) => {
+          if (settled) return
+          settled = true
+          // Failed delivery must not leave this exact owned child running.
+          this.terminateProcessTree(proc, 'SIGTERM')
+          const forcedKillTimer = setTimeout(() => {
+            if (ownedProcesses.has(proc)) this.terminateProcessTree(proc, 'SIGKILL')
+          }, 1_000)
+          forcedKillTimer.unref()
+          forcedKillTimers.set(proc, forcedKillTimer)
+          handlers.onError(error)
+        })
+        proc.once('spawn', () => { proc.stdin.end(input, 'utf8') })
       }
       proc.stdout.on('data', (chunk: Buffer) => handlers.onStdout?.(chunk))
       proc.stderr.on('data', (chunk: Buffer) => handlers.onStderr?.(chunk))
       proc.on('close', (code) => {
-        forgetProcess()
-        if (processErrored) {
+        const complete = () => {
+          if (!processErrored && !settled) {
+            settled = true
+            handlers.onClose(code)
+          }
           resolveExitedIfComplete()
-          return
         }
-        if (settled) {
-          resolveExitedIfComplete()
-          return
-        }
-        settled = true
-        handlers.onClose(code)
-        resolveExitedIfComplete()
+        const cleanup = forgetProcess()
+        if (cleanup) void cleanup.then(complete)
+        else complete()
       })
       proc.on('error', (err) => {
         processErrored = true
         if (!proc.pid) forgetProcess()
         if (!cancelled && !startedFallback && this.isSpawnNotFoundError(err)) {
           startedFallback = true
-          attach(this.spawnNpxAcpx(args))
+          try {
+            attach(this.spawnNpxAcpx(args))
+          } catch (fallbackError) {
+            settled = true
+            handlers.onError(fallbackError as Error)
+            resolveExitedIfComplete()
+          }
           return
         }
         if (settled) {
@@ -524,21 +954,56 @@ export class AcpxClient {
       })
     }
 
-    attach(this.spawnAcpx(args))
+    try {
+      attach(this.spawnAcpx(args))
+    } catch (error) {
+      if (this.isSpawnNotFoundError(error)) {
+        startedFallback = true
+        try {
+          attach(this.spawnNpxAcpx(args))
+        } catch (fallbackError) {
+          settled = true
+          handlers.onError(fallbackError as Error)
+          resolveExitedIfComplete()
+        }
+      } else {
+        settled = true
+        handlers.onError(error as Error)
+        resolveExitedIfComplete()
+      }
+    }
     return {
+      exited,
+      killAndWait: async () => {
+        cancelled = true
+        const cleanups: Promise<void>[] = []
+        for (const proc of [...ownedProcesses]) {
+          const cleanup = this.terminateProcessTree(proc, 'SIGKILL')
+          if (cleanup) cleanups.push(cleanup)
+        }
+        if (cleanups.length) await Promise.all(cleanups)
+        resolveExitedIfComplete()
+        if (!await this.waitForExit(exited, 2_000)) {
+          throw new Error('ACP prompt process did not exit after targeted termination')
+        }
+      },
       cancel: async () => {
         if (!cancelled) {
           cancelled = true
+          const pendingCleanups: Promise<void>[] = []
           for (const proc of [...ownedProcesses]) {
-            this.terminateProcessTree(proc, 'SIGTERM')
+            const cleanup = this.terminateProcessTree(proc, 'SIGTERM')
+            if (cleanup) pendingCleanups.push(cleanup)
             const forcedKillTimer = setTimeout(() => {
               if (ownedProcesses.has(proc)) this.terminateProcessTree(proc, 'SIGKILL')
             }, 1_000)
             forcedKillTimer.unref()
             forcedKillTimers.set(proc, forcedKillTimer)
           }
+          if (pendingCleanups.length) cancellationCleanup = Promise.all(pendingCleanups).then(() => {})
         }
 
+        if (cancellationCleanup) await cancellationCleanup
         resolveExitedIfComplete()
         await Promise.race([
           exited,
@@ -559,14 +1024,20 @@ export class AcpxClient {
   }
 
   private async stopActiveProcesses(): Promise<void> {
+    const pendingTerminations: Promise<void>[] = []
     for (const proc of this.activeProcesses.keys()) {
-      this.terminateProcessTree(proc, 'SIGTERM')
+      const cleanup = this.terminateProcessTree(proc, 'SIGTERM')
+      if (cleanup) pendingTerminations.push(cleanup)
     }
+    if (pendingTerminations.length) await Promise.all(pendingTerminations)
     if (await this.waitForActiveProcessesToClose(1_000)) return
 
+    const pendingKills: Promise<void>[] = []
     for (const proc of this.activeProcesses.keys()) {
-      this.terminateProcessTree(proc, 'SIGKILL')
+      const cleanup = this.terminateProcessTree(proc, 'SIGKILL')
+      if (cleanup) pendingKills.push(cleanup)
     }
+    if (pendingKills.length) await Promise.all(pendingKills)
     if (!(await this.waitForActiveProcessesToClose(1_000))) {
       throw new Error('acpx child process did not close after SIGKILL')
     }
@@ -596,7 +1067,7 @@ export class AcpxClient {
   private terminateProcessTree(
     proc: ChildProcessWithoutNullStreams,
     signal: NodeJS.Signals = 'SIGTERM',
-  ): void {
+  ): void | Promise<void> {
     const pid = proc.pid
     if (!pid) return
 
@@ -609,9 +1080,18 @@ export class AcpxClient {
       }
     }
 
-    try {
-      proc.kill(signal)
-    } catch { /* best-effort cleanup */ }
+    if (process.platform === 'win32') {
+      const tree = this.windowsProcessTrees.get(proc)
+      if (tree) {
+        return tree.terminateRetained()
+      }
+      if (this.exitedProcesses.has(proc)) return
+      const identity = this.windowsProcessIdentities.get(proc)
+      if (identity) terminateWindowsProcessTree(identity)
+      return
+    }
+
+    try { proc.kill(signal) } catch { /* best-effort cleanup */ }
   }
 
   private formatProcessFailure(
@@ -711,14 +1191,61 @@ export class AcpxClient {
     text: string,
     handlers?: AcpPromptHandlers,
   ): Promise<AcpResult> {
-    try {
-      return await this.promptJsonMode(agent, sessionName, text, handlers)
-    } catch (err) {
-      if (supportsJsonStreamingFallback((err as Error).message)) {
-        return await this.promptTextMode(agent, sessionName, text)
+    let currentProcess: AcpxProcessControl | undefined
+    let cancelled = false
+    let cancellation: Promise<{ forced: boolean }> | undefined
+    const captureProcess = (control: AcpxProcessControl) => { currentProcess = control }
+    const result = (async () => {
+      try {
+        return await this.promptJsonMode(agent, sessionName, text, handlers, captureProcess)
+      } catch (err) {
+        // A cancelled JSON prompt must never start a new text-mode process.
+        if (!cancelled && supportsJsonStreamingFallback((err as Error).message)) {
+          return await this.promptTextMode(agent, sessionName, text, captureProcess)
+        }
+        throw err
       }
-      throw err
+    })()
+    handlers?.onControl?.({
+      cancelAndWait: () => {
+        cancelled = true
+        cancellation ??= currentProcess
+          ? this.cancelPromptAndWait(agent, sessionName, currentProcess)
+          : Promise.resolve({ forced: false })
+        return cancellation
+      },
+    })
+    return await result
+  }
+
+  private async waitForExit(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs) }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
     }
+  }
+
+  private async cancelPromptAndWait(
+    agent: string,
+    sessionName: string,
+    prompt: AcpxProcessControl,
+  ): Promise<{ forced: boolean }> {
+    const cancel = this.startExec(agent, ['cancel', '-s', sessionName])
+    // The command can fail after the prompt already exited. Process exit, rather
+    // than its exit code, decides when this session is safe to reuse.
+    void cancel.promise.catch(() => {})
+    const exited = Promise.all([prompt.exited, cancel.exited]).then(() => {})
+    if (await this.waitForExit(exited, 2_000)) return { forced: false }
+
+    // Never use stop(): another Task may be running in this same bridge.
+    await Promise.all([prompt.killAndWait(), cancel.killAndWait()])
+    await exited
+    return { forced: true }
   }
 
   private async promptJsonMode(
@@ -726,6 +1253,7 @@ export class AcpxClient {
     sessionName: string,
     text: string,
     handlers?: AcpPromptHandlers,
+    captureProcess?: (control: AcpxProcessControl) => void,
   ): Promise<AcpResult> {
     const events: AcpEvent[] = []
     let stopReason: string | undefined
@@ -742,7 +1270,7 @@ export class AcpxClient {
       const acpxArgs = this.buildAcpxArgs(agent, [
         'prompt',
         '-s', sessionName,
-        text,
+        ...(this.platform === 'win32' ? ['--file', '-'] : [text]),
       ], ['--format', 'json', '--json-strict'])
 
       let stdoutBuffer = ''
@@ -855,7 +1383,7 @@ export class AcpxClient {
         }
       }
 
-      this.runAcpx(acpxArgs, {
+      const processControl = this.runAcpx(acpxArgs, {
         onStdout: processStdoutChunk,
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
@@ -905,21 +1433,25 @@ export class AcpxClient {
         onError: (err) => {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
-      })
+      }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
+      captureProcess?.(processControl)
     })
   }
 
-  private async promptTextMode(agent: string, sessionName: string, text: string): Promise<AcpResult> {
+  private async promptTextMode(
+    agent: string, sessionName: string, text: string,
+    captureProcess?: (control: AcpxProcessControl) => void,
+  ): Promise<AcpResult> {
     const events: AcpEvent[] = []
 
     return await new Promise<AcpResult>((resolve, reject) => {
       // Old acpx builds may not support JSON output yet.
-      const acpxArgs = this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, text])
+      const acpxArgs = this.buildAcpxArgs(agent, ['prompt', '-s', sessionName, ...(this.platform === 'win32' ? ['--file', '-'] : [text])])
 
       let stdout = ''
       let stderr = ''
 
-      this.runAcpx(acpxArgs, {
+      const processControl = this.runAcpx(acpxArgs, {
         onStdout: (chunk: Buffer) => { stdout += chunk.toString() },
         onStderr: (chunk: Buffer) => { stderr += chunk.toString() },
         onClose: (code) => {
@@ -951,7 +1483,8 @@ export class AcpxClient {
         onError: (err) => {
           reject(new Error(`Failed to spawn acpx or npx acpx: ${err.message}. Is Node/npm available?`))
         },
-      })
+      }, this.platform === 'win32' ? windowsPromptInput(text) : undefined)
+      captureProcess?.(processControl)
     })
   }
 
@@ -1000,6 +1533,8 @@ export class AcpxClient {
     return {
       promise,
       cancel: async () => { await processControl?.cancel() },
+      exited: processControl?.exited ?? Promise.resolve(),
+      killAndWait: async () => { await processControl?.killAndWait() },
     }
   }
 

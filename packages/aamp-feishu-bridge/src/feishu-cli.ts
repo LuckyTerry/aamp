@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { resolveNativeCommand } from './native-command.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -60,7 +61,8 @@ function larkCliConfigPath(): string {
 
 async function runLarkCli(cliBin: string, args: string[], options: { openSetupUrl?: boolean } = {}): Promise<string> {
   if (!options.openSetupUrl) {
-    const { stdout } = await execFileAsync(cliBin, args, {
+    const executable = resolveNativeCommand(cliBin)
+    const { stdout } = await execFileAsync(executable.command, [...executable.argsPrefix, ...args], {
       timeout: 10 * 60 * 1000,
       maxBuffer: 2 * 1024 * 1024,
     })
@@ -76,7 +78,8 @@ async function runLarkCliStreaming(
   options: { openSetupUrl?: boolean },
 ): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cliBin, args, {
+    const executable = resolveNativeCommand(cliBin)
+    const child = spawn(executable.command, [...executable.argsPrefix, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let stdout = ''
@@ -140,7 +143,8 @@ function openExternalUrl(url: string): void {
 }
 
 async function runLarkCliJson(cliBin: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync(cliBin, args, {
+  const executable = resolveNativeCommand(cliBin)
+  const { stdout } = await execFileAsync(executable.command, [...executable.argsPrefix, ...args], {
     timeout: 10 * 60 * 1000,
     maxBuffer: 2 * 1024 * 1024,
   })

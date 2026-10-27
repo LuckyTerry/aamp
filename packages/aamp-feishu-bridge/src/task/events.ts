@@ -10,6 +10,11 @@ const TASK_COMMENT_EVENTS = new Set([
 
 export function classifyFeishuTaskEvent(eventTypes: readonly string[]): FeishuTaskEventKind | null {
   const normalized = eventTypes.map((eventType) => eventType.trim()).filter(Boolean)
+  const controlledStart = normalized.includes('task_agent_start')
+  const controlledStop = normalized.includes('task_agent_stop')
+  if (controlledStart && controlledStop) return null
+  if (controlledStart) return 'task_agent_start'
+  if (controlledStop) return 'task_agent_stop'
   if (normalized.some((eventType) => TASK_COMMENT_EVENTS.has(eventType))) {
     return 'task_comment'
   }

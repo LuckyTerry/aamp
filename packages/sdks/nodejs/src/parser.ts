@@ -330,7 +330,10 @@ export function parseAampHeaders(meta: EmailMetadata): AampMessage | null {
     const status = (getAampHeader(headers, AAMP_HEADER.STATUS) ?? 'completed') as
       | 'completed'
       | 'rejected'
-    const output = getAampHeader(headers, AAMP_HEADER.OUTPUT) ?? parsedBody.output
+      | 'cancelled'
+    const output = status === 'cancelled'
+      ? ''
+      : (getAampHeader(headers, AAMP_HEADER.OUTPUT) ?? parsedBody.output)
     const errorMsg = getAampHeader(headers, AAMP_HEADER.ERROR_MSG) ?? parsedBody.errorMsg
     const structuredResult = decodeStructuredResult(
       getAampHeader(headers, AAMP_HEADER.STRUCTURED_RESULT),
@@ -586,7 +589,7 @@ export function buildPairRespondHeaders(opts: {
  */
 export function buildResultHeaders(params: {
   taskId: string
-  status: 'completed' | 'rejected'
+  status: 'completed' | 'rejected' | 'cancelled'
   output: string
   errorMsg?: string
   structuredResult?: TaskResult['structuredResult']

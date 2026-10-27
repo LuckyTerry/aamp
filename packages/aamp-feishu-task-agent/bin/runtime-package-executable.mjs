@@ -1,4 +1,63 @@
 import { spawn } from 'node:child_process'
+import path from 'node:path'
+import { realpathSync } from 'node:fs'
+import {recoverPackageCache} from './runtime-recovery-cache.mjs'
+
+export async function withExecutableProbeDeadline(promise, {timeoutMs, label, onTimeout}) {
+  if (!timeoutMs) return promise
+  let timer
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${label} 健康检查超时（${timeoutMs / 1000} 秒）`))
+        // Cleanup can require identity checks or fail; neither may extend the
+        // probe's deadline. The controller retains the process for cleanup.
+        Promise.resolve().then(onTimeout).catch(() => {})
+      }, timeoutMs)
+    })])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function canonicalCachePath(value, platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix
+  let candidate = paths.resolve(value)
+  if (platform !== process.platform) return candidate
+  const suffix = []
+  for (;;) {
+    try { return paths.join(realpathSync.native(candidate), ...suffix) }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) return undefined
+      const parent = paths.dirname(candidate)
+      if (parent === candidate) return paths.resolve(value)
+      suffix.unshift(paths.basename(candidate))
+      candidate = parent
+    }
+  }
+}
+
+export function isMissingCachedModule(error, cacheDir, platform = process.platform) {
+  if (!cacheDir) return false
+  const text = String(error?.stderr || '')
+  if (!/\b(?:ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND)\b/.test(text)) return false
+  const missing = /Cannot find (?:module|package) ['"]([^'"\r\n]+)['"]/.exec(text)?.[1]
+  if (!missing) return false
+  const paths = platform === 'win32' ? path.win32 : path.posix
+  const owned = value => {
+    const root = canonicalCachePath(cacheDir, platform)
+    const target = canonicalCachePath(value, platform)
+    if (!root || !target) return false
+    const relative = paths.relative(root, target).replaceAll('\\', '/')
+    return /^(?:_npx|_aamp-recovery-v1)\//.test(relative)
+  }
+  if (paths.isAbsolute(missing)) return owned(missing)
+  // A bare missing dependency must have an importer inside our managed cache.
+  // Never classify a missing user-project module as a cache repair request.
+  if (missing.startsWith('.')) return false
+  const importer = /(?:imported from |^- )([^\r\n]+)/m.exec(text)?.[1]
+  return Boolean(importer && paths.isAbsolute(importer) && owned(importer))
+}
 
 const NPM_EXEC_ENVIRONMENT_KEYS = [
   'npm_lifecycle_event',
@@ -53,6 +112,13 @@ for (const binDir of pathEntries) {
       const kind = process.platform === 'win32' && (extension === '.cmd' || extension === '.bat')
         ? 'cmd'
         : 'direct'
+      if (kind === 'cmd') {
+        let shim = fs.readFileSync(candidate, 'utf8')
+        if (/^\s*@?SET\s+"?dp0=%~dp0"?\s*$/im.test(shim)) shim = shim.replace(/%dp0%/gi, '%~dp0')
+        // Check only the standard npm Node shim form; never evaluate batch text.
+        const entry = /(?:\bnode(?:\.exe)?|"%_prog%"|"%~dp0[\\/]node\.exe")\s+"%~dp0[\\/]([^"\r\n]+)"\s+%\*/i.exec(shim)
+        if (entry && !fs.statSync(path.resolve(binDir, entry[1])).isFile()) continue
+      }
       process.stdout.write(JSON.stringify({
         executable,
         kind,
@@ -67,12 +133,24 @@ for (const binDir of pathEntries) {
   }
 }
 
-process.stderr.write('unable to resolve npm executable shim: ' + executable + '\\n')
-process.exit(1)
+process.stderr.write('unable to resolve npm executable shim: ' + executable + '\n')
+process.exit(78)
 `
 
-export function npmExecutableResolverArgs(executable) {
-  return ['--input-type=module', '--eval', RESOLVE_EXECUTABLE_SOURCE, executable]
+// npm treats its executable as shell command text on Windows. Preserve the
+// absolute Node path so spaces cannot split it or select a package-local node.
+export function npmExecutableResolverCommand({ platform = process.platform, execPath = process.execPath } = {}) {
+  return platform === 'win32' ? '""' + execPath + '""' : execPath
+}
+
+export function npmExecutableResolverArgs(executable, { platform = process.platform } = {}) {
+  // npm exec crosses cmd.exe on Windows, where a multiline --eval argument is
+  // truncated even when npm exits successfully. Keep the fixed module in one
+  // base64 data URL; the requested executable remains a separate argument.
+  const source = platform === 'win32'
+    ? `import('data:text/javascript;base64,${Buffer.from(RESOLVE_EXECUTABLE_SOURCE, 'utf8').toString('base64')}')`
+    : RESOLVE_EXECUTABLE_SOURCE
+  return ['--input-type=module', '--eval', source, executable]
 }
 
 function validatePreparedExecutable(value, executable = value?.executable) {
@@ -131,6 +209,23 @@ function replacePath(environment, pathValue, platform) {
   return next
 }
 
+export async function prepareRuntimeExecutableEnvironment({
+  executable, packageSpec = executable, environment = process.env,
+  find, resolve, probe, cacheDir, platform = process.platform,
+}) {
+  let descriptor
+  try {
+    descriptor = await find(executable, environment)
+    await probe(descriptor, environment)
+  } catch (error) {
+    const missingEntry = error.code === 78 && String(error.stderr || '').split(/\r?\n/)
+      .includes(`unable to resolve npm executable shim: ${executable}`)
+    if (!missingEntry && !isMissingCachedModule(error, cacheDir, platform)) throw error
+    descriptor = await resolve(packageSpec, executable, { env: environment })
+  }
+  return replacePath(environment, descriptor.pathValue, platform)
+}
+
 function mergePreparedEnvironment(environment, descriptor, platform) {
   const next = replacePath(environment, descriptor.pathValue, platform)
   for (const [key, value] of Object.entries(descriptor.environment)) {
@@ -182,6 +277,10 @@ export function createPackageExecutableLauncher({
   materialize,
   spawnProcess = spawn,
   platform = process.platform,
+  cacheDir,
+  onCacheRecovery = () => {},
+  checkCancelled = () => {},
+  validate = async () => {},
 } = {}) {
   if (typeof materialize !== 'function') throw new Error('materialize must be a function')
   const resolved = new Map()
@@ -193,12 +292,31 @@ export function createPackageExecutableLauncher({
     if (existing) return existing
 
     const previous = packageTails.get(packageSpec) || Promise.resolve()
-    const pending = previous.catch(() => {}).then(async () => (
-      validatePreparedExecutable(
-        await materialize(packageSpec, executable, context),
-        executable,
-      )
-    ))
+    const pending = previous.catch(() => {}).then(async () => {
+      const prepare = async options => {
+        const descriptor = validatePreparedExecutable(await materialize(packageSpec, executable, options), executable)
+        await validate(descriptor, options)
+        return descriptor
+      }
+      let value
+      const isDamaged = (error, directory) => {
+        const missingEntry = String(error.stderr || '').split(/\r?\n/)
+          .includes(`unable to resolve npm executable shim: ${executable}`)
+        return (error.code === 78 && missingEntry) || isMissingCachedModule(error, directory, platform)
+      }
+      try {
+        value = await prepare(context)
+      } catch (error) {
+        // Only our resolver's explicit missing-entry result permits recovery.
+        // Do not retry npm download/auth failures, cancellation, or business code.
+        if (!cacheDir || !isDamaged(error, cacheDir)) throw error
+        value = await recoverPackageCache({cacheDir,packageSpec,signal:context.signal,isDamaged,checkCancelled,
+          prepare:npmCacheDir=>prepare({...context,npmCacheDir}),
+          onRecovery:npmCacheDir=>onCacheRecovery({packageSpec,executable,npmCacheDir}),
+        })
+      }
+      return validatePreparedExecutable(value, executable)
+    })
     packageTails.set(packageSpec, pending)
     resolved.set(key, pending)
     pending.then(

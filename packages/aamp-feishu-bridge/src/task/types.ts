@@ -7,6 +7,11 @@ export interface BridgeMailboxIdentity {
 
 export type AgentExecutionLocation = 'local' | 'remote'
 
+export interface ControlledFeedbackPaths {
+  commandResultPath: string
+  executionStatePath: string
+}
+
 export interface TaskRuntimeAgentDescriptor {
   type: string
   executionLocation: AgentExecutionLocation
@@ -28,6 +33,8 @@ export interface BridgeConfig {
     headers?: Record<string, string>
     userIdType?: 'open_id' | 'user_id' | 'union_id'
     eventNames: string[]
+    /** Optional until the two Task OpenAPI routes and their app permissions are published. */
+    controlledFeedback?: ControlledFeedbackPaths
   }
   mailbox: BridgeMailboxIdentity
   behavior: {
@@ -36,13 +43,24 @@ export interface BridgeConfig {
   }
 }
 
-export type BridgeTaskStatus = 'dispatching' | 'dispatched' | 'acknowledged' | 'help_needed' | 'completed' | 'failed'
+export type BridgeTaskStatus = 'dispatching' | 'dispatched' | 'acknowledged' | 'help_needed' | 'completed' | 'failed' | 'cancelled'
 
-export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminder_fire'
+export type FeishuTaskEventKind = 'task_create' | 'task_comment' | 'task_reminder_fire' | 'task_agent_start' | 'task_agent_stop'
 
 export interface BridgeTaskState {
   taskGuid: string
   aampTaskId: string
+  /** Set only for a controlled execution; legacy event dispatches leave this absent. */
+  executionId?: string
+  /** Task event creation time, used only to reject an older START, never to order UUIDs. */
+  executionCreatedAt?: string
+  /** A newer controlled execution owns this Task; all old callbacks become local-only. */
+  supersededByExecutionId?: string
+  /** Root execution ownership survives replies; STOP targets this latest AAMP turn when set. */
+  activeContinuationTaskId?: string
+  startAccepted?: boolean
+  stopRequested?: boolean
+  reportedExecutionState?: 'RUNNING' | 'BLOCKED' | 'COMPLETED' | 'STOPPED' | 'FAILED'
   aampMessageId?: string
   feishuEventId?: string
   feishuEventKind?: FeishuTaskEventKind
@@ -130,6 +148,8 @@ export interface FeishuTaskEvent {
   eventId: string
   taskGuid: string
   eventTypes: string[]
+  executionId?: string
+  action?: 'START' | 'STOP'
   commentId?: string
   timestamp?: string
   raw?: unknown
@@ -213,6 +233,8 @@ export interface FeishuTaskDetails {
   url?: string
   status?: FeishuTaskStatus
   agentTaskStatus?: number
+  /** Current assignees and followers returned by Task; absent means ownership is unknown. */
+  members?: Array<{ id: string; type: string; role: string }>
   parentGuid?: string
   rrule?: string
   reminders?: unknown[]
@@ -237,6 +259,10 @@ export interface FeishuTaskStepInput {
   quote?: string
 }
 
+export interface FeishuTaskWriteContext {
+  executionId: string
+}
+
 export interface FeishuTaskClient {
   registerAgent(): Promise<void>
   subscribeTaskEvents(): Promise<void>
@@ -250,12 +276,13 @@ export interface FeishuTaskClient {
   getComment(commentId: string): Promise<FeishuTaskComment | null>
   getAppOwner(): Promise<FeishuAppOwner>
   downloadAttachment(attachment: FeishuTaskAttachment): Promise<FeishuDownloadedAttachment>
-  commentTask(taskGuid: string, content: string): Promise<void>
-  appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void>
-  appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void>
-  appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void>
-  uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void>
-  markTaskInProgress(taskGuid: string): Promise<void>
-  completeTask(taskGuid: string): Promise<void>
-  markTaskWaitingForHuman(taskGuid: string): Promise<void>
+  commentTask(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void>
+  appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput, context?: FeishuTaskWriteContext): Promise<void>
+  appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>, context?: FeishuTaskWriteContext): Promise<void>
+  appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void>
+  uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void>
+  markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
+  updateTaskProgress(taskGuid: string, progress: string, context?: FeishuTaskWriteContext): Promise<void>
+  completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
+  markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void>
 }

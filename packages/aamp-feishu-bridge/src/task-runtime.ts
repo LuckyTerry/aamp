@@ -33,6 +33,10 @@ const AGENTS_FILENAME = 'agents.json'
 const CURRENT_RUN_FILENAME = 'current.json'
 const ACTIVE_RUNS_FILENAME = 'active.json'
 const CONFIG_FILENAME = 'config.json'
+const DEFAULT_TASK_CONTROLLED_FEEDBACK_PATHS = {
+  commandResultPath: '/open-apis/task/v2/agent_task_execution/report_command_result',
+  executionStatePath: '/open-apis/task/v2/agent_task_execution/report_execution_state',
+} as const
 const SUPPORTED_AGENT_TYPES = ['codex', 'cursor', 'codem'] as const
 const PAIR_REQUEST_AUTH_RETRY_COUNT = 8
 const PAIR_REQUEST_AUTH_RETRY_DELAY_MS = 1_000
@@ -640,6 +644,7 @@ export async function ensureTaskRuntimeInstanceConfigs(
       ...(feishuHeaders ? { headers: feishuHeaders } : {}),
       userIdType: existingTask?.feishu.userIdType ?? 'open_id',
       eventNames: existingTask?.feishu.eventNames ?? ['task.task.update_user_access_v2'],
+      controlledFeedback: existingTask?.feishu.controlledFeedback ?? DEFAULT_TASK_CONTROLLED_FEEDBACK_PATHS,
     },
     mailbox: sharedMailbox,
     behavior: resolveTaskRuntimeBehavior(options, existingTask?.behavior),

@@ -4,6 +4,9 @@
 
 export const AAMP_PROTOCOL_VERSION = '1.1'
 
+/** Opt in to a task.result(status=cancelled) after a task.cancel has settled. */
+export const AAMP_CANCEL_RESULT_CONTEXT_KEY = 'aamp_cancel_result'
+
 export type AampIntent =
   | 'task.dispatch'
   | 'task.cancel'
@@ -108,7 +111,7 @@ export interface TaskResult {
   protocolVersion: string
   intent: 'task.result'
   taskId: string
-  status: 'completed' | 'rejected'
+  status: 'completed' | 'rejected' | 'cancelled'
   output: string
   errorMsg?: string
   structuredResult?: StructuredResultField[]
@@ -484,7 +487,7 @@ export interface SendResultOptions {
   /** Send to: the original from address of the dispatch email */
   to: string
   taskId: string
-  status: 'completed' | 'rejected'
+  status: 'completed' | 'rejected' | 'cancelled'
   output: string
   errorMsg?: string
   structuredResult?: StructuredResultField[]

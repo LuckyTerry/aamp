@@ -47,7 +47,7 @@ Use this order:
 | `traecli` (TraeCode CLI) | `aamp-acp-bridge` with native `traecli acp serve` | no CLI Bridge fallback |
 | `workbuddy` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
 | `workbuddy_ai` | `aamp-acp-bridge` | `aamp-acp-bridge` with explicit `acpCommand` |
-| `aime` | `aamp-acp-bridge` with fixed `aime-acp@0.1.0` | no local-workspace fallback |
+| `aime` | `aamp-acp-bridge` with fixed `@tengchengwei/aime-acp@0.1.1-dev.1` | no local-workspace fallback |
 | `openclaw` | `aamp-openclaw-plugin` | `aamp-acp-bridge`, then `aamp-cli-bridge` |
 | known ACP-compatible agent | `aamp-acp-bridge` | `aamp-cli-bridge` |
 | custom ACP-compatible agent | `aamp-acp-bridge` with explicit `acpCommand` | `aamp-cli-bridge` |
@@ -77,7 +77,7 @@ Known ACP agent names:
 | `traecli` | `traecli acp serve` |
 | `workbuddy` | macOS WorkBuddy app embedded `codebuddy --acp` |
 | `workbuddy_ai` | macOS WorkBuddy AI app embedded `'codebuddy' --acp` |
-| `aime` | isolated absolute `aime-acp --site cn` command; internal ping gate |
+| `aime` | isolated absolute `aime-acp --site cn` command; authenticated ByteDance tenant gate |
 
 For Trae CLI Next（内部版）, use the canonical agent name `traex`. ACP Bridge does not
 auto-discover the historical internal `trae` or `coco` names. The generated
@@ -104,12 +104,14 @@ Because the application path contains a space, its generated ACP command quotes
 the executable path before appending `--acp`. It does not fall back to
 `WorkBuddy.app`, `codebuddy`, or `cbc` on `PATH`.
 
-AIME is a ByteDance-internal remote Agent. The one-click menu includes `aime`
-only when `ping aime.bytedance.net` succeeds, and explicit selection fails
-before AIME setup when that probe fails. The launcher installs exactly
-`aime-acp@0.1.0` from BNPM into its isolated npm prefix and uses the absolute
+AIME is a ByteDance-internal remote Agent. One-click first authorizes the Bot,
+creates or reuses its `lark-cli` profile, completes user login, and reads the
+authenticated user's `tenant_key`. The menu includes `aime` only for tenant
+`736588c9260f175d`; explicit selection uses the same fail-closed check. Network
+reachability and `ping` are not tenant identity signals. The launcher installs exactly
+`@tengchengwei/aime-acp@0.1.1-dev.1` from BNPM into its isolated npm prefix and uses the absolute
 binary path. It then requires standalone AIME auth and
-`doctor --site cn --json`; ping success by itself is not readiness evidence. AIME bindings set
+`doctor --site cn --json`. AIME bindings set
 `attachmentPolicy: reject` and `taskDispatchConcurrency: 1`, so attachments
 are not materialized for this remote Agent and its tasks are dispatched
 serially.
@@ -524,6 +526,23 @@ Use the command matching the bridge you configured. Confirm that:
 The setup task is not complete until the bridge is running. The mailbox and
 pairing URL are only useful when the bridge process is alive to receive
 `pair.request` and `task.dispatch`.
+
+When `aamp-feishu-task-agent` owns the binding on macOS, use its built-in
+per-user `launchd` service instead of `screen` or `tmux`:
+
+```bash
+feishu-task-agent start
+feishu-task-agent status
+feishu-task-agent logs
+feishu-task-agent stop
+feishu-task-agent restart
+```
+
+`install` and `start` return only after every handed-off Bridge reports ready
+from the current background-service generation, so Terminal may be closed.
+Use `feishu-task-agent start --foreground` only for interactive diagnosis. The
+manual process-manager guidance below applies to standalone bridge setup that
+is not managed by `aamp-feishu-task-agent`.
 
 Prefer the user's existing process manager, AAMP desktop app, or agent hub when
 one is already managing AAMP bridges. Otherwise use a deterministic detached

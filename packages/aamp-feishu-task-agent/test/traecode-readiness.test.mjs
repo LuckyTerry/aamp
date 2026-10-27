@@ -56,7 +56,7 @@ test('doctor warnings continue and malformed JSON is rejected', () => {
   assert.throws(() => parseTraeCodeDoctor(JSON.stringify({ checks: [null] })), /check 0 is invalid/)
 })
 
-test('CLI probe rejects root help even when the command exits zero', () => {
+test('CLI probe rejects root help even when the command exits zero', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const fake = path.join(directory, 'traecli')
   writeFileSync(fake, '#!/bin/sh\nprintf "Available Commands:\\n  acp Agent Client Protocol commands\\n"\n')
@@ -65,7 +65,7 @@ test('CLI probe rejects root help even when the command exits zero', () => {
   assert.equal(result.status, 3)
 })
 
-test('CLI probe accepts only a successful dedicated ACP help response', () => {
+test('CLI probe accepts only a successful dedicated ACP help response', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const fake = path.join(directory, 'traecli')
   writeFileSync(fake, '#!/bin/sh\nprintf "Start the ACP server\\nUsage: trae-cli acp serve [flags]\\n"\n')
@@ -74,7 +74,7 @@ test('CLI probe accepts only a successful dedicated ACP help response', () => {
   assert.equal(result.status, 0, result.stderr)
 })
 
-test('CLI probe timeout is distinct from unsupported ACP help', () => {
+test('CLI probe timeout is distinct from unsupported ACP help', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const fake = path.join(directory, 'traecli')
   writeFileSync(fake, `#!${process.execPath}\nsetTimeout(() => {}, 60_000)\n`)
@@ -85,7 +85,7 @@ test('CLI probe timeout is distinct from unsupported ACP help', () => {
   assert.equal(result.status, 124)
 })
 
-test('CLI probe timeout escalates from TERM to KILL for the direct child', () => {
+test('CLI probe timeout escalates from TERM to KILL for the direct child', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const fake = path.join(directory, 'traecli')
   writeFileSync(fake, `#!${process.execPath}
@@ -102,7 +102,7 @@ setTimeout(() => {}, 60_000)
   assert.ok(elapsedMs >= 3_400 && elapsedMs < 6_000, `expected TERM-to-KILL bound, got ${elapsedMs}ms`)
 })
 
-test('CLI doctor is bounded and never invokes login/status', () => {
+test('CLI doctor is bounded and never invokes login/status', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const fake = path.join(directory, 'traecli')
   writeFileSync(fake, `#!${process.execPath}
@@ -116,7 +116,7 @@ setTimeout(() => {}, 60_000)
   assert.equal(result.status, 124)
 })
 
-test('CLI doctor rejects unsupported exits and oversized output safely', () => {
+test('CLI doctor rejects unsupported exits and oversized output safely', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const unsupported = path.join(directory, 'unsupported')
   writeFileSync(unsupported, '#!/bin/sh\nprintf "{}"\nexit 9\n')
@@ -147,7 +147,7 @@ setTimeout(() => {}, 60_000)
   assert.ok(Date.now() - startedAt < 4_000, 'output limit must remain hard-bounded')
 })
 
-test('CLI doctor unsupported exits do not expose child diagnostics', () => {
+test('CLI doctor unsupported exits do not expose child diagnostics', { skip: process.platform === 'win32' ? 'POSIX Trae probe fixtures; Windows Trae entry is not enabled' : false }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'traecode-helper-'))
   const unsupported = path.join(directory, 'unsupported')
   writeFileSync(unsupported, `#!${process.execPath}

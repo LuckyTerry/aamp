@@ -10,6 +10,7 @@ import {
 import { createReadStream } from 'node:fs'
 import type {
   BridgeConfig,
+  ControlledFeedbackPaths,
   FeishuAppOwner,
   FeishuDownloadedAttachment,
   FeishuTaskAttachment,
@@ -18,6 +19,7 @@ import type {
   FeishuTaskDetails,
   FeishuTaskEvent,
   FeishuTaskStepInput,
+  FeishuTaskWriteContext,
   FeishuTaskOrigin,
   FeishuTaskOriginReferResource,
   FeishuTaskOriginSourceMessage,
@@ -25,6 +27,7 @@ import type {
   FeishuTaskSubtask,
 } from './types.js'
 import { resolveLarkCliProfileCredentialsFromDisk } from '../feishu-cli.js'
+import { normalizeControlledFeedbackPaths, type ControlledTaskFeedbackTransport } from './controlled-feedback.js'
 
 type FeishuConfig = BridgeConfig['feishu']
 type Logger = Pick<Console, 'error' | 'log'>
@@ -34,7 +37,13 @@ type TaskStepPayload = {
   data: {
     task_guid: string
     task_steps: Array<{ quote: string; content: string; timestamp: number }>
+    execution_id?: string
   }
+}
+
+function executionIdData(context?: FeishuTaskWriteContext): { execution_id?: string } {
+  const executionId = context?.executionId.trim()
+  return executionId ? { execution_id: executionId } : {}
 }
 type RegisterAgentPayload = {
   params: Record<string, never>
@@ -286,11 +295,15 @@ export function normalizeFeishuTaskEvent(raw: unknown, _eventName?: string): Fei
   const timestamp = getString(record?.create_time)
   const eventTypes = getStringArray(record?.event_types) ?? []
   const commentId = getString(record?.comment_id) ?? getString(record?.commentId)
+  const executionId = getString(record?.execution_id)
+  const action = getString(record?.action)
 
   return {
     eventId,
     taskGuid,
     eventTypes: [...new Set(eventTypes)],
+    ...(executionId ? { executionId } : {}),
+    ...(action === 'START' || action === 'STOP' ? { action } : {}),
     ...(commentId ? { commentId } : {}),
     ...(timestamp ? { timestamp } : {}),
     raw,
@@ -413,6 +426,13 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
   const attachments = mapV2Attachments(record.attachments, 'task_attachment')
   const attachmentDeliveries = mapV2Attachments(record.attachment_deliveries, 'task_delivery')
   const origin = mapV2Origin(record.origin)
+  const members = getArray(record.members)?.flatMap((value) => {
+    const member = asRecord(value)
+    const id = getString(member?.id)
+    const type = getString(member?.type)
+    const role = getString(member?.role)
+    return id && type && role ? [{ id, type, role }] : []
+  })
 
   return {
     guid: getString(record.guid) ?? fallbackGuid,
@@ -422,6 +442,7 @@ function mapV2Task(record: JsonRecord, fallbackGuid: string): FeishuTaskDetails 
     ...(getString(record.url) ? { url: getString(record.url) } : {}),
     ...(status ? { status } : {}),
     ...(agentTaskStatus !== undefined ? { agentTaskStatus } : {}),
+    ...(members !== undefined ? { members } : {}),
     ...(getString(record.parent_task_guid) ? { parentGuid: getString(record.parent_task_guid) } : {}),
     ...(rrule ? { rrule } : {}),
     ...(getArray(record.reminders) ? { reminders: getArray(record.reminders) } : {}),
@@ -494,6 +515,35 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       loggerLevel: LoggerLevel.info,
       source: 'aamp-feishu-task-bridge',
     })
+  }
+
+  createControlledFeedbackTransport(paths: ControlledFeedbackPaths): ControlledTaskFeedbackTransport {
+    const normalized = normalizeControlledFeedbackPaths(paths)
+    if (!normalized) throw new Error('Controlled Task feedback paths are not configured')
+    return {
+      reportCommandResult: (body) => this.postControlledFeedback(normalized.commandResultPath, { ...body }),
+      reportExecutionState: (body) => this.postControlledFeedback(normalized.executionStatePath, { ...body }),
+    }
+  }
+
+  private async postControlledFeedback(path: string, body: Record<string, unknown>): Promise<void> {
+    const rawClient = this.client as RawClient
+    const http = rawClient.httpInstance
+    const domain = rawClient.domain
+    if (!rawClient.formatPayload || !http || !domain) {
+      throw new Error('Controlled Task feedback is unavailable in this @larksuiteoapi/node-sdk version')
+    }
+    const formatted = await rawClient.formatPayload({ params: {}, data: body })
+    const response = await withRetry(() => http.request({
+      method: 'POST',
+      url: `${domain.replace(/\/$/, '')}${path}`,
+      params: formatted.params,
+      data: formatted.data,
+      headers: formatted.headers,
+    }), this.retry, this.logger, `controlled_task_feedback task=${body.task_guid}`)
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Controlled Task feedback response is missing API code')
+    if (code !== 0) throw new Error(`Controlled Task feedback failed with API code ${code}`)
   }
 
   async registerAgent(): Promise<void> {
@@ -628,41 +678,56 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     }
   }
 
-  async commentTask(taskGuid: string, content: string): Promise<void> {
+  async commentTask(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
     const normalizedContent = normalizeFeishuWriteText(content)
     this.logger.log(`[feishu task ${taskGuid}] comment via v2`)
-    await this.commentV2Task(taskGuid, normalizedContent)
+    await this.commentV2Task(taskGuid, normalizedContent, context)
   }
 
-  async appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput): Promise<void> {
+  async appendTaskStep(taskGuid: string, step: string | FeishuTaskStepInput, context?: FeishuTaskWriteContext): Promise<void> {
     if (!normalizeTaskStepInput(step)) return
     this.logger.log(`[feishu task ${taskGuid}] append step via v2`)
-    await this.appendV2TaskSteps(taskGuid, [step])
+    await this.appendV2TaskSteps(taskGuid, [step], context)
   }
 
-  async appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void> {
+  async appendTaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>, context?: FeishuTaskWriteContext): Promise<void> {
     const stepInputs = steps.map(normalizeTaskStepInput).filter((step): step is FeishuTaskStepInput => Boolean(step))
     if (stepInputs.length === 0) return
     this.logger.log(`[feishu task ${taskGuid}] append ${stepInputs.length} step(s) via v2`)
-    await this.appendV2TaskSteps(taskGuid, stepInputs)
+    await this.appendV2TaskSteps(taskGuid, stepInputs, context)
   }
 
-  async completeTask(taskGuid: string): Promise<void> {
+  async completeTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] complete via v2 agent_task_status`)
-    await this.completeV2AgentTask(taskGuid)
+    await this.completeV2AgentTask(taskGuid, context)
   }
 
-  async markTaskInProgress(taskGuid: string): Promise<void> {
+  async markTaskInProgress(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] mark in progress via v2 agent_task_status`)
-    await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行')
+    await this.patchV2AgentTaskStatus(taskGuid, 2, '正在执行', context)
   }
 
-  async markTaskWaitingForHuman(taskGuid: string): Promise<void> {
+  async updateTaskProgress(taskGuid: string, progress: string, context?: FeishuTaskWriteContext): Promise<void> {
+    const response = await withRetry(() => this.client.task.v2.task.patch({
+      path: { task_guid: taskGuid },
+      params: { user_id_type: this.config.userIdType },
+      data: {
+        task: { agent_task_progress: progress },
+        update_fields: ['agent_task_progress'],
+        ...executionIdData(context),
+      } as never,
+    }), this.retry, this.logger, `task.patch agent_task_progress task=${taskGuid}`)
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Task progress response is missing API code')
+    if (code !== 0) throw new Error(`Task progress failed with API code ${code}`)
+  }
+
+  async markTaskWaitingForHuman(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] block via v2 agent_task_status`)
-    await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认')
+    await this.patchV2AgentTaskStatus(taskGuid, 3, '待确认', context)
   }
 
-  async appendTextDeliveries(taskGuid: string, urls: string[]): Promise<void> {
+  async appendTextDeliveries(taskGuid: string, urls: string[], context?: FeishuTaskWriteContext): Promise<void> {
     const textDeliveries = urls
       .map((url) => normalizeFeishuWriteText(url).trim())
       .filter(Boolean)
@@ -674,11 +739,12 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       data: {
         task: { text_deliveries: textDeliveries },
         update_fields: ['text_deliveries'],
+        ...executionIdData(context),
       } as never,
     }), this.retry, this.logger, `task.patch text_deliveries task=${taskGuid}`)
   }
 
-  async uploadTaskDelivery(taskGuid: string, filePath: string): Promise<void> {
+  async uploadTaskDelivery(taskGuid: string, filePath: string, context?: FeishuTaskWriteContext): Promise<void> {
     this.logger.log(`[feishu task ${taskGuid}] upload task delivery via v2 attachment`)
     await withRetry(() => this.client.task.v2.attachment.upload({
       params: { user_id_type: this.config.userIdType },
@@ -686,7 +752,8 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
         resource_type: 'task_delivery',
         resource_id: taskGuid,
         file: createReadStream(filePath),
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `attachment.upload task=${taskGuid}`)
   }
 
@@ -730,18 +797,19 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     return mapped
   }
 
-  private async commentV2Task(taskGuid: string, content: string): Promise<void> {
+  private async commentV2Task(taskGuid: string, content: string, context?: FeishuTaskWriteContext): Promise<void> {
     await withRetry(() => this.client.task.v2.comment.create({
       params: { user_id_type: this.config.userIdType },
       data: {
         content,
         resource_type: 'task',
         resource_id: taskGuid,
-      },
+        ...executionIdData(context),
+      } as never,
     }), this.retry, this.logger, `comment.create task=${taskGuid}`)
   }
 
-  private async appendV2TaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>): Promise<void> {
+  private async appendV2TaskSteps(taskGuid: string, steps: Array<string | FeishuTaskStepInput>, context?: FeishuTaskWriteContext): Promise<void> {
     const timestamp = Math.floor(Date.now() / 1000)
     const stepInputs = steps.map(normalizeTaskStepInput).filter((step): step is FeishuTaskStepInput => Boolean(step))
     if (stepInputs.length === 0) return
@@ -754,6 +822,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
           content: step.content,
           timestamp,
         })),
+        ...executionIdData(context),
       },
     }
 
@@ -794,13 +863,16 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
     })
     const requestUrl = `${rawClient.domain}/open-apis/task/v2/agent/register_agent`
     try {
-      await withRetry(() => rawClient.httpInstance.request({
+      const response = await withRetry(() => rawClient.httpInstance.request({
         method: 'POST',
         url: requestUrl,
         params: formatted.params,
         data: formatted.data,
         headers: formatted.headers,
       }), this.retry, this.logger, 'agent.register_agent')
+      const code = getNumber(asRecord(response)?.code)
+      if (code === undefined) throw new Error('Task Agent registration response is missing API code')
+      if (code !== 0) throw new Error(`Task Agent registration failed with API code ${code}`)
     } catch (error) {
       this.logger.error(
         `[feishu agent] register failed url=${requestUrl} params=${safeJsonStringify(formatted.params ?? {})} ` +
@@ -820,20 +892,23 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       params: payload.params,
       data: payload.data,
     })
-    await withRetry(() => rawClient.httpInstance.request({
+    const response = await withRetry(() => rawClient.httpInstance.request({
       method: 'POST',
       url: `${rawClient.domain}/open-apis/task/v2/task_v2/task_subscription`,
       params: formatted.params,
       data: formatted.data,
       headers: formatted.headers,
     }), this.retry, this.logger, 'task_subscription')
+    const code = getNumber(asRecord(response)?.code)
+    if (code === undefined) throw new Error('Task subscription response is missing API code')
+    if (code !== 0) throw new Error(`Task subscription failed with API code ${code}`)
   }
 
-  private async completeV2AgentTask(taskGuid: string): Promise<void> {
-    await this.patchV2AgentTaskStatus(taskGuid, 4, '执行完成')
+  private async completeV2AgentTask(taskGuid: string, context?: FeishuTaskWriteContext): Promise<void> {
+    await this.patchV2AgentTaskStatus(taskGuid, 4, '执行完成', context)
   }
 
-  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number, agentTaskProgress?: string): Promise<void> {
+  private async patchV2AgentTaskStatus(taskGuid: string, agentTaskStatus: number, agentTaskProgress?: string, context?: FeishuTaskWriteContext): Promise<void> {
     const task = {
       agent_task_status: agentTaskStatus,
       ...(agentTaskProgress ? { agent_task_progress: agentTaskProgress } : {}),
@@ -848,6 +923,7 @@ export class OapiFeishuTaskClient implements FeishuTaskClient {
       data: {
         task,
         update_fields: updateFields,
+        ...executionIdData(context),
       } as never,
     }), this.retry, this.logger, `task.patch agent_task_status task=${taskGuid}`)
   }
